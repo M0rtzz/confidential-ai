@@ -14,6 +14,7 @@ import org.secretflow.secretpad.persistence.repository.TeeObjectRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -168,6 +169,38 @@ public class TeeAssetService {
             throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "程序摘要与登记不符");
         }
         return new ProgramResult(TeeContract.VERSION, record.getKind(), digest, TeeCrypto.encode(content));
+    }
+
+    /**
+     * 跨节点同步的出口形态。
+     *
+     * <p>抽样脱敏是本地明文处理，不涉及加密；加密的边界是数据离开本节点。
+     * 已登记为密文资产的数据只以密文出节点，同步通道不再导出任何明文行。
+     */
+    public Optional<TeeCrypto.EncryptedObject> ciphertextForSync(String assetId) {
+        return assets.findByUpkAssetId(assetId).stream()
+                .max(Comparator.comparing(item -> item.getUpk().getAssetVersion()))
+                .map(asset -> store.read(asset.getObjectId()));
+    }
+
+    /** 请求方接收密文：校验摘要与 AAD 绑定后登记为密文对象，不物化任何明文行。 */
+    @Transactional
+    public String ingestSynced(String ownerId, TeeCrypto.EncryptedObject object) {
+        TeeCrypto.EncryptedObject verified = requireObject(object);
+        verifyIntegrity(verified);
+        String objectId = objects.findAll().stream()
+                .filter(item -> verified.ciphertextSha256().equals(item.getCiphertextSha256()))
+                .findFirst().map(item -> item.getUpk().getObjectId()).orElseGet(TeeAssetService::newObjectId);
+        store.write(objectId, verified);
+        objects.save(TeeObjectDO.builder()
+                .upk(new TeeObjectDO.UPK(objectId)).kind("ASSET").ownerId(ownerId)
+                .assetId(verified.assetId())
+                .keyId(verified.keyId()).keyVersion(verified.keyVersion())
+                .ciphertextSha256(verified.ciphertextSha256())
+                .sizeBytes((long) TeeCrypto.decode(verified.ciphertextB64()).length)
+                .contributorsJson(write(List.of(ownerId)))
+                .exportState(TeeContract.EXPORT_PENDING).build());
+        return objectId;
     }
 
     public TeeAssetDO requireAsset(String assetId, String assetVersion) {

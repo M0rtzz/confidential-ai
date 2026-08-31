@@ -13,6 +13,9 @@ import java.util.List;
 @Repository
 public interface TeeAssetRepository extends BaseRepository<TeeAssetDO, TeeAssetDO.UPK> {
 
+    /** 按资产标识取已登记的密文资产版本。 */
+    List<TeeAssetDO> findByUpkAssetId(String assetId);
+
     /** 按机构列出已登记的密文资产。 */
     List<TeeAssetDO> findByOwnerId(String ownerId);
 }

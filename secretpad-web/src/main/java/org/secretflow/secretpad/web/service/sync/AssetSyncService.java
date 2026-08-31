@@ -12,6 +12,8 @@ package org.secretflow.secretpad.web.service.sync;
 
 import org.secretflow.secretpad.web.service.MinioAssetStorage;
 import org.secretflow.secretpad.web.service.governance.CsvUtil;
+import org.secretflow.secretpad.web.service.tee.TeeContract;
+import org.secretflow.secretpad.web.service.tee.TeeCrypto;
 import org.secretflow.secretpad.web.service.storage.NodeDatasetStore;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -61,17 +63,20 @@ public class AssetSyncService {
     private final ObjectMapper objectMapper;
     private final MinioAssetStorage storage;
     private final NodeDatasetStore nodeDatasetStore;
+    private final org.secretflow.secretpad.web.service.tee.TeeAssetService teeAssetService;
     private final String gateway;
     private final String localNodeId;
 
     public AssetSyncService(@Qualifier("jdbcTemplate") JdbcTemplate jdbc, ObjectMapper objectMapper,
             MinioAssetStorage storage, NodeDatasetStore nodeDatasetStore,
+            org.secretflow.secretpad.web.service.tee.TeeAssetService teeAssetService,
             @Value("${secretpad.gateway:127.0.0.1:80}") String gateway,
             @Value("${secretpad.node-id:kuscia-system}") String localNodeId) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.storage = storage;
         this.nodeDatasetStore = nodeDatasetStore;
+        this.teeAssetService = teeAssetService;
         this.gateway = gateway.contains(":") ? gateway : gateway + ":80";
         this.localNodeId = localNodeId;
     }
@@ -98,6 +103,12 @@ public class AssetSyncService {
             throw new SecurityException("仅表格数据可以跨节点同步");
         }
         authorizeRequester(assetId, requesterNodeId);
+        // 已登记为密文资产的数据只以密文出节点；此处不再导出明文行。
+        var ciphertext = teeAssetService.ciphertextForSync(assetId);
+        if (ciphertext.isPresent()) {
+            byte[] payload = json(ciphertext.get()).getBytes(StandardCharsets.UTF_8);
+            return new AssetDownload(payload, sha256(payload));
+        }
         nodeDatasetStore.ensureMaterialized(assetId);
         byte[] bytes = nodeDatasetStore.exportTableCsv(assetId);
         if (bytes == null) {
@@ -190,6 +201,14 @@ public class AssetSyncService {
                 if (!dl.sha256().equalsIgnoreCase(actual)) {
                     throw new IllegalStateException("校验和不一致 provider=" + dl.sha256() + " 本地=" + actual);
                 }
+            }
+            // 密文资产不解析、不物化：本节点只登记密文对象与表结构，明文只在可信运行时内部出现。
+            TeeCrypto.EncryptedObject received = ciphertextPayload(dl.bytes());
+            if (received != null) {
+                String objectId = teeAssetService.ingestSynced(localNodeId, received);
+                writeSyncRecord(projectId, assetId, "", provider, "SCHEMA", "SYNCED", "");
+                return Map.of("syncMode", "SCHEMA", "assetId", assetId,
+                        "encrypted", Boolean.TRUE, "objectId", objectId);
             }
             List<List<String>> parsed = CsvUtil.parse(new String(dl.bytes(), StandardCharsets.UTF_8));
             if (parsed.isEmpty()) {
@@ -284,6 +303,19 @@ public class AssetSyncService {
             throw e;
         } catch (Exception e) {
             throw new IllegalStateException("跨节点同步请求失败: " + e.getMessage(), e);
+        }
+    }
+
+    /** 识别契约密文封装；不是密文时返回 null，走原有明文同步路径。 */
+    private TeeCrypto.EncryptedObject ciphertextPayload(byte[] bytes) {
+        try {
+            TeeCrypto.EncryptedObject object =
+                    objectMapper.readValue(bytes, TeeCrypto.EncryptedObject.class);
+            boolean contract = TeeContract.VERSION.equals(object.contractVersion())
+                    && TeeContract.KEY_ALGORITHM.equals(object.algorithm());
+            return contract ? object : null;
+        } catch (Exception notCiphertext) {
+            return null;
         }
     }
 

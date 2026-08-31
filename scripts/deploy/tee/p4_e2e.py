@@ -284,7 +284,15 @@ def run():
         raise Failure('台账返回了密钥材料')
     checks['ledgerWithoutKeyMaterial'] = True
 
-    # 16 吊销后立即算不动
+    # 16 跨节点同步只给密文：已登记为密文资产的数据不再以明文出节点
+    code, sync = request(f'/v1alpha1/data-assets/sync/download?assetId={asset_id}', token=client_token)
+    body = json.dumps(sync)
+    first_row = SAMPLE_CSV.splitlines()[1]
+    if first_row in body or 'id_card' in body:
+        raise Failure('跨节点同步响应中出现了明文数据行')
+    checks['syncServesNoPlaintext'] = True
+
+    # 17 吊销后立即算不动
     expect_ok('吊销密钥', '/v1alpha1/tee/keys/revoke', {
         'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'keyId': issued['keyId'],
         'keyVersion': issued['keyVersion'], 'reason': 'p4 acceptance'}, client_token)
