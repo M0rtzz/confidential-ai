@@ -1,0 +1,86 @@
+HELP.md
+target/
+# root 属主残留构建产物（容器构建产生），移出 target 目录暂存，无法由普通用户删除
+*.rootcleanup.*/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+**/.DS_Store
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+!**/src/main/**/build/
+!**/src/test/**/build/
+!**/src/test/resources/certs/
+secretpad-api/client-java-kusciaapi/**/kusciaapi/
+secretpad-api/client-java-kusciaapi/**/common/
+secretpad-api/client-java-kusciaapi/**/serving/
+secretpad-service/**/org/secretflow/proto/
+secretpad-service/**/com/secretflow/spec/v1/
+secretpad-web/config
+
+### Generated frontend bundle ###
+# data-sandbox-package/build.sh rebuilds and copies these files before Maven packaging.
+/secretpad-web/src/main/resources/static/
+
+### VS Code ###
+.vscode/
+tmp/
+log/
+config/certs
+config/server.jks
+build/**/id_rsa*
+build/**/settings.xml
+docs/_build
+
+.java-version
+/test/TEST-secretpad.xml
+/.jpb/
+/secretpad-common/src/test/resources/config/
+/secretflow-allinone-package/
+/secretflow-allinone-package-v0.6.0b0-36-g08b4e1cc.tar.gz
+/scripts/oss/secretflow-allinone-package/
+/scripts/oss/secretflow-allinone-package-v0.6.0b0-41-g9af69f63.tar.gz
+/secretpad-web/db/
+/db/secretpad.sqlite
+/db/secretpad.sqlite-shm
+/db/secretpad.sqlite-wal
+/secretpad-common/intermediate.crt
+/secretpad-common/intermediate.csr
+/secretpad-common/intermediate.key
+/secretpad-common/root.crt
+/secretpad-common/root.key
+/secretpad-common/root.srl
+/config/ownerId
+/config/ehcache-data/
+/config/kuscia/
+/secretpad-service/config/
+/secretpad-persistence/config/
+/secretpad-common/output.orc
+/config/ehcache-data/
+/config/kuscia/
+/secretpad-service/config/
+/secretpad-persistence/config/
+/secretpad-common/output.orc
+/config/ehcache-data/
+/db/secretpadQuartz.mv.db.mv.db
+/.cloudide/

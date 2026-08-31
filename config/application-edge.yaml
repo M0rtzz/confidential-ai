@@ -1,0 +1,118 @@
+flyway:
+  default:
+    locations:
+      - filesystem:./config/schema/edge
+    out-of-order: true
+    validate-on-migrate: false
+    ignore-migration-patterns:
+      - '*:missing'
+secretpad:
+  platform-type: EDGE
+  node-id: ${NODE_ID}
+  auth:
+    enabled: true
+  datasync:
+    center: true
+    p2p: false
+
+kuscia:
+  nodes:
+    - domainId: ${NODE_ID}
+      mode: lite
+      host: ${KUSCIA_API_ADDRESS:root-kuscia-master}
+      port: ${KUSCIA_API_PORT:8083}
+      protocol: ${KUSCIA_PROTOCOL:tls}
+      cert-file: config/certs/client.crt
+      key-file: config/certs/client.pem
+      token: config/certs/token
+
+data:
+  sync:
+    - org.secretflow.secretpad.persistence.entity.ProjectDO
+    - org.secretflow.secretpad.persistence.entity.ProjectNodeDO
+    - org.secretflow.secretpad.persistence.entity.NodeDO
+    - org.secretflow.secretpad.persistence.entity.NodeRouteDO
+    - org.secretflow.secretpad.persistence.entity.ProjectJobDO
+    - org.secretflow.secretpad.persistence.entity.ProjectTaskDO
+    - org.secretflow.secretpad.persistence.entity.ProjectDatatableDO
+    - org.secretflow.secretpad.persistence.entity.ProjectAssetDO
+    - org.secretflow.secretpad.persistence.entity.SandboxApprovalSyncDO
+    - org.secretflow.secretpad.persistence.entity.VoteRequestDO
+    - org.secretflow.secretpad.persistence.entity.VoteInviteDO
+    - org.secretflow.secretpad.persistence.entity.TeeDownLoadAuditConfigDO
+    - org.secretflow.secretpad.persistence.entity.NodeRouteApprovalConfigDO
+    - org.secretflow.secretpad.persistence.entity.TeeNodeDatatableManagementDO
+    - org.secretflow.secretpad.persistence.entity.ProjectModelServingDO
+    - org.secretflow.secretpad.persistence.entity.ProjectGraphNodeKusciaParamsDO
+    - org.secretflow.secretpad.persistence.entity.ProjectModelPackDO
+    - org.secretflow.secretpad.persistence.entity.FeatureTableDO
+    - org.secretflow.secretpad.persistence.entity.ProjectFeatureTableDO
+    - org.secretflow.secretpad.persistence.entity.ProjectGraphDomainDatasourceDO
+    - org.secretflow.secretpad.persistence.entity.ProjectScheduleDO
+    - org.secretflow.secretpad.persistence.entity.ProjectScheduleJobDO
+    - org.secretflow.secretpad.persistence.entity.ProjectScheduleTaskDO
+
+
+edge:
+  forward:
+    - /api/v1alpha1/project/datatable/add
+    - /api/v1alpha1/project/datatable/delete
+    - /api/v1alpha1/approval/create
+    - /api/v1alpha1/node/update
+    - /api/v1alpha1/datatable/delete
+    - /api/v1alpha1/nodeRoute/update
+    - /api/v1alpha1/nodeRoute/delete
+    - /api/v1alpha1/project/update/tableConfig
+    - /api/v1alpha1/data/create
+    - /api/v1alpha1/feature_datasource/create
+    - /api/v1alpha1/datatable/create
+  include:
+    - /api/login
+    - /api/logout
+    - /api/v1alpha1/component/i18n
+    # node
+    - /api/v1alpha1/node/get
+    - /api/v1alpha1/node/list
+    - /api/v1alpha1/node/update
+    - /api/v1alpha1/node/result/list
+    - /api/v1alpha1/node/result/detail
+    # message
+    - /api/v1alpha1/message/pending
+    - /api/v1alpha1/message/list
+    - /api/v1alpha1/message/detail
+    - /api/v1alpha1/message/reply
+    # datatable
+    - /api/v1alpha1/datatable/list
+    - /api/v1alpha1/datatable/get
+    - /api/v1alpha1/datatable/pushToTee
+    - /api/v1alpha1/datatable/delete
+    # datasource
+    - /api/v1alpha1/datasource/list
+    - /api/v1alpha1/datasource/create
+    - /api/v1alpha1/datasource/delete
+    - /api/v1alpha1/datasource/detail
+    # data
+    - /api/v1alpha1/data/upload
+    - /api/v1alpha1/data/create
+    - /api/v1alpha1/data/download
+    - /api/v1alpha1/feature_datasource/create
+    # project
+    - /api/v1alpha1/project/list
+    - /api/v1alpha1/project/datatable/add
+    - /api/v1alpha1/project/datatable/delete
+    - /api/v1alpha1/project/datatable/get
+    # nodeRoute
+    - /api/v1alpha1/nodeRoute/page
+    - /api/v1alpha1/nodeRoute/update
+    - /api/v1alpha1/nodeRoute/delete
+    - /api/v1alpha1/nodeRoute/refresh
+    - /api/v1alpha1/nodeRoute/listNode
+    - /api/v1alpha1/nodeRoute/get
+    # other
+    - /api/v1alpha1/user/remote/resetPassword
+    - /api/v1alpha1/user/updatePwd
+    - /api/v1alpha1/approval/create
+    - /api/v1alpha1/user/get
+    - /api/v1alpha1/component/list
+    - /api/v1alpha1/component/batch
+    - /api/v1alpha1/version/list

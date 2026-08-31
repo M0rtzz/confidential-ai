@@ -1,0 +1,311 @@
+server:
+  tomcat:
+    accesslog:
+      enabled: true
+      directory: /var/log/secretpad
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+    session:
+      timeout: 30m
+  http-port: 8080
+  http-port-inner: 9001
+  port: 443
+  ssl:
+    enabled: true
+    key-store: "file:./config/server.jks"
+    key-store-password: ${KEY_PASSWORD:secretpad}
+    key-alias: secretpad-server
+    key-password: ${KEY_PASSWORD:secretpad}
+    key-store-type: JKS
+  compression:
+    enabled: true
+    mime-types: text/html,text/xml,text/plain,text/css,application/javascript,application/json
+    min-response-size: 1024
+
+spring:
+  quartz:
+    job-store-type: jdbc
+    jdbc:
+      initialize-schema: never
+    properties:
+      org.quartz.scheduler.instanceName: secretpadScheduler
+      org.quartz.jobStore.isClustered: false
+  task:
+    scheduling:
+      pool:
+        size: 10
+  application:
+    name: secretpad
+  jpa:
+    database-platform: org.hibernate.community.dialect.SQLiteDialect
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+    open-in-view: false
+  datasource:
+    default:
+      driver-class-name: org.sqlite.JDBC
+      jdbc-url: jdbc:sqlite:./db/secretpad.sqlite
+    quartz:
+      driver-class-name: org.h2.Driver
+      jdbc-url: jdbc:h2:./db/secretpadQuartz.mv.db;DB_CLOSE_ON_EXIT=FALSE
+      username: sa
+      password: password
+  #datasource used for mysql
+  #spring:
+  #  task:
+  #    scheduling:
+  #      pool:
+  #        size: 10
+  #  application:
+  #    name: secretpad
+  #  jpa:
+  #    database-platform: org.hibernate.dialect.MySQLDialect
+  #    show-sql: false
+  #    properties:
+  #      hibernate:
+  #        format_sql: false
+  #  datasource:
+  #    driver-class-name: com.mysql.cj.jdbc.Driver
+  #    url: your mysql url
+  #    username:
+  #    password:
+  #    hikari:
+  #      idle-timeout: 60000
+  #      maximum-pool-size: 10
+  #      connection-timeout: 5000
+  jackson:
+    deserialization:
+      fail-on-missing-external-type-id-property: false
+      fail-on-ignored-properties: false
+      fail-on-unknown-properties: false
+    serialization:
+      fail-on-empty-beans: false
+  web:
+    locale: zh_CN # default locale, overridden by request "Accept-Language" header.
+  cache:
+    jcache:
+      config:
+        classpath:ehcache.xml
+
+flyway:
+  default:
+    locations:
+      - filesystem:./config/schema/center
+    baseline-on-migrate: true
+    out-of-order: true
+    validate-on-migrate: false
+    ignore-migration-patterns:
+      - '*:missing'
+    encoding: UTF-8
+  quartz:
+    baseline-on-migrate: true
+    validate-on-migrate: false
+    ignore-migration-patterns:
+      - '*:missing'
+    encoding: UTF-8
+    locations:
+      - filesystem:./config/schema/quartz
+
+
+springdoc:
+  api-docs:
+    enabled: ${OPENAPI_ENABLED:true}
+  swagger-ui:
+    enabled: ${SWAGGER_UI_ENABLED:true}
+management:
+  endpoint:
+    shutdown:
+      enabled: false
+    health:
+      show-details: always
+  endpoints:
+    web:
+      exposure:
+        include:
+          # prometheus monitoring indicator interface does not have security protection. If you need to use it, please inject security protection. It is best to use an intranet environment.
+          #          - prometheus
+          - health
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+kusciaapi:
+  protocol: ${KUSCIA_PROTOCOL:tls}
+
+kuscia:
+  nodes:
+    - domainId: ${NODE_ID:kuscia-system}
+      mode: master
+      host: ${KUSCIA_API_ADDRESS:root-kuscia-master}
+      port: ${KUSCIA_API_PORT:8083}
+      protocol: ${KUSCIA_PROTOCOL:tls}
+      cert-file: config/certs/client.crt
+      key-file: config/certs/client.pem
+      token: config/certs/token
+
+    - domainId: alice
+      mode: lite
+      host: ${KUSCIA_API_LITE_ALICE_ADDRESS:root-kuscia-lite-alice}
+      port: ${KUSCIA_API_PORT:8083}
+      protocol: ${KUSCIA_PROTOCOL:tls}
+      cert-file: config/certs/alice/client.crt
+      key-file: config/certs/alice/client.pem
+      token: config/certs/alice/token
+
+    - domainId: bob
+      mode: lite
+      host: ${KUSCIA_API_LITE_BOB_ADDRESS:root-kuscia-lite-bob}
+      port: ${KUSCIA_API_PORT:8083}
+      protocol: ${KUSCIA_PROTOCOL:tls}
+      cert-file: config/certs/bob/client.crt
+      key-file: config/certs/bob/client.pem
+      token: config/certs/bob/token
+
+
+job:
+  max-parallelism: 1
+
+secretpad:
+  logs:
+    path: ${SECRETPAD_LOG_PATH:/app/log}
+  deploy-mode: ${DEPLOY_MODE:ALL-IN-ONE} # MPC TEE ALL-IN-ONE
+  platform-type: CENTER
+  node-id: kuscia-system
+  center-platform-service: secretpad.master.svc
+  gateway: ${KUSCIA_GW_ADDRESS:127.0.0.1:80}
+  auth:
+    enabled: true
+    pad_name: ${SECRETPAD_USER_NAME}
+    pad_pwd: ${SECRETPAD_PASSWORD}
+  response:
+    extra-headers:
+      Content-Security-Policy: "base-uri 'self';frame-src 'self';worker-src blob: 'self' data:;object-src 'self';"
+  upload-file:
+    max-file-size: -1    # -1 means not limit, e.g.  200MB, 1GB
+    max-request-size: -1 # -1 means not limit, e.g.  200MB, 1GB
+  data:
+    dir-path: /app/data/
+  data-sandbox:
+    # Enable only after a Jupyter/IDE AppImage is registered in Kuscia.
+    kuscia:
+      enabled: ${DATA_SANDBOX_KUSCIA_ENABLED:false}
+    snapshot-root: ${DATA_SANDBOX_SNAPSHOT_ROOT:/nas/Misc/data-sandbox/snapshots}
+    backup-root: ${DATA_SANDBOX_BACKUP_ROOT:/nas/Misc/data-sandbox/backups}
+    status-sync-ms: ${DATA_SANDBOX_STATUS_SYNC_MS:30000}
+    dev-endpoint:
+      # 开发端点一次性 token 有效期（分钟），每次进入重置
+      token-ttl-minutes: ${DATA_SANDBOX_DEV_TOKEN_TTL:30}
+      # 开发端点跳板转发超时（秒）
+      proxy-timeout-seconds: ${DATA_SANDBOX_PROXY_TIMEOUT:30}
+    # 节点真实资源指标采集（Kuscia Prometheus 端点 :9091/metrics，node_exporter/DCGM）
+    metrics:
+      # 采集开关；URL 形如 http://<kuscia容器名>:9091
+      enabled: ${DATA_SANDBOX_METRICS_ENABLED:false}
+      url: ${DATA_SANDBOX_METRICS_URL:}
+      # 采集周期（毫秒）
+      interval-ms: ${DATA_SANDBOX_METRICS_INTERVAL:30000}
+    # Z-02 告警阈值
+    alerts:
+      # 单用户配额使用率告警阈值（%）
+      quota-warning-percent: ${DATA_SANDBOX_ALERT_QUOTA_PERCENT:90}
+    # Z-03 沙箱资源申请与审批
+    approval:
+      # 门禁开关：开启时创建/续期/回收必须提交申请单且审批通过才能执行（admin/运营方直通）
+      required: ${SECRETPAD_DATA_SANDBOX_APPROVAL_REQUIRED:true}
+      # 审批通过后自动执行轮询周期（毫秒）
+      executor-interval-ms: ${SECRETPAD_DATA_SANDBOX_APPROVAL_EXECUTOR_INTERVAL:10000}
+      # 执行失败自动重试上限（超过置 FAILED，可人工 RETRY）
+      max-retries: ${SECRETPAD_DATA_SANDBOX_APPROVAL_MAX_RETRIES:3}
+  datasync:
+    center: true
+    p2p: false
+  version:
+    secretpad-image: ${SECRETPAD_IMAGE:0.5.0b0}
+    kuscia-image: ${KUSCIA_IMAGE:0.6.0b0}
+    secretflow-image: ${SECRETFLOW_IMAGE:1.4.0b0}
+    secretflow-serving-image: ${SECRETFLOW_SERVING_IMAGE:0.2.0b0}
+    tee-app-image: ${TEE_APP_IMAGE:0.1.0b0}
+    tee-dm-image: ${TEE_DM_IMAGE:0.1.0b0}
+    capsule-manager-sim-image: ${CAPSULE_MANAGER_SIM_IMAGE:0.1.2b0}
+    data-proxy-image: ${DATA_PROXY_IMAGE:0.1.0b0}
+    scql-image: ${SCQL_IMAGE:0.1.0b0}
+
+  component:
+    hide:
+      - secretflow/io/read_data:1.0.0
+      - secretflow/io/write_data:1.0.0
+      - secretflow/io/identity:1.0.0
+      - secretflow/io/data_sink:1.0.0
+      - secretflow/io/data_source:1.0.0
+      - secretflow/model/model_export:1.0.0
+      - secretflow/ml.train/slnn_train:0.0.1
+      - secretflow/ml.predict/slnn_predict:0.0.2
+  data-proxy:
+    enabled: ${DATAPROXY_ENABLE:true}
+  scql:
+    enabled: ${SCQL_ENABLE:true}
+    component: secretflow/stats/scql_analysis:1.0.0
+
+
+sfclusterDesc:
+  deviceConfig:
+    spu: "{\"runtime_config\":{\"protocol\":\"SEMI2K\",\"field\":\"FM128\"},\"link_desc\":{\"connect_retry_times\":60,\"connect_retry_interval_ms\":1000,\"brpc_channel_protocol\":\"http\",\"brpc_channel_connection_type\":\"pooled\",\"recv_timeout_ms\":1200000,\"http_timeout_ms\":1200000}}"
+    heu: "{\"mode\": \"PHEU\", \"schema\": \"paillier\", \"key_size\": 2048}"
+  rayFedConfig:
+    crossSiloCommBackend: "brpc_link"
+
+tee:
+  capsule-manager: capsule-manager.#.svc
+
+data:
+  sync:
+    - org.secretflow.secretpad.persistence.entity.ProjectDO
+    - org.secretflow.secretpad.persistence.entity.ProjectNodeDO
+    - org.secretflow.secretpad.persistence.entity.NodeDO
+    - org.secretflow.secretpad.persistence.entity.NodeRouteDO
+    - org.secretflow.secretpad.persistence.entity.ProjectJobDO
+    - org.secretflow.secretpad.persistence.entity.ProjectTaskDO
+    - org.secretflow.secretpad.persistence.entity.ProjectDatatableDO
+    - org.secretflow.secretpad.persistence.entity.ProjectAssetDO
+    - org.secretflow.secretpad.persistence.entity.SandboxApprovalSyncDO
+    - org.secretflow.secretpad.persistence.entity.VoteRequestDO
+    - org.secretflow.secretpad.persistence.entity.VoteInviteDO
+    - org.secretflow.secretpad.persistence.entity.TeeDownLoadAuditConfigDO
+    - org.secretflow.secretpad.persistence.entity.NodeRouteApprovalConfigDO
+    - org.secretflow.secretpad.persistence.entity.TeeNodeDatatableManagementDO
+    - org.secretflow.secretpad.persistence.entity.ProjectModelServingDO
+    - org.secretflow.secretpad.persistence.entity.ProjectGraphNodeKusciaParamsDO
+    - org.secretflow.secretpad.persistence.entity.ProjectModelPackDO
+    - org.secretflow.secretpad.persistence.entity.FeatureTableDO
+    - org.secretflow.secretpad.persistence.entity.ProjectFeatureTableDO
+    - org.secretflow.secretpad.persistence.entity.ProjectGraphDomainDatasourceDO
+    - org.secretflow.secretpad.persistence.entity.ProjectScheduleDO
+    - org.secretflow.secretpad.persistence.entity.ProjectScheduleJobDO
+    - org.secretflow.secretpad.persistence.entity.ProjectScheduleTaskDO
+
+
+inner-port:
+  path:
+    - /api/v1alpha1/vote_sync/create
+    - /api/v1alpha1/user/node/resetPassword
+    - /sync
+    - /api/v1alpha1/data/sync
+# ip block config (None of them are allowed in the configured IP list)
+ip:
+  block:
+    enable: true
+    list:
+      - 0.0.0.0/32
+      - 127.0.0.1/8
+      - 10.0.0.0/8
+      - 11.0.0.0/8
+      - 30.0.0.0/8
+      - 100.64.0.0/10
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 33.0.0.0/8

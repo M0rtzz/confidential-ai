@@ -1,0 +1,49 @@
+job:
+  sync:
+    enabled: false
+  max-parallelism: 1
+
+
+secretpad:
+  logs:
+    path: ${SECRETPAD_LOG_PATH:${user.home}/secretpad/logs}
+  platform-type: TEST
+  auth:
+    enabled: false
+  response:
+    extra-headers:
+      Content-Security-Policy: "base-uri 'self';frame-src 'self';worker-src blob: 'self' data:;object-src 'self';"
+  upload-file:
+    max-file-size: -1    # -1 means not limit, e.g.  200MB, 1GB
+    max-request-size: -1 # -1 means not limit, e.g.  200MB, 1GB
+  data:
+    dir-path: ../tmp/data/
+  certs:
+    dir-path: ../tmp/certs/
+  datasync:
+    center: true
+    p2p: false
+  tee: false
+
+data:
+  sync:
+    - org.secretflow.secretpad.persistence.entity.ProjectDO
+    - org.secretflow.secretpad.persistence.entity.ProjectGraphDO
+    - org.secretflow.secretpad.persistence.entity.ProjectGraphNodeDO
+    - org.secretflow.secretpad.persistence.entity.ProjectJobDO
+    - org.secretflow.secretpad.persistence.entity.ProjectTaskDO
+    - org.secretflow.secretpad.persistence.entity.ProjectDatatableDO
+    - org.secretflow.secretpad.persistence.entity.ProjectAssetDO
+    - org.secretflow.secretpad.persistence.entity.SandboxApprovalSyncDO
+    - org.secretflow.secretpad.persistence.entity.VoteRequestDO
+    - org.secretflow.secretpad.persistence.entity.VoteInviteDO
+    - org.secretflow.secretpad.persistence.entity.ProjectApprovalConfigDO
+    - org.secretflow.secretpad.persistence.entity.ProjectNodeDO
+    - org.secretflow.secretpad.persistence.entity.ProjectGraphNodeKusciaParamsDO
+    - org.secretflow.secretpad.persistence.entity.ProjectModelServingDO
+    - org.secretflow.secretpad.persistence.entity.ProjectModelPackDO
+    - org.secretflow.secretpad.persistence.entity.ProjectFeatureTableDO
+    - org.secretflow.secretpad.persistence.entity.ProjectGraphDomainDatasourceDO
+    - org.secretflow.secretpad.persistence.entity.ProjectScheduleDO
+    - org.secretflow.secretpad.persistence.entity.ProjectScheduleJobDO
+    - org.secretflow.secretpad.persistence.entity.ProjectScheduleTaskDO

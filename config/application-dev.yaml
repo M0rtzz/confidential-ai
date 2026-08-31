@@ -1,0 +1,44 @@
+spring:
+  jpa:
+    show-sql: false
+
+springdoc:
+  api-docs:
+    enabled: true
+
+secretpad:
+  platform-type: CENTER    # CENTER  EDGE  AUTONOMY
+  deploy-mode: ${DEPLOY_MODE:ALL-IN-ONE} # MPC TEE ALL-IN-ONE
+  node-id: ${NODE_ID:kuscia-system} # install.sh -n
+  gateway: ${KUSCIA_GW_ADDRESS:127.0.0.1:18301} # install.sh -q envoy port (used in autonomy or master or edge mode)
+  logs:
+    path: ../log
+
+kuscia:
+  nodes:
+    - domainId: ${NODE_ID:kuscia-system}
+      mode: master
+      host: ${KUSCIA_API_ADDRESS:root-kuscia-master}
+      port: ${KUSCIA_API_PORT:18083}
+      protocol: ${KUSCIA_PROTOCOL:tls}
+      cert-file: config/certs/client.crt
+      key-file: config/certs/client.pem
+      token: config/certs/token
+
+    - domainId: alice
+      mode: lite
+      host: ${KUSCIA_API_ADDRESS:root-kuscia-lite-alice}
+      port: ${KUSCIA_API_PORT:28083}
+      protocol: ${KUSCIA_PROTOCOL:tls}
+      cert-file: config/certs/alice/client.crt
+      key-file: config/certs/alice/client.pem
+      token: config/certs/alice/token
+
+    - domainId: bob
+      mode: lite
+      host: ${KUSCIA_API_ADDRESS:root-kuscia-lite-bob}
+      port: ${KUSCIA_API_PORT:38083}
+      protocol: ${KUSCIA_PROTOCOL:tls}
+      cert-file: config/certs/bob/client.crt
+      key-file: config/certs/bob/client.pem
+      token: config/certs/bob/token

@@ -1,0 +1,327 @@
+// Copyright 2023 Ant Group Co., Ltd.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package kuscia.proto.api.v1alpha1.kusciaapi;
+
+import "kuscia/proto/api/v1alpha1/common.proto";
+
+option go_package = "github.com/secretflow/kuscia/proto/api/v1alpha1/kusciaapi";
+option java_package = "org.secretflow.v1alpha1.kusciaapi";
+
+service JobService {
+  rpc CreateJob(CreateJobRequest) returns (CreateJobResponse);
+
+  rpc QueryJob(QueryJobRequest) returns (QueryJobResponse);
+
+  rpc BatchQueryJobStatus(BatchQueryJobStatusRequest) returns (BatchQueryJobStatusResponse);
+
+  rpc StopJob(StopJobRequest)returns (StopJobResponse);
+
+  rpc RestartJob(RestartJobRequest)returns (RestartJobResponse);
+
+  rpc SuspendJob(SuspendJobRequest)returns (SuspendJobResponse);
+
+  rpc CancelJob(CancelJobRequest)returns (CancelJobResponse);
+
+  rpc DeleteJob(DeleteJobRequest) returns (DeleteJobResponse);
+
+  rpc WatchJob(WatchJobRequest) returns (stream WatchJobEventResponse);
+
+  rpc ApproveJob(ApproveJobRequest) returns (ApproveJobResponse);
+}
+
+message CreateJobRequest {
+  RequestHeader header = 1;
+  string job_id = 2;
+  string initiator = 3; // 发起方
+  int32 max_parallelism = 4; // 并发度
+  repeated Task tasks = 5; // 任务参数
+  map<string, string> custom_fields = 6; // 自定义参数
+}
+
+message CreateJobResponse {
+  Status status = 1;
+  CreateJobResponseData data = 2;
+}
+
+message CreateJobResponseData {
+  string job_id = 1;
+}
+
+message Task {
+  string app_image = 1;
+  repeated Party parties = 2; // 参与方
+  string alias = 3;
+  string task_id = 4;
+  repeated string dependencies = 5; // dependencies tasks
+  string task_input_config = 6; // task input config
+  int32 priority = 7;
+}
+
+message Party {
+  string domain_id = 1;
+  string role = 2; // server or client
+  JobResource resources = 3; // resource config for parties
+}
+
+message JobResource {
+  string cpu = 1; // hard ceiling of CPU/virtual cores that the containers of certain party can use
+  string memory = 2; // limited RAMs that the containers of certain party can use
+  string gpu = 4; // NVIDIA GPU count
+  string ephemeral_storage = 5; // writable storage limit, for example 20Gi
+}
+
+message DeleteJobRequest {
+  RequestHeader header = 1;
+  string job_id = 2;
+}
+
+message DeleteJobResponse {
+  Status status = 1;
+  DeleteJobResponseData data = 2;
+}
+
+message DeleteJobResponseData {
+  string job_id = 1;
+}
+
+message StopJobRequest {
+  RequestHeader header = 1;
+  string job_id = 2;
+  string reason = 3;
+}
+
+message StopJobResponse {
+  Status status = 1;
+  StopJobResponseData data = 2;
+}
+
+message StopJobResponseData {
+  string job_id = 1;
+}
+
+message SuspendJobRequest {
+  RequestHeader header = 1;
+  string job_id = 2;
+  string reason = 3;
+}
+
+message SuspendJobResponse {
+  Status status = 1;
+  SuspendJobResponseData data = 2;
+}
+
+message SuspendJobResponseData {
+  string job_id = 1;
+}
+
+message RestartJobRequest {
+  RequestHeader header = 1;
+  string job_id = 2;
+  string reason = 3;
+}
+
+message RestartJobResponse {
+  Status status = 1;
+  RestartJobResponseData data = 2;
+}
+
+message RestartJobResponseData {
+  string job_id = 1;
+}
+
+message CancelJobRequest {
+  RequestHeader header = 1;
+  string job_id = 2;
+  string reason = 3;
+}
+
+message CancelJobResponse {
+  Status status = 1;
+  CancelJobResponseData data = 2;
+}
+
+message CancelJobResponseData {
+  string job_id = 1;
+}
+
+message QueryJobRequest {
+  RequestHeader header = 1;
+  string job_id = 2;
+}
+
+message QueryJobResponse {
+  Status status = 1;
+  QueryJobResponseData data = 2;
+}
+
+message QueryJobResponseData {
+  string job_id = 1;
+  string initiator = 2;
+  int32 max_parallelism = 3;
+  repeated TaskConfig tasks = 4;
+  JobStatusDetail status = 5;
+  map<string, string> custom_fields = 6;
+}
+
+message ApproveJobRequest {
+  string job_id = 1;
+  ApproveResult result = 2;
+  string reason = 3;
+}
+
+message ApproveJobResponse {
+  Status status = 1;
+  ApproveJobResponseData data = 2;
+}
+
+message ApproveJobResponseData {
+  string job_id = 1;
+}
+
+message JobStatusDetail {
+  string state = 1;
+  string err_msg = 2;
+  string create_time = 3;
+  string start_time = 4;
+  string end_time = 5;
+  repeated TaskStatus tasks = 6;
+  repeated PartyStageStatus stage_status_list = 7;
+  repeated PartyApproveStatus approve_status_list = 8;
+}
+
+message TaskConfig {
+  string app_image = 1; // 镜像
+  repeated Party parties = 2; // 参与方
+  string alias = 3;
+  string task_id = 4;
+  repeated string dependencies = 5; // dependencies tasks
+  string task_input_config = 6; // task input config
+  int32 priority = 7;
+}
+
+message PartyStageStatus {
+  string domain_id = 1;
+  string state = 2;
+}
+
+message PartyApproveStatus {
+  string domain_id = 1;
+  string state = 2;
+}
+
+message TaskStatus {
+  string task_id = 1;
+  string state = 2;
+  string err_msg = 3;
+  string create_time = 4;
+  string start_time = 5;
+  string end_time = 6;
+  repeated PartyStatus parties = 7;
+  string alias = 8;
+  float progress = 9;
+}
+
+message PartyStatus {
+  string domain_id = 1;
+  string state = 2;
+  string err_msg = 3;
+  repeated JobPartyEndpoint endpoints = 4;
+  // repeated ApprovalDetail  approval_details= 5;
+}
+
+message JobState {
+  enum State {
+    Unknown = 0;
+    Pending = 1;
+    Running = 2;
+    Succeeded = 3;
+    Failed = 4;           // the job run failed
+    AwaitingApproval = 5; // await the partner to approval the job
+    ApprovalReject = 6;   // partner reject the job
+    Cancelled = 7;        // the job cannot start again when it was cancelled
+    Suspended = 8;        // the job was suspended
+  }
+}
+
+enum ApproveResult {
+  APPROVE_RESULT_UNKNOWN = 0;
+  APPROVE_RESULT_ACCEPT = 1;
+  APPROVE_RESULT_REJECT = 2;
+}
+
+message BatchQueryJobStatusRequest {
+  RequestHeader header = 1;
+  repeated string job_ids = 2;
+}
+
+message BatchQueryJobStatusResponse {
+  Status status = 1;
+  BatchQueryJobStatusResponseData data = 2;
+}
+
+message BatchQueryJobStatusResponseData {
+  repeated JobStatus jobs = 1;
+}
+
+message JobStatusResponse {
+  Status status = 1;
+  JobStatusResponseData data = 2;
+}
+
+message JobStatusResponseData {
+  string job_id = 1;
+  JobStatusDetail status = 2;
+}
+
+message JobStatus {
+  string job_id = 1;
+  JobStatusDetail status = 2;
+}
+
+message WatchJobRequest {
+  RequestHeader header = 1;
+  int64 timeout_seconds = 2;
+}
+
+message WatchJobEventResponse {
+  EventType type = 1;
+  JobStatus object = 2;
+}
+
+enum EventType {
+  ADDED = 0;
+  MODIFIED = 1;
+  DELETED = 2;
+  ERROR = 3;
+  HEARTBEAT = 4;
+}
+
+message JobPartyEndpoint {
+  // service port name which defined in AppImage container port.
+  string port_name = 1;
+  // service scope which defined in AppImage container port.
+  string scope = 2;
+  // service access address.
+  string endpoint = 3;
+}
+
+// message ApprovalDetail {
+//     string domain_id = 1;
+//     string role = 2;
+//     string approval_result = 3; // AwaitingApproval,ApprovalAccept,ApprovalReject
+//     string reason = 4; // describe the reason of the approval result
+// }

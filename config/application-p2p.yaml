@@ -1,0 +1,116 @@
+flyway:
+  default:
+    locations:
+      - filesystem:./config/schema/p2p
+    out-of-order: true
+    validate-on-migrate: false
+    ignore-migration-patterns:
+      - '*:missing'
+
+secretpad:
+  deploy-mode: ${DEPLOY_MODE:MPC} # MPC TEE ALL-IN-ONE
+  platform-type: AUTONOMY
+  node-id: ${NODE_ID}
+  center-platform-service: secretpad.master.svc
+  p2p-platform-service: secretpad
+  inst-name: ${INST_NAME} #  input at install.sh
+  auth:
+    enabled: true
+  data:
+    host-path: ${HOST_PATH}
+    dir-path: /app/data/
+  certs:
+    dir-path: /app/config/certs/
+
+  datasync:
+    center: false
+    p2p: true
+    # fastFailedPolicy :   Throw an exception, log it, and don't try again
+    # retryPolicy      :   Keep trying until you succeed
+    retry: fastFailedPolicy
+
+kuscia:
+  nodes:
+    - domainId: ${NODE_ID}
+      mode: p2p
+      host: ${KUSCIA_API_ADDRESS:root-kuscia-autonomy}
+      port: ${KUSCIA_API_PORT:8083}
+      protocol: ${KUSCIA_PROTOCOL:tls}
+      cert-file: config/certs/client.crt
+      key-file: config/certs/client.pem
+      token: config/certs/token
+
+data:
+  sync:
+    - org.secretflow.secretpad.persistence.entity.ProjectDO
+    - org.secretflow.secretpad.persistence.entity.ProjectGraphDO
+    - org.secretflow.secretpad.persistence.entity.ProjectGraphNodeDO
+    - org.secretflow.secretpad.persistence.entity.ProjectJobDO
+    - org.secretflow.secretpad.persistence.entity.ProjectDatatableDO
+    - org.secretflow.secretpad.persistence.entity.ProjectAssetDO
+    - org.secretflow.secretpad.persistence.entity.SandboxApprovalSyncDO
+    - org.secretflow.secretpad.persistence.entity.VoteRequestDO
+    - org.secretflow.secretpad.persistence.entity.VoteInviteDO
+    - org.secretflow.secretpad.persistence.entity.ProjectApprovalConfigDO
+    - org.secretflow.secretpad.persistence.entity.ProjectNodeDO
+    - org.secretflow.secretpad.persistence.entity.ProjectGraphNodeKusciaParamsDO
+    - org.secretflow.secretpad.persistence.entity.ProjectModelServingDO
+    - org.secretflow.secretpad.persistence.entity.ProjectModelPackDO
+    - org.secretflow.secretpad.persistence.entity.ProjectFeatureTableDO
+    - org.secretflow.secretpad.persistence.entity.ProjectGraphDomainDatasourceDO
+    - org.secretflow.secretpad.persistence.entity.ProjectInstDO
+    - org.secretflow.secretpad.persistence.entity.ProjectScheduleDO
+    - org.secretflow.secretpad.persistence.entity.ProjectScheduleJobDO
+    - org.secretflow.secretpad.persistence.entity.ProjectScheduleTaskDO
+
+# path which do not use in this mode ,config this mvc return 404 to user
+# @see DynamicBeanRegisterInit
+unregister-mapping:
+  path:
+    - /sync
+    - /api/v1alpha1/user/node/resetPassword
+    - /api/v1alpha1/user/remote/resetPassword
+    - /api/v1alpha1/project/inst/add
+    - /api/v1alpha1/project/node/add
+    - /api/v1alpha1/project/delete
+    - /api/v1alpha1/approval/pull/status
+    - /api/v1alpha1/vote_sync/create
+    - /api/v1alpha1/datatable/pushToTee
+    - /api/v1alpha1/project/create
+    - /api/v1alpha1/project/list
+    - /api/v1alpha1/project/update
+    - /api/v1alpha1/project/tee/list
+    - /api/v1alpha1/node/create
+    - /api/v1alpha1/node/delete
+    - /api/v1alpha1/node/newToken
+    - /api/v1alpha1/node/refresh
+    - /api/v1alpha1/node/token
+    - /api/v1alpha1/node/page
+    - /api/v1alpha1/nodeRoute/delete
+    - /api/v1alpha1/nodeRoute/listNode
+
+#the path in p2p mode will not be interception,let go
+white-list:
+  paths:
+    - /api/v1alpha1/p2p/node/delete
+    - /api/v1alpha1/p2p/project/update
+    - /api/v1alpha1/graph/list
+    - /api/v1alpha1/project/get
+    - /api/v1alpha1/project/job/list
+    - /api/v1alpha1/project/job/get
+    - /api/v1alpha1/project/datatable/get
+    - /api/v1alpha1/project/job/task/output
+    - /api/v1alpha1/project/job/task/logs
+    - /api/v1alpha1/data/create
+    - /api/v1alpha1/datatable/list
+    - /api/v1alpha1/graph/node/status
+    - /api/v1alpha1/graph/detail
+    - /api/v1alpha1/graph/node/output
+    - /api/v1alpha1/graph/node/logs
+    - /api/v1alpha1/inst/get
+    - /api/v1alpha1/inst/node/list
+    - /api/v1alpha1/inst/node/add
+    - /api/v1alpha1/inst/node/token
+    - /api/v1alpha1/inst/node/newToken
+    - /api/v1alpha1/inst/node/delete
+    - /api/v1alpha1/inst/node/register
