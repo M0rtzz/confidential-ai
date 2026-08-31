@@ -113,6 +113,8 @@ def issue(ca, directory, cn, server=False, expired=False):
 def certificates():
     make_ca(PKI / 'external-ca', 'tee-a-external-ca')
     make_ca(PKI / 'upstream-ca', 'tee-a-upstream-ca')
+    # 平台与密钥适配服务之间使用独立信任域；CM 的外部客户端证书不能用于调用适配接口。
+    make_ca(PKI / 'adapter-ca', 'tee-a-adapter-ca')
     for name in INSTANCES:
         issue(PKI / 'external-ca', RUNTIME / name / 'tee/identity', name)
         issue(PKI / 'external-ca', RUNTIME / name / 'tee/probe-cert', 'probe-' + name)
@@ -120,6 +122,14 @@ def certificates():
     issue(PKI / 'upstream-ca', CENTER / 'cm-server-cert', 'capsule-internal.tee-a.test', server=True)
     issue(PKI / 'upstream-ca', CENTER / 'gateway-upstream-cert', 'tee-a-gateway-upstream')
     issue(PKI / 'external-ca', CENTER / 'workload-cert', 'probe-tee-a-workload')
+    # 适配服务访问 CM 的传输身份，同时作为中心密钥服务在 CM 中的签名身份。
+    issue(PKI / 'external-ca', CENTER / 'adapter-identity', 'adapter-tee-a-center')
+    # 中心签名任务的身份；P6 用它签发 tee_task_jws，本阶段只登记受信证书。
+    issue(PKI / 'external-ca', CENTER / 'task-signer', 'tee-a-task-signer')
+    issue(PKI / 'adapter-ca', CENTER / 'adapter-server',
+          'data-sandbox-dev-tee-a-center-key-adapter', server=True)
+    for name in INSTANCES:
+        issue(PKI / 'adapter-ca', RUNTIME / name / 'tee/adapter-client', 'platform-' + name)
     issue(PKI / 'external-ca', CENTER / 'cm-master-key', 'tee-a-cm-master')
     (CENTER / 'cm-client-ca').mkdir(exist_ok=True)
     shutil.copy2(PKI / 'upstream-ca/ca.crt', CENTER / 'cm-client-ca/ca.crt')
@@ -141,6 +151,63 @@ def certificates():
     if registry.exists() and json.loads(registry.read_text()) != identities:
         raise RuntimeError('机构登记与已有证书不一致，拒绝覆盖身份')
     if not registry.exists(): atomic(registry, identities)
+    publish_identities(identities)
+
+
+def der_base64(certificate):
+    return base64.b64encode(subprocess.check_output(
+        ['openssl', 'x509', '-in', str(certificate), '-outform', 'DER'])).decode()
+
+
+def publish_identities(identities, owners=None):
+    """把契约层需要的公开证书发布到各实例；只含公钥材料，不含任何私钥。
+
+    机构标识由平台首次启动时生成，证书阶段还取不到；此时先按实例名发布，
+    平台起来后用 publish-identities 按实际 ownerId 重新发布。
+    """
+    published = {'taskSigningCertificates': {
+        'tee-a-center-1': der_base64(CENTER / 'task-signer/client.crt')}}
+    for name, value in identities.items():
+        published[name] = value
+        if owners and name in owners:
+            published[owners[name]] = dict(value, instance=name)
+    workload = (CENTER / 'workload-cert/client.crt').read_text()
+    for name in INSTANCES:
+        target = RUNTIME / name / 'identity-pub'
+        target.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target.chmod(0o700)
+        atomic(target / 'registry.json', published, 0o644)
+        atomic(target / 'workload.crt', workload, 0o644)
+
+
+def platform_login(name, end_role=None):
+    """用实例自己的凭据登录，取回会话与机构标识；凭据只从 600 运行目录读取。"""
+    import hashlib
+    import urllib.request
+    env = dict(line.split('=', 1) for line in
+               (RUNTIME / name / 'secretpad.env').read_text().splitlines() if '=' in line)
+    payload = {'name': env['SECRETPAD_USER_NAME'],
+               'passwordHash': hashlib.sha256(env['SECRETPAD_PASSWORD'].encode()).hexdigest()}
+    if end_role:
+        payload['endRole'] = end_role
+    request = urllib.request.Request(
+        f'http://127.0.0.1:{INSTANCES[name] * 100 + 88}/api/login',
+        data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        body = json.load(response)
+    if body.get('status', {}).get('code') != 0:
+        raise RuntimeError('实例登录失败：' + name)
+    return body['data']
+
+
+def publish_live_identities():
+    """平台启动后按实际机构标识重新发布登记；不改动任何私钥或已有机构身份。"""
+    identities = json.loads((CENTER / 'identity-registry.json').read_text())
+    owners = {}
+    for name in INSTANCES:
+        owners[name] = platform_login(name, 'CLIENT')['ownerId']
+    publish_identities(identities, owners)
+    print('已按实际机构标识发布公开证书登记：' + '、'.join(sorted(owners.values())))
     print('独立机构、服务及探测证书已准备；私钥未输出，未写入普通平台目录。')
 
 
@@ -395,6 +462,30 @@ def base_up(repair_startup=False):
     record_start()
 
 
+def adapter_up():
+    """中心密钥适配服务；复用已验证的探测镜像与 SDK，只挂载脚本与证书。"""
+    ref = checked_image('probe')
+    ctr = 'data-sandbox-dev-tee-a-center-key-adapter'
+    current = managed(ctr)
+    if current:
+        if current['Image'] == image_info(ref)['Id'] and current['State']['Running']: return
+        raise RuntimeError('适配服务已存在且状态不同，需单独授权替换')
+    network = 'data-sandbox-dev-tee-a-center'
+    managed(network, 'network') or (_ for _ in ()).throw(RuntimeError('中心网络不存在'))
+    script = ROOT / 'scripts/deploy/tee/key_adapter.py'
+    command = ['docker', 'run', '-d', '--pull=never', '--name', ctr, '--network', network,
+               '--user', f'{os.getuid()}:{os.getgid()}',
+               '--restart', 'unless-stopped', '--read-only', '--cap-drop=ALL', '--security-opt', 'no-new-privileges',
+               '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
+               '--add-host', 'capsule.tee-a.test:222.20.99.38',
+               '-e', 'TEE_CAPSULE_ENDPOINT=capsule.tee-a.test:19685',
+               '-v', str(CENTER / 'adapter-identity') + ':/certs:ro',
+               '-v', str(CENTER / 'adapter-server') + ':/server:ro',
+               '-v', str(script) + ':/opt/p4/key_adapter.py:ro']
+    for k, v in labels().items(): command += ['--label', f'{k}={v}']
+    run(*command, ref, 'python', '/opt/p4/key_adapter.py')
+
+
 def probe_up(name):
     ref = checked_image('probe')
     ctr = f'data-sandbox-dev-{name}-tee-probe'
@@ -541,8 +632,12 @@ def pair():
     for name in INSTANCES:
         managed(f'data-sandbox-dev-{name}-secretpad')
         env = dict(line.split('=', 1) for line in (RUNTIME / name / 'secretpad.env').read_text().splitlines() if '=' in line)
-        login = api(name, 'login', {'name': env['SECRETPAD_USER_NAME'],
-                    'passwordHash': hashlib.sha256(env['SECRETPAD_PASSWORD'].encode()).hexdigest()})
+        # 中心端双端可用，按契约登录必须显式选择端；单端实例可省略。
+        credentials = {'name': env['SECRETPAD_USER_NAME'],
+                       'passwordHash': hashlib.sha256(env['SECRETPAD_PASSWORD'].encode()).hexdigest()}
+        if name == 'tee-a-center':
+            credentials['endRole'] = 'CENTER'
+        login = api(name, 'login', credentials)
         sessions[name] = login['token']
     invitations = {}
     for name in INSTANCES:
@@ -570,7 +665,9 @@ def dispatch(args):
     if args.command == 'build-components':
         from component_build import build
         return build(args.image_key)
-    if args.command in ['verify-tls', 'verify-native', 'verify-persistence', 'verify-environment', 'verify-isolation', 'verify-repeat']:
+    if args.command == 'adapter-up': return adapter_up()
+    if args.command == 'publish-identities': return publish_live_identities()
+    if args.command in ['verify-tls', 'verify-native', 'verify-persistence', 'verify-environment', 'verify-isolation', 'verify-repeat', 'verify-release', 'verify-p4']:
         from verification import verify
         return verify(args.command)
     raise RuntimeError('未实现的操作')

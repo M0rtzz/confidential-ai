@@ -11,7 +11,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequiredArgsConstructor
 @RequestMapping("/api/v1alpha1/tee")
-public class TeeEnvironmentController {
+public class TeeEnvironmentController implements TeeApi {
     private final TeeEnvironmentService environmentService;
 
     @GetMapping("/environment")

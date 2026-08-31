@@ -87,6 +87,10 @@ public class AuthServiceImpl implements AuthService {
     @Value("${secretpad.auth.pad_name:admin}")
     private String adminName;
 
+    /** 实例支持的端；生产按端部署，开发机可两端都开。 */
+    @org.springframework.beans.factory.annotation.Value("${TEE_END_ROLES:CLIENT,CENTER}")
+    private String allowedEndRoles;
+
     @Resource
     private CacheManager cacheManager;
     @Resource
@@ -94,9 +98,35 @@ public class AuthServiceImpl implements AuthService {
     @Resource
     private NodeRepository nodeRepository;
 
+    /**
+     * 解析本次会话的端角色。
+     *
+     * <p>实例通过 {@code secretpad.tee-end-roles} 声明自己支持哪些端：
+     * 生产按端部署为单端，开发机允许两端都开。单端实例可省略选择，双端实例必须显式选择。
+     * 端角色由服务端决定，不接受请求头自报，也不因端角色额外授予机构或项目权限。
+     */
+    private String resolveEndRole(String requested) {
+        java.util.List<String> allowed = java.util.Arrays.stream(allowedEndRoles.split(","))
+                .map(String::trim).filter(value -> !value.isEmpty()).distinct().toList();
+        if (allowed.isEmpty()) {
+            throw SecretpadException.of(AuthErrorCode.AUTH_FAILED, "instance declares no end role");
+        }
+        if (requested == null || requested.isBlank()) {
+            if (allowed.size() == 1) {
+                return allowed.get(0);
+            }
+            throw SecretpadException.of(AuthErrorCode.AUTH_FAILED, "END_ROLE_REQUIRED");
+        }
+        String value = requested.trim();
+        if (!allowed.contains(value)) {
+            throw SecretpadException.of(AuthErrorCode.AUTH_FAILED, "END_ROLE_DENIED");
+        }
+        return value;
+    }
+
     @Override
     @Transactional(rollbackFor = Exception.class, noRollbackFor = SecretpadException.class)
-    public UserContextDTO login(String name, String passwordHash) {
+    public UserContextDTO login(String name, String passwordHash, String endRole) {
         //check password and lock
         AccountsDO user = accountLockedCheck(name, passwordHash);
         String token = UUIDUtils.newUUID();
@@ -122,6 +152,7 @@ public class AuthServiceImpl implements AuthService {
         }
 
         userContextDTO.setDeployMode(deployMode);
+        userContextDTO.setEndRole(resolveEndRole(endRole));
         InstDO instDO = instRepository.findByInstId(user.getOwnerId());
         if (Objects.nonNull(instDO)) {
             userContextDTO.setOwnerName(instDO.getName());

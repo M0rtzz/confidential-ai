@@ -59,7 +59,7 @@ public class AuthController {
     @PostMapping(value = "/login", consumes = "application/json")
     public SecretPadResponse<UserContextDTO> login(@Valid @RequestBody LoginRequest request) {
         try {
-            UserContextDTO login = authService.login(request.getName(), request.getPasswordHash());
+            UserContextDTO login = authService.login(request.getName(), request.getPasswordHash(), request.getEndRole());
             dataSandboxMvpService.loginAttempt(request.getName(), true, "login success");
             return SecretPadResponse.success(login);
         } catch (RuntimeException e) {

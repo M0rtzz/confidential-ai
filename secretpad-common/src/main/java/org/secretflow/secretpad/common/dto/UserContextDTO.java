@@ -60,6 +60,9 @@ public class UserContextDTO {
      */
     private String deployMode;
 
+    /** 本次会话进入的端：CLIENT 管数据，CENTER 管计算；缺失表示旧会话，需重新登录。 */
+    private String endRole;
+
     public static UserContextDTO fromJson(String jsonStr) {
         return JsonUtils.toJavaObject(jsonStr, UserContextDTO.class);
     }

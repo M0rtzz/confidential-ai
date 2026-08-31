@@ -65,6 +65,9 @@ import java.util.stream.Collectors;
 @Slf4j
 public class LoginInterceptor implements HandlerInterceptor {
 
+    private static final com.fasterxml.jackson.databind.ObjectMapper TEE_REJECT_MAPPER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+
     private static final String DEV_ENDPOINT_COOKIE = "Data-Sandbox-Token";
 
     /**
@@ -142,18 +145,19 @@ public class LoginInterceptor implements HandlerInterceptor {
      */
     @Override
     public boolean preHandle(@NotNull HttpServletRequest request, @NotNull HttpServletResponse response, @NotNull Object handler) {
-        // 按实际处理器强制验证环境接口，避免路径编码、内部端口或 auth.enabled 绕过会话。
+        // 按实际处理器强制验证契约接口，避免路径编码、内部端口或 auth.enabled 绕过会话。
+        // 新增契约接口必须实现 TeeApi，否则会落到普通路径上。
         if (handler instanceof org.springframework.web.method.HandlerMethod method
-                && method.getBeanType().equals(org.secretflow.secretpad.web.controller.TeeEnvironmentController.class)) {
+                && org.secretflow.secretpad.web.controller.TeeApi.class.isAssignableFrom(method.getBeanType())) {
             if (innerHttpPort.equals(request.getLocalPort())) {
-                return rejectTeeEnvironment(response, HttpServletResponse.SC_FORBIDDEN);
+                return rejectTee(response, HttpServletResponse.SC_FORBIDDEN, "AUDIT_ACCESS_DENIED", 49012);
             }
             try {
                 processByUserRequest(request, response);
-                return true;
             } catch (SecretpadException denied) {
-                return rejectTeeEnvironment(response, HttpServletResponse.SC_UNAUTHORIZED);
+                return rejectTee(response, HttpServletResponse.SC_UNAUTHORIZED, "AUDIT_ACCESS_DENIED", 49012);
             }
+            return checkEndRole(request, response);
         }
         // 开发端点跳板：安全关键路径，独立于 auth.enabled 强制校验一次性 token
         if (request.getRequestURI().startsWith("/api/v1alpha1/data-sandbox/proxy/")) {
@@ -250,17 +254,48 @@ public class LoginInterceptor implements HandlerInterceptor {
         UserContext.setBaseUser(virtualUser);
     }
 
-    /** 新接口的认证拒绝保持冻结的响应包装，不输出内部异常。 */
-    private boolean rejectTeeEnvironment(HttpServletResponse response, int status) {
+    /**
+     * 端角色守卫。
+     *
+     * <p>端角色最终由服务器决定，不接受请求头自报；旧会话缺角色时要求重新登录。
+     * 密钥申领与规则登记属于数据方，运行时放行与结果密钥属于可信执行方。
+     */
+    private boolean checkEndRole(HttpServletRequest request, HttpServletResponse response) {
+        String uri = request.getRequestURI();
+        String required = null;
+        if (uri.startsWith("/api/v1alpha1/tee/keys/") || uri.startsWith("/api/v1alpha1/tee/policies/")
+                || uri.startsWith("/api/v1alpha1/tee/assets/")) {
+            required = "CLIENT";
+        } else if (uri.startsWith("/api/v1alpha1/tee/runtime/")) {
+            required = "CENTER";
+        }
+        if (required == null) {
+            return true;
+        }
+        String actual = UserContext.getUser().getEndRole();
+        if (actual == null || actual.isBlank()) {
+            UserContext.remove();
+            return rejectTee(response, HttpServletResponse.SC_UNAUTHORIZED, "RELOGIN_REQUIRED", 49003);
+        }
+        if (!required.equals(actual)) {
+            UserContext.remove();
+            return rejectTee(response, HttpServletResponse.SC_FORBIDDEN, "END_ROLE_DENIED", 49001);
+        }
+        return true;
+    }
+
+    /** 契约接口的认证与越权拒绝保持冻结的响应包装，不输出内部异常。 */
+    private boolean rejectTee(HttpServletResponse response, int status, String errorCode, int code) {
         UserContext.remove();
         response.setStatus(status);
         response.setContentType("application/json");
         response.setCharacterEncoding("UTF-8");
         try {
-            new com.fasterxml.jackson.databind.ObjectMapper().writeValue(response.getWriter(),
-                    java.util.Map.of("status", java.util.Map.of("code", 49012, "msg", "access denied"),
-                            "data", java.util.Map.of("contractVersion", "tee-contract/1.0",
-                                    "errorCode", "AUDIT_ACCESS_DENIED",
+            TEE_REJECT_MAPPER.writeValue(response.getWriter(),
+                    java.util.Map.of("status", java.util.Map.of("code", code, "msg", errorCode),
+                            "data", java.util.Map.of("contractVersion",
+                                    org.secretflow.secretpad.web.service.tee.TeeContract.VERSION,
+                                    "errorCode", errorCode,
                                     "requestId", java.util.UUID.randomUUID().toString(),
                                     "retryable", false)));
         } catch (IOException ignored) {

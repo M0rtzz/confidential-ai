@@ -211,6 +211,32 @@ def detect(name):
            {'checkedAt': utc(), 'detectorOk': detected, 'deviceChecks': checks}, 0o644)
 
 
+CRON_MARK = '# tee-a hardware detection refresh'
+CRON_SCHEDULE = '*/15 * * * *'
+
+
+def refresh_detection():
+    """重新探测宿主机 TEE 设备并原子改写各实例快照；可重复执行，不改动容器与镜像。"""
+    refreshed = [name for name in INSTANCES if (RUNTIME / name / 'status').is_dir()]
+    for name in refreshed:
+        detect(name)
+    print(f'已刷新 {len(refreshed)} 个实例的硬件检测快照。')
+
+
+def schedule_detection(remove=False):
+    """用 collab 自身的 crontab 周期执行检测刷新；只增删本条目，保留其他条目。"""
+    listing = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
+    lines = listing.stdout.splitlines() if listing.returncode == 0 else []
+    kept = [line for line in lines if CRON_MARK not in line]
+    if not remove:
+        kept.append(f'{CRON_SCHEDULE} cd {ROOT} && ./develop.sh refresh-detection --tee '
+                    f'>/dev/null 2>&1 {CRON_MARK}')
+    payload = '\n'.join(kept) + '\n' if kept else '\n'
+    if subprocess.run(['crontab', '-'], input=payload, capture_output=True, text=True).returncode:
+        raise RuntimeError('写入 crontab 失败')
+    print('已移除检测刷新排程。' if remove else f'已安装检测刷新排程：{CRON_SCHEDULE}。')
+
+
 def replace_once(text, old, new):
     if text.count(old) != 1:
         raise RuntimeError(f'工具链结构变化，拒绝盲目适配：{old[:70]}')
@@ -278,7 +304,13 @@ def prepare():
     script = script.replace('-v "${KUSCIA_CONTAINERD_DIR}:/home/kuscia/containerd" \\\n',
                             '-v "${KUSCIA_CONTAINERD_DIR}:/home/kuscia/containerd" \\\n      -v "${DEV_ROOT}/tee:/home/kuscia/tee" \\\n')
     script = replace_once(script, '    --env-file "$CREDENTIAL_FILE" \\\n',
-                          '    --env-file "$CREDENTIAL_FILE" \\\n    -e "TEE_FOUNDATION_PROBE_URL=http://${DEV_PREFIX}-tee-probe:8089/health" \\\n    -v "${DEV_ROOT}/status:/app/tee-status:ro" \\\n')
+                          '    --env-file "$CREDENTIAL_FILE" \\\n'
+                          '    -e "TEE_FOUNDATION_PROBE_URL=http://${DEV_PREFIX}-tee-probe:8089/health" \\\n'
+                          '    -e "TEE_KEY_ADAPTER_URL=${TEE_KEY_ADAPTER_URL:-}" \\\n'
+                          '    -e "TEE_END_ROLES=${TEE_END_ROLES:-CLIENT,CENTER}" \\\n'
+                          '    -v "${DEV_ROOT}/status:/app/tee-status:ro" \\\n'
+                          '    -v "${DEV_ROOT}/identity-pub:/app/tee-identity:ro" \\\n'
+                          '    -v "${DEV_ROOT}/tee/adapter-client:/app/tee-adapter-client:ro" \\\n')
     script = script.replace('docker run ', 'docker run --pull=never ').replace('docker create ', 'docker create --pull=never ')
     atomic(target / 'develop.sh', script, 0o700)
     data = manifest()
@@ -386,7 +418,10 @@ def up(name):
     base = INSTANCES[name] * 100
     env = dict(os.environ, DATA_SANDBOX_DEV_ROOT=str(RUNTIME / name), TEE_PLATFORM_IMAGE=platform, DATA_SANDBOX_DEV_SAMPLER_IMAGE=sampler, DATA_SANDBOX_DEV_KUSCIA_IMAGE=checked_image('kuscia'),
                DATA_SANDBOX_DEV_MINIO_IMAGE=checked_image('minio'),
-               TEE_GATEWAY_PORT_ARGS='-p 19685:31888' if name == 'tee-a-center' else '')
+               TEE_GATEWAY_PORT_ARGS='-p 19685:31888' if name == 'tee-a-center' else '',
+               # 只有中心端直连密钥适配服务；客户端通过中心端的契约接口访问。
+               TEE_KEY_ADAPTER_URL='https://data-sandbox-dev-tee-a-center-key-adapter:8090' if name == 'tee-a-center' else '',
+               TEE_END_ROLES='CLIENT,CENTER' if name == 'tee-a-center' else 'CLIENT')
     # 独立随机口令只交给上游入口写入本实例 600 凭据文件，不输出到日志。
     password = secrets.token_urlsafe(24) if not (RUNTIME / name / 'secretpad.env').exists() else None
     run('bash', CACHE / 'toolkit/develop.sh', 'up', '--skip-build', '--name', name, '--branch', 'codex/tee-dev-a',
@@ -457,11 +492,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['prepare', 'status', 'build-platform', 'up', 'down', 'fetch-sources',
         'register-sampler', 'certificates', 'render', 'base-up', 'probe-up', 'register', 'smoke', 'pair',
-        'verify-tls', 'verify-native', 'verify-persistence', 'verify-environment', 'verify-isolation', 'verify-repeat', 'lock-image', 'build-components'])
+        'verify-tls', 'verify-native', 'verify-persistence', 'verify-environment', 'verify-isolation', 'verify-repeat', 'verify-release', 'lock-image', 'build-components',
+        'refresh-detection', 'detect-schedule', 'adapter-up', 'publish-identities', 'verify-p4'])
     parser.add_argument('--tee', action='store_true', required=True)
     parser.add_argument('--name', choices=list(INSTANCES), default='tee-a-center')
     parser.add_argument('--image-key')
     parser.add_argument('--image-ref')
+    parser.add_argument('--remove-schedule', action='store_true',
+        help='移除检测刷新排程而不是安装')
     parser.add_argument('--repair-startup', action='store_true', help='明确修复本次 A 底座的启动配置；不用于无故替换健康实例')
     args = parser.parse_args()
     guard()
@@ -469,6 +507,10 @@ def main():
     # register-sampler 是上游入口的同步子调用，不能再次取得同一把排他锁。
     if args.command == 'register-sampler':
         return register_sampler(args.name)
+    if args.command == 'refresh-detection':
+        return refresh_detection()
+    if args.command == 'detect-schedule':
+        return schedule_detection(args.remove_schedule)
     with (CACHE / 'operation.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.command == 'prepare': prepare()

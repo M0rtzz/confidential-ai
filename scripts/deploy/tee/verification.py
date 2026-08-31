@@ -229,8 +229,12 @@ def verify_environment():
     for name in INSTANCES:
         starts[name] = managed(f'data-sandbox-dev-{name}-secretpad')['State']['StartedAt']
         env = dict(line.split('=', 1) for line in (RUNTIME / name / 'secretpad.env').read_text().splitlines() if '=' in line)
-        code, login = request(name, 'login', {'name': env['SECRETPAD_USER_NAME'],
-            'passwordHash': hashlib.sha256(env['SECRETPAD_PASSWORD'].encode()).hexdigest()})
+        # 中心端同时开放数据方与执行方，按契约必须显式选择端；单端实例可省略。
+        credentials = {'name': env['SECRETPAD_USER_NAME'],
+            'passwordHash': hashlib.sha256(env['SECRETPAD_PASSWORD'].encode()).hexdigest()}
+        if name == 'tee-a-center':
+            credentials['endRole'] = 'CENTER'
+        code, login = request(name, 'login', credentials)
         if code != 200 or login.get('status', {}).get('code') != 0:
             raise RuntimeError('实例登录验收失败：' + name)
         sessions[name] = login['data']['token']
@@ -413,6 +417,67 @@ def verify_repeat():
     print('重复执行未改变机构/服务私钥，未重建健康平台、探测器或底座 Pod。')
 
 
+def verify_release():
+    """P4 前置：用一次性合成身份验证数据密钥的真实放行与规则拒绝，结束后删除写入的策略与密钥。"""
+    case_root = CENTER / 'acceptance-release'
+    case_root.mkdir(exist_ok=True, mode=0o700)
+    state = case_root / 'release-pilot.json'
+    if state.exists():
+        raise RuntimeError('上一轮放行验收未清理，先人工核对再重跑')
+    cert = CENTER / 'release-cert'
+    issue(PKI / 'external-ca', cert, 'p4-release-client')
+    image = checked_image('probe')
+    network = 'data-sandbox-dev-tee-a-center'
+    managed(network, 'network') or (_ for _ in ()).throw(RuntimeError('中心网络不存在'))
+    script = ROOT / 'scripts/deploy/tee/release_client.py'
+
+    def phase(name):
+        command = ['docker', 'run', '--rm', '--pull=never', '--network', network,
+                   '--user', f'{os.getuid()}:{os.getgid()}',
+                   '--add-host', 'capsule.tee-a.test:222.20.99.38', '--read-only', '--cap-drop=ALL',
+                   '--security-opt', 'no-new-privileges', '-e', 'TEE_CAPSULE_ENDPOINT=capsule.tee-a.test:19685',
+                   '-v', str(cert) + ':/certs:ro', '-v', str(case_root) + ':/case',
+                   '-v', str(script) + ':/opt/p4/release_client.py:ro']
+        for k, v in labels().items(): command += ['--label', k + '=' + v]
+        result = subprocess.run(command + [image, 'python', '/opt/p4/release_client.py', name],
+                                capture_output=True, text=True, timeout=180)
+        if result.returncode: raise RuntimeError('密钥放行验收阶段未通过：' + name)
+        value = json.loads(result.stdout)
+        if value.get('allPassed') is not True:
+            raise RuntimeError('密钥放行验收存在未通过项：' + name)
+        return value
+
+    released = phase('run')
+    cleaned = phase('cleanup')
+    # 合成身份仅用于本轮验收，成功清理后不保留，下一轮重新生成。
+    state.unlink()
+    atomic(CENTER / 'release-verification.json', {'checkedAt': utc(), 'released': released, 'cleanup': cleaned,
+        'evidence': 'NATIVE_DATA_KEY_RELEASE_AND_POLICY_DENIAL',
+        'adapterMustEnforce': ['EMPTY_COLUMN_SET', 'WILDCARD_COLUMN_OR_OPERATOR', 'INITIATOR_IDENTITY'],
+        'capsuleUnimplemented': ['RegisterCert/store_public_key', 'get_public_key'],
+        'businessKeyReleaseVerified': True})
+    print('仿真模式下数据密钥真实放行，越权算子、越权列、非授权方与未知 scope 均被拒绝；合成策略与密钥已删除。')
+    print('适配层必须自行拒绝空列集合、通配符授权，并保证发起方身份可信：这三项 CM 不校验。')
+
+
+def verify_p4():
+    """用一份示例数据跑完密钥、加密、登记、放行、解密全链路，并逐项验证拒绝行为。"""
+    script = ROOT / 'scripts/deploy/tee/p4_e2e.py'
+    result = subprocess.run(['python3', str(script)], capture_output=True, text=True, timeout=600)
+    if result.returncode:
+        raise RuntimeError('P4 全链路验收未通过')
+    value = json.loads(result.stdout)
+    failed = [name for name, check in value['checks'].items() if check is False]
+    if failed:
+        raise RuntimeError('P4 验收存在未通过项：' + '、'.join(failed))
+    atomic(CENTER / 'p4-verification.json', {'checkedAt': utc(), 'result': value,
+        'evidence': 'END_TO_END_KEY_ISSUE_ENCRYPT_POLICY_RELEASE_DECRYPT',
+        'businessChainVerified': True})
+    print('P4 全链路通过：示例数据经签发、申领、客户端加密、规则登记、资产登记后，')
+    print('由签名任务在运行时放行并解密还原，中心端全程只持有密文。')
+    print('越权算子、越权列、伪造接收者、nonce 重放、幂等冲突、通配符、空集合、端角色越权、吊销后放行均被拒绝。')
+
+
 def verify(command):
     if command == 'verify-tls': return verify_tls()
     if command == 'verify-native': return verify_native_surface()
@@ -420,4 +485,6 @@ def verify(command):
     if command == 'verify-environment': return verify_environment()
     if command == 'verify-isolation': return verify_isolation()
     if command == 'verify-repeat': return verify_repeat()
+    if command == 'verify-release': return verify_release()
+    if command == 'verify-p4': return verify_p4()
     raise RuntimeError('未知验证操作')

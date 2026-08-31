@@ -43,4 +43,7 @@ public class LoginRequest {
      */
     @Schema(description = "user password")
     private String passwordHash;
+
+    /** 端选择：CLIENT 或 CENTER。单端实例可省略，双端实例必须显式选择。 */
+    private String endRole;
 }

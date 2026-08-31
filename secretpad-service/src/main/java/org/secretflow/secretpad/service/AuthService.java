@@ -33,7 +33,19 @@ public interface AuthService {
      * @param passwd user password
      * @return provisional token
      */
-    UserContextDTO login(String name, String passwd);
+    default UserContextDTO login(String name, String passwd) {
+        return login(name, passwd, null);
+    }
+
+    /**
+     * User login with an explicit end role.
+     *
+     * @param name     user name
+     * @param passwd   password hash
+     * @param endRole  CLIENT or CENTER; may be null on single-end deployments
+     * @return user context
+     */
+    UserContextDTO login(String name, String passwd, String endRole);
 
     /**
      * User logout and delete user token data

@@ -1,5 +1,7 @@
 """P3 安全边界定向测试，不启动容器、不联网、不使用业务凭据。"""
+import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +13,13 @@ from unittest.mock import patch
 
 import p3
 import foundation
+import release_client
+
+
+def quiet(function, *args):
+    """新增子命令会向命令行打印反馈；测试只关心行为，不需要这些输出。"""
+    with contextlib.redirect_stdout(io.StringIO()):
+        return function(*args)
 
 
 class IsolationTests(unittest.TestCase):
@@ -94,6 +103,90 @@ class IsolationTests(unittest.TestCase):
                 with self.assertRaises(subprocess.CalledProcessError):
                     foundation.openssl('verify', '-CAfile', ca / 'ca.crt', '-CRLfile', ca / 'ca.crl', '-crl_check', client / 'client.crt')
 
+
+
+class DetectionRefreshTests(unittest.TestCase):
+    def test_refresh_only_touches_prepared_instances_and_rewrites_snapshot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder)
+            prepared = list(p3.INSTANCES)[0]
+            (runtime / prepared / 'status').mkdir(parents=True)
+            with patch.object(p3, 'ROOT', runtime), patch.object(p3, 'RUNTIME', runtime):
+                quiet(p3.refresh_detection)
+                snapshot = json.loads((runtime / prepared / 'status/hardware.json').read_text())
+                first = snapshot['checkedAt']
+                self.assertEqual(set(snapshot['deviceChecks']), {'sgx', 'tdx', 'csv'})
+                self.assertIs(snapshot['detectorOk'], True)
+                for name in list(p3.INSTANCES)[1:]:
+                    self.assertFalse((runtime / name / 'status/hardware.json').exists())
+                quiet(p3.refresh_detection)
+                self.assertNotEqual(json.loads(
+                    (runtime / prepared / 'status/hardware.json').read_text())['checkedAt'], first)
+
+    def test_refresh_snapshot_is_world_readable_but_not_writable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder)
+            prepared = list(p3.INSTANCES)[0]
+            (runtime / prepared / 'status').mkdir(parents=True)
+            with patch.object(p3, 'ROOT', runtime), patch.object(p3, 'RUNTIME', runtime):
+                quiet(p3.refresh_detection)
+            mode = (runtime / prepared / 'status/hardware.json').stat().st_mode & 0o777
+            self.assertEqual(mode, 0o644)
+
+
+class DetectionScheduleTests(unittest.TestCase):
+    def crontab(self, existing, remove=False):
+        written = {}
+
+        def fake(command, **kwargs):
+            if command == ['crontab', '-l']:
+                return subprocess.CompletedProcess(command, 0 if existing is not None else 1,
+                                                   stdout=existing or '', stderr='')
+            written['payload'] = kwargs['input']
+            return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+
+        with patch.object(p3.subprocess, 'run', side_effect=fake):
+            quiet(p3.schedule_detection, remove)
+        return written['payload']
+
+    def test_install_keeps_unrelated_entries_and_is_idempotent(self):
+        other = '0 3 * * * /usr/bin/other-job\n'
+        once = self.crontab(other)
+        self.assertIn('/usr/bin/other-job', once)
+        self.assertEqual(once.count(p3.CRON_MARK), 1)
+        self.assertIn('refresh-detection --tee', once)
+        twice = self.crontab(once)
+        self.assertEqual(twice.count(p3.CRON_MARK), 1)
+        self.assertIn('/usr/bin/other-job', twice)
+
+    def test_install_without_existing_crontab(self):
+        payload = self.crontab(None)
+        self.assertEqual(payload.count(p3.CRON_MARK), 1)
+
+    def test_remove_drops_only_its_own_entry(self):
+        installed = self.crontab('0 3 * * * /usr/bin/other-job\n')
+        payload = self.crontab(installed, remove=True)
+        self.assertNotIn(p3.CRON_MARK, payload)
+        self.assertIn('/usr/bin/other-job', payload)
+
+
+class ReleaseClientTests(unittest.TestCase):
+    """密钥放行客户端不依赖 SDK 即可校验的部分：拒绝判定与状态文件处理。"""
+
+    def test_expect_records_pass_and_detail(self):
+        checks = {}
+        release_client.expect(checks, 'a', True, 'detail')
+        release_client.expect(checks, 'b', False)
+        self.assertEqual(checks['a'], {'passed': True, 'detail': 'detail'})
+        self.assertEqual(checks['b'], {'passed': False})
+
+    def test_state_file_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / 'release-pilot.json'
+            state.write_text('{}')
+            with self.assertRaises(FileExistsError):
+                with open(state, 'x'):
+                    pass
 
 if __name__ == '__main__':
     os.umask(0o077)
