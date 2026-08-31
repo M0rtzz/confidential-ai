@@ -84,3 +84,12 @@ docs/_build
 /config/ehcache-data/
 /db/secretpadQuartz.mv.db.mv.db
 /.cloudide/
+
+### TEE A isolated runtime ###
+/.dev-runtime/
+/.cache/
+
+/scripts/deploy/tee/__pycache__/
+
+# 此 log 目录包含实际 Java 源码，不能作为运行日志忽略。
+!/secretpad-persistence/src/main/java/org/secretflow/secretpad/persistence/datasync/rest/p2p/log/

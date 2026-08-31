@@ -1,0 +1,33 @@
+--- a/capsule-manager/src/server.rs
++++ b/capsule-manager/src/server.rs
+@@ -112,11 +112,9 @@
+         .ok_or(errno!(ErrorCode::NotFound, "Request content"))?;
+ 
+     let jwe: jwe::Jwe = from(&content)?;
+-    log::debug!(target: "capsule_manager_log", "{:?}", &jwe);
+     let secret = Secret::keypair_from_pem(private_key_pem)?;
+     let plain_text = jwe.decrypt(&secret)?;
+     if encrypt_request.has_signature {
+-        log::debug!(target: "capsule_manager_log", "{}", String::from_utf8(plain_text.clone())?);
+         let jws: jws::Jws = serde_json::from_slice(plain_text.as_ref())?;
+         return Ok((serde_json::from_slice(jws.payload())?, Some(jws)));
+     } else {
+@@ -368,7 +366,7 @@
+         &self,
+         request: &capsule_manager::EncryptedRequest,
+     ) -> AuthResult<capsule_manager::EncryptedResponse> {
+-        self.delete_data_policy(request).await
++        self.delete_data_policy_impl(request).await
+     }
+ 
+     async fn delete_data_rule(
+--- a/bin/grpc-as/src/main.rs
++++ b/bin/grpc-as/src/main.rs
+@@ -41,7 +41,6 @@
+     } else {
+         cfg.mode = Some("simulation".to_owned());
+     }
+-    log::info!("config {:#?}", cfg);
+ 
+     // init log
+     utils::log::init_log(

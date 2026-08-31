@@ -142,6 +142,19 @@ public class LoginInterceptor implements HandlerInterceptor {
      */
     @Override
     public boolean preHandle(@NotNull HttpServletRequest request, @NotNull HttpServletResponse response, @NotNull Object handler) {
+        // 按实际处理器强制验证环境接口，避免路径编码、内部端口或 auth.enabled 绕过会话。
+        if (handler instanceof org.springframework.web.method.HandlerMethod method
+                && method.getBeanType().equals(org.secretflow.secretpad.web.controller.TeeEnvironmentController.class)) {
+            if (innerHttpPort.equals(request.getLocalPort())) {
+                return rejectTeeEnvironment(response, HttpServletResponse.SC_FORBIDDEN);
+            }
+            try {
+                processByUserRequest(request, response);
+                return true;
+            } catch (SecretpadException denied) {
+                return rejectTeeEnvironment(response, HttpServletResponse.SC_UNAUTHORIZED);
+            }
+        }
         // 开发端点跳板：安全关键路径，独立于 auth.enabled 强制校验一次性 token
         if (request.getRequestURI().startsWith("/api/v1alpha1/data-sandbox/proxy/")) {
             processByDevEndpointToken(request, response);
@@ -235,6 +248,25 @@ public class LoginInterceptor implements HandlerInterceptor {
         virtualUser.setApiResources(resourceCodeSet);
 
         UserContext.setBaseUser(virtualUser);
+    }
+
+    /** 新接口的认证拒绝保持冻结的响应包装，不输出内部异常。 */
+    private boolean rejectTeeEnvironment(HttpServletResponse response, int status) {
+        UserContext.remove();
+        response.setStatus(status);
+        response.setContentType("application/json");
+        response.setCharacterEncoding("UTF-8");
+        try {
+            new com.fasterxml.jackson.databind.ObjectMapper().writeValue(response.getWriter(),
+                    java.util.Map.of("status", java.util.Map.of("code", 49012, "msg", "access denied"),
+                            "data", java.util.Map.of("contractVersion", "tee-contract/1.0",
+                                    "errorCode", "AUDIT_ACCESS_DENIED",
+                                    "requestId", java.util.UUID.randomUUID().toString(),
+                                    "retryable", false)));
+        } catch (IOException ignored) {
+            // 连接已经关闭时不再写入响应，鉴权仍然失败。
+        }
+        return false;
     }
 
     private void processByUserRequest(HttpServletRequest request, HttpServletResponse response) {

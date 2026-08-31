@@ -1,0 +1,637 @@
+{
+  "contractVersion": "tee-contract/1.0",
+  "status": "FROZEN_BY_A",
+  "notice": "全部为合成测试数据；公开测试密钥禁止用于真实数据。此文件不代表服务运行结果。RSA 私钥未保存。",
+  "testMaterial": {
+    "inputKeyB64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "outputKeyB64": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+    "plaintextUtf8": "age,income,city\n30,5000,synthetic-city\n",
+    "outputPlaintextUtf8": "row_count\n1\n",
+    "trustedPublicKeyPem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAphY1IqfAiFiaKXtlzkyM\naBKvMbHHTSLAsl9YcNOiw9/OF5Arh0ZWZ0B5qOL1Cqtx1nVAG6ax/vb0AsEy4fou\nUS+o16Ohg8P725NYetjDvNgwBC1Od3Vhh7LVDIsV5wtx6syd4YC+DZWFGw2sxu4L\nM4R1AJBoSXglGTnxxqeeLY3Hdr8Riq7DGy0ilnDtPAYysvLnYfglb0Eend+hIXnd\nsbdlxMWi7uvCqNwyAEVeQEaVJHlIN75Be5d65ulyhwRLo7L1cxMmtfu0siER2Kfo\nQqzNA/OTXLRMwEkU7+Uq0+KVvYrY6Vk/TXX/q22oCPhTAWGmlRsEDsd+31mMDYh3\nAwIDAQAB\n-----END PUBLIC KEY-----\n",
+    "trustedKid": "synthetic-center-key-001",
+    "runtimeCertificatePem": "-----BEGIN CERTIFICATE-----\nMIICzzCCAbegAwIBAgIBATANBgkqhkiG9w0BAQsFADArMSkwJwYDVQQDDCBzeW50\naGV0aWMtcnVudGltZS1ub3QtcHJvZHVjdGlvbjAeFw0yNjA4MzEwMDAwMDBaFw0y\nNjA5MDIwMDAwMDBaMCsxKTAnBgNVBAMMIHN5bnRoZXRpYy1ydW50aW1lLW5vdC1w\ncm9kdWN0aW9uMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzMjw5Vqi\n9oxK0/8QKS6ViBHs4cyEuM8kV2qqZhMGKvXr/dymiWw6Dcql4qJV1zOlp9PnmANJ\n7NlE3Jfq3owoV+BzgBJ94ChVbzCyFVJBsKNi52JWs/tpY2Q+EZceNjRzfdOpVVgr\n2JKYFMb0osRrXihjifAZQmAXjOuyQ1NDu/EsBj5MXVV2sXZYjf30CnqwLVCSB3nt\nEseXpMe34iwcyErAlogvY1x/gsWX/czOPDLqpJ051FgpJslY5vPyNfCp9IximvDx\nNPwoMA/P6NOOvWFXg38x5yfVVI7yXTAPsp7yGMsjGxOlxfYmsuV2fJCI3higfJgo\njicm4J1vxCHJMQIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQB/E+YUTXwObSQRhbbc\nj65jw/0PRfjXU0v1kI+XhfYv/oV+VQH75gONQOAmloqBJ9o7u/K6Ydtq691x8ydP\nrokB3MioEgysEB+7alI0GmUnvTjvltCwBOjpey/Hmrz6XPSSaffw78YhSBpE4gQf\nD6OJxOikD9YHeks9eX0BBbpZ9L7bBKPD2zRysYXiQAXYKmpNKvetxHfuixDtDhWx\nWAgzZELX8DjUsyHiWh866iXvZwLoSLf+9QAcxeiLUJ2c5geFzhkyg1F+af+HF3jo\nJU3psJyi9GNcedAGnAewfrPrGs1KCd4CG7pCj0TBUheppm5VKak2pekH2xWDCRNG\n75Hg\n-----END CERTIFICATE-----\n",
+    "keyEnvelopesVerifiedDuringGeneration": true,
+    "verificationTime": "2026-08-31T08:01:00Z"
+  },
+  "login": {
+    "request": {
+      "name": "synthetic-user",
+      "passwordHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "endRole": "CLIENT"
+    },
+    "response": {
+      "status": {
+        "code": 0,
+        "msg": "success"
+      },
+      "data": {
+        "name": "synthetic-user",
+        "token": "SYNTHETIC-NOT-A-REAL-TOKEN",
+        "ownerId": "org-synthetic-a",
+        "endRole": "CLIENT"
+      }
+    }
+  },
+  "asset": {
+    "contractVersion": "tee-contract/1.0",
+    "assetId": "asset-synthetic-001",
+    "assetVersion": 1,
+    "keyId": "key-synthetic-001",
+    "keyVersion": 1,
+    "algorithm": "AES-256-GCM",
+    "nonceB64": "AAECAwQFBgcICQoL",
+    "aadB64": "eyJhc3NldElkIjoiYXNzZXQtc3ludGhldGljLTAwMSIsImFzc2V0VmVyc2lvbiI6MSwia2V5SWQiOiJrZXktc3ludGhldGljLTAwMSIsImtleVZlcnNpb24iOjF9",
+    "ciphertextB64": "JmWzN6yLoXTgJLvo2J0BZ7DmqwHAS29QSx6L8XUMdNtiPc2V27gY",
+    "tagB64": "lK6tPz4MrqcUyINc88RHuA==",
+    "ciphertextSha256": "d162a1291c012c7511e9f875f3c43c8cc6b3ef339a7ccb34a0befddcc552d165"
+  },
+  "policy": {
+    "contractVersion": "tee-contract/1.0",
+    "policyId": "policy-001",
+    "policyVersion": 1,
+    "assetId": "asset-synthetic-001",
+    "assetVersion": 1,
+    "ownerId": "org-synthetic-a",
+    "sandboxId": "sandbox-001",
+    "columns": [
+      "age",
+      "income"
+    ],
+    "operators": [
+      "ml.xgboost"
+    ],
+    "expiresAt": "2026-09-01T00:00:00Z",
+    "reportKinds": [
+      "EVALUATION_METRICS",
+      "FEATURE_IMPORTANCE",
+      "TREE_STRUCTURE"
+    ]
+  },
+  "keyIssue": {
+    "request": {
+      "contractVersion": "tee-contract/1.0",
+      "requestId": "req-key-001",
+      "assetId": "asset-synthetic-001",
+      "assetVersion": 1
+    },
+    "response": {
+      "status": {
+        "code": 0,
+        "msg": "success"
+      },
+      "data": {
+        "contractVersion": "tee-contract/1.0",
+        "keyId": "key-synthetic-001",
+        "keyVersion": 1,
+        "state": "ACTIVE"
+      }
+    }
+  },
+  "keyRelease": {
+    "request": {
+      "contractVersion": "tee-contract/1.0",
+      "requestId": "req-release-001",
+      "taskJws": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXUyIsImtpZCI6InN5bnRoZXRpYy1jZW50ZXIta2V5LTAwMSJ9.eyJjb250cmFjdFZlcnNpb24iOiJ0ZWUtY29udHJhY3QvMS4wIiwidGFza0lkIjoidGFzay0wMDEiLCJyZXF1ZXN0SWQiOiJyZXEtdGFzay0wMDEiLCJpc3N1ZXIiOiJjZW50ZXItc3ludGhldGljIiwiYXVkaWVuY2UiOiJ0ZWUtcnVudGltZS1zeW50aGV0aWMiLCJzYW5kYm94SWQiOiJzYW5kYm94LTAwMSIsIm9wZXJhdG9ySWQiOiJtbC54Z2Jvb3N0IiwiY29sdW1ucyI6WyJhZ2UiLCJpbmNvbWUiXSwiaW5wdXRzIjpbeyJhc3NldElkIjoiYXNzZXQtc3ludGhldGljLTAwMSIsImFzc2V0VmVyc2lvbiI6MSwia2V5SWQiOiJrZXktc3ludGhldGljLTAwMSIsImtleVZlcnNpb24iOjEsInBvbGljeUlkIjoicG9saWN5LTAwMSIsInBvbGljeVZlcnNpb24iOjEsIm9iamVjdElkIjoib2JqZWN0LWlucHV0LTAwMSIsInBsYWludGV4dEJ5dGVzIjozOSwiY2lwaGVydGV4dFNoYTI1NiI6ImQxNjJhMTI5MWMwMTJjNzUxMWU5Zjg3NWYzYzQzYzhjYzZiM2VmMzM5YTdjY2IzNGEwYmVmZGRjYzU1MmQxNjUifV0sInByb2dyYW0iOnsia2luZCI6IkJVSUxUSU4iLCJvYmplY3RJZCI6bnVsbCwic2hhMjU2IjoiZDYxMTJlZTBkNDQwZDQwNzI4YTkzYTBjMWNlZmQzODczOTA2ZDk1OGE0ODI1NTM2OGU0ZDM4NzgwOWE5MzliYiIsInBhcmFtZXRlcnMiOnt9fSwicnVudGltZUltYWdlRGlnZXN0Ijoic2hhMjU2Ojc0NzEwYzMzNWY2ZWM4Y2QzOGQzNmM1YjM5NzhhYWU4NGI1YzQ1NmY1NTlkYTNlY2RiZTcwYzU2N2RhZGEzM2MiLCJpc3N1ZWRBdCI6IjIwMjYtMDgtMzFUMDg6MDA6MDBaIiwiZXhwaXJlc0F0IjoiMjAyNi0wOC0zMVQwODowNTowMFoiLCJub25jZSI6InRhc2stbm9uY2Utc3ludGhldGljLTAwMSIsIm91dHB1dFBvbGljeSI6eyJyZXBvcnRLaW5kcyI6WyJFVkFMVUFUSU9OX01FVFJJQ1MiXSwiZW5jcnlwdERhdGEiOnRydWUsImVuY3J5cHRNb2RlbCI6dHJ1ZSwiZXhwb3J0UmVxdWlyZXNBbGxDb250cmlidXRvcnMiOnRydWV9fQ.KqjSkTbFEJP2Au09BySLi-m3BmyWXDbU4wYWfapbtznaHGJwd44S05LA0dru9llX0kOB_0ot3Swfn4MC5g0gwYEQ_HqOpGQn5VkkyhvPRqVjGGNgpQx0U5ptKJ2fT_4W5RFJ_3AwJBvFaoF39bbPe1wUfDZnKv0CAuN7wFkUWx3nWvT96KnoRc4u-t7PgMP3JkI-8mM1X9ypY45WCxGKl2VlxE0Uv6bKFV6Mpf78B59Nb-wbq5VHqv-wKVhshQDR1cIkdO9BhINSLSbByA7vAUHkkYHPpv6ITPfzGDuKVSIFkct8WaZB6XazlU_jGyUx4FNulKXibBmXHJgs37PAdw",
+      "attestationEvidence": null
+    },
+    "response": {
+      "status": {
+        "code": 0,
+        "msg": "success"
+      },
+      "data": {
+        "contractVersion": "tee-contract/1.0",
+        "taskId": "task-001",
+        "keyEnvelopes": [
+          {
+            "keyId": "key-synthetic-001",
+            "keyVersion": 1,
+            "algorithm": "RSA-OAEP-256",
+            "recipientCertSha256": "e3245a9165eb7346ce8847c084c2302b3fb2e83bc6a3fe91956ae194e9def4a2",
+            "wrappedKeyB64": "AY79USwOgL+8eWuZnFwhzBmUsoR8fHRvXT6DC4dETuHf9RThKZjsalQZ1rpQz8Mdx+DsT4bhQZjrTb1RZT92TjZEsrIk1Itky0Zr9alT5b1It4ZeDpgm73rRqVes8aLET99AAYpbilAlyAyjUYH6FYzyHYCSFxwGAFomQe1p4Ub03d9cPbKiTho8eCICqztQOszc/r3SIck/EKFlgFK+/rx1ZZWwHqKXLdPLKLz/EN3JwA4tG7yS7+OfB3TWr+ML53YCmwOu9f+0qwyuXTVm2Lsjo8eJEOQGU/CK+YNgt/MRPCBKcKF/L4qPJ96fuq2NikHqcugal0VTcRjBTCblYA=="
+          }
+        ],
+        "runtimeMode": "SIMULATION",
+        "attestationVerified": false
+      }
+    },
+    "note": "合成密封向量；生成时完成 OAEP 解封核验，不交付 RSA 私钥。服务实现尚未完成。"
+  },
+  "outputKey": {
+    "request": {
+      "contractVersion": "tee-contract/1.0",
+      "requestId": "req-output-key-001",
+      "taskJws": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXUyIsImtpZCI6InN5bnRoZXRpYy1jZW50ZXIta2V5LTAwMSJ9.eyJjb250cmFjdFZlcnNpb24iOiJ0ZWUtY29udHJhY3QvMS4wIiwidGFza0lkIjoidGFzay0wMDEiLCJyZXF1ZXN0SWQiOiJyZXEtdGFzay0wMDEiLCJpc3N1ZXIiOiJjZW50ZXItc3ludGhldGljIiwiYXVkaWVuY2UiOiJ0ZWUtcnVudGltZS1zeW50aGV0aWMiLCJzYW5kYm94SWQiOiJzYW5kYm94LTAwMSIsIm9wZXJhdG9ySWQiOiJtbC54Z2Jvb3N0IiwiY29sdW1ucyI6WyJhZ2UiLCJpbmNvbWUiXSwiaW5wdXRzIjpbeyJhc3NldElkIjoiYXNzZXQtc3ludGhldGljLTAwMSIsImFzc2V0VmVyc2lvbiI6MSwia2V5SWQiOiJrZXktc3ludGhldGljLTAwMSIsImtleVZlcnNpb24iOjEsInBvbGljeUlkIjoicG9saWN5LTAwMSIsInBvbGljeVZlcnNpb24iOjEsIm9iamVjdElkIjoib2JqZWN0LWlucHV0LTAwMSIsInBsYWludGV4dEJ5dGVzIjozOSwiY2lwaGVydGV4dFNoYTI1NiI6ImQxNjJhMTI5MWMwMTJjNzUxMWU5Zjg3NWYzYzQzYzhjYzZiM2VmMzM5YTdjY2IzNGEwYmVmZGRjYzU1MmQxNjUifV0sInByb2dyYW0iOnsia2luZCI6IkJVSUxUSU4iLCJvYmplY3RJZCI6bnVsbCwic2hhMjU2IjoiZDYxMTJlZTBkNDQwZDQwNzI4YTkzYTBjMWNlZmQzODczOTA2ZDk1OGE0ODI1NTM2OGU0ZDM4NzgwOWE5MzliYiIsInBhcmFtZXRlcnMiOnt9fSwicnVudGltZUltYWdlRGlnZXN0Ijoic2hhMjU2Ojc0NzEwYzMzNWY2ZWM4Y2QzOGQzNmM1YjM5NzhhYWU4NGI1YzQ1NmY1NTlkYTNlY2RiZTcwYzU2N2RhZGEzM2MiLCJpc3N1ZWRBdCI6IjIwMjYtMDgtMzFUMDg6MDA6MDBaIiwiZXhwaXJlc0F0IjoiMjAyNi0wOC0zMVQwODowNTowMFoiLCJub25jZSI6InRhc2stbm9uY2Utc3ludGhldGljLTAwMSIsIm91dHB1dFBvbGljeSI6eyJyZXBvcnRLaW5kcyI6WyJFVkFMVUFUSU9OX01FVFJJQ1MiXSwiZW5jcnlwdERhdGEiOnRydWUsImVuY3J5cHRNb2RlbCI6dHJ1ZSwiZXhwb3J0UmVxdWlyZXNBbGxDb250cmlidXRvcnMiOnRydWV9fQ.KqjSkTbFEJP2Au09BySLi-m3BmyWXDbU4wYWfapbtznaHGJwd44S05LA0dru9llX0kOB_0ot3Swfn4MC5g0gwYEQ_HqOpGQn5VkkyhvPRqVjGGNgpQx0U5ptKJ2fT_4W5RFJ_3AwJBvFaoF39bbPe1wUfDZnKv0CAuN7wFkUWx3nWvT96KnoRc4u-t7PgMP3JkI-8mM1X9ypY45WCxGKl2VlxE0Uv6bKFV6Mpf78B59Nb-wbq5VHqv-wKVhshQDR1cIkdO9BhINSLSbByA7vAUHkkYHPpv6ITPfzGDuKVSIFkct8WaZB6XazlU_jGyUx4FNulKXibBmXHJgs37PAdw",
+      "resultId": "result-synthetic-001",
+      "resultKind": "DATA"
+    },
+    "response": {
+      "status": {
+        "code": 0,
+        "msg": "success"
+      },
+      "data": {
+        "contractVersion": "tee-contract/1.0",
+        "keyEnvelope": {
+          "keyId": "key-result-001",
+          "keyVersion": 1,
+          "algorithm": "RSA-OAEP-256",
+          "recipientCertSha256": "e3245a9165eb7346ce8847c084c2302b3fb2e83bc6a3fe91956ae194e9def4a2",
+          "wrappedKeyB64": "bwPms3Ru86nY8yVz4GOeEZp6zws5NEeuCBlVmz6YwXPNT8GzbwnsU9UZ6Spojz+4hLO0vFcH39RzllRuWFeaXq156mVwfV8f+xaJ4/ALsMD8iVOEG2femmANczykye4iM6FYHj7y25nmawLX5NjWpBART7f8ZSdXNKsvwBDVdB0FvP613/314sw5cn/QF/f8nzAWYxfevbp9HPMYz/m/vyMrLQFHvm8a+FH//yzDSVREt+Wmb5JpSYp35dP1iqp8QesHxzPKnDldEJgXzDKtGSZsPfTUIdWB+H+GbtNy2HuFhcAVPt+8TWGBhUkMqtwTsU/NkswvCpCF5ou05d5sXw=="
+        }
+      }
+    }
+  },
+  "taskPayload": {
+    "contractVersion": "tee-contract/1.0",
+    "taskId": "task-001",
+    "requestId": "req-task-001",
+    "issuer": "center-synthetic",
+    "audience": "tee-runtime-synthetic",
+    "sandboxId": "sandbox-001",
+    "operatorId": "ml.xgboost",
+    "columns": [
+      "age",
+      "income"
+    ],
+    "inputs": [
+      {
+        "assetId": "asset-synthetic-001",
+        "assetVersion": 1,
+        "keyId": "key-synthetic-001",
+        "keyVersion": 1,
+        "policyId": "policy-001",
+        "policyVersion": 1,
+        "objectId": "object-input-001",
+        "plaintextBytes": 39,
+        "ciphertextSha256": "d162a1291c012c7511e9f875f3c43c8cc6b3ef339a7ccb34a0befddcc552d165"
+      }
+    ],
+    "program": {
+      "kind": "BUILTIN",
+      "objectId": null,
+      "sha256": "d6112ee0d440d40728a93a0c1cefd3873906d958a48255368e4d387809a939bb",
+      "parameters": {}
+    },
+    "runtimeImageDigest": "sha256:74710c335f6ec8cd38d36c5b3978aae84b5c456f559da3ecdbe70c567dada33c",
+    "issuedAt": "2026-08-31T08:00:00Z",
+    "expiresAt": "2026-08-31T08:05:00Z",
+    "nonce": "task-nonce-synthetic-001",
+    "outputPolicy": {
+      "reportKinds": [
+        "EVALUATION_METRICS"
+      ],
+      "encryptData": true,
+      "encryptModel": true,
+      "exportRequiresAllContributors": true
+    }
+  },
+  "taskJws": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXUyIsImtpZCI6InN5bnRoZXRpYy1jZW50ZXIta2V5LTAwMSJ9.eyJjb250cmFjdFZlcnNpb24iOiJ0ZWUtY29udHJhY3QvMS4wIiwidGFza0lkIjoidGFzay0wMDEiLCJyZXF1ZXN0SWQiOiJyZXEtdGFzay0wMDEiLCJpc3N1ZXIiOiJjZW50ZXItc3ludGhldGljIiwiYXVkaWVuY2UiOiJ0ZWUtcnVudGltZS1zeW50aGV0aWMiLCJzYW5kYm94SWQiOiJzYW5kYm94LTAwMSIsIm9wZXJhdG9ySWQiOiJtbC54Z2Jvb3N0IiwiY29sdW1ucyI6WyJhZ2UiLCJpbmNvbWUiXSwiaW5wdXRzIjpbeyJhc3NldElkIjoiYXNzZXQtc3ludGhldGljLTAwMSIsImFzc2V0VmVyc2lvbiI6MSwia2V5SWQiOiJrZXktc3ludGhldGljLTAwMSIsImtleVZlcnNpb24iOjEsInBvbGljeUlkIjoicG9saWN5LTAwMSIsInBvbGljeVZlcnNpb24iOjEsIm9iamVjdElkIjoib2JqZWN0LWlucHV0LTAwMSIsInBsYWludGV4dEJ5dGVzIjozOSwiY2lwaGVydGV4dFNoYTI1NiI6ImQxNjJhMTI5MWMwMTJjNzUxMWU5Zjg3NWYzYzQzYzhjYzZiM2VmMzM5YTdjY2IzNGEwYmVmZGRjYzU1MmQxNjUifV0sInByb2dyYW0iOnsia2luZCI6IkJVSUxUSU4iLCJvYmplY3RJZCI6bnVsbCwic2hhMjU2IjoiZDYxMTJlZTBkNDQwZDQwNzI4YTkzYTBjMWNlZmQzODczOTA2ZDk1OGE0ODI1NTM2OGU0ZDM4NzgwOWE5MzliYiIsInBhcmFtZXRlcnMiOnt9fSwicnVudGltZUltYWdlRGlnZXN0Ijoic2hhMjU2Ojc0NzEwYzMzNWY2ZWM4Y2QzOGQzNmM1YjM5NzhhYWU4NGI1YzQ1NmY1NTlkYTNlY2RiZTcwYzU2N2RhZGEzM2MiLCJpc3N1ZWRBdCI6IjIwMjYtMDgtMzFUMDg6MDA6MDBaIiwiZXhwaXJlc0F0IjoiMjAyNi0wOC0zMVQwODowNTowMFoiLCJub25jZSI6InRhc2stbm9uY2Utc3ludGhldGljLTAwMSIsIm91dHB1dFBvbGljeSI6eyJyZXBvcnRLaW5kcyI6WyJFVkFMVUFUSU9OX01FVFJJQ1MiXSwiZW5jcnlwdERhdGEiOnRydWUsImVuY3J5cHRNb2RlbCI6dHJ1ZSwiZXhwb3J0UmVxdWlyZXNBbGxDb250cmlidXRvcnMiOnRydWV9fQ.KqjSkTbFEJP2Au09BySLi-m3BmyWXDbU4wYWfapbtznaHGJwd44S05LA0dru9llX0kOB_0ot3Swfn4MC5g0gwYEQ_HqOpGQn5VkkyhvPRqVjGGNgpQx0U5ptKJ2fT_4W5RFJ_3AwJBvFaoF39bbPe1wUfDZnKv0CAuN7wFkUWx3nWvT96KnoRc4u-t7PgMP3JkI-8mM1X9ypY45WCxGKl2VlxE0Uv6bKFV6Mpf78B59Nb-wbq5VHqv-wKVhshQDR1cIkdO9BhINSLSbByA7vAUHkkYHPpv6ITPfzGDuKVSIFkct8WaZB6XazlU_jGyUx4FNulKXibBmXHJgs37PAdw",
+  "outputEnvelope": {
+    "contractVersion": "tee-contract/1.0",
+    "assetId": "result-synthetic-001",
+    "assetVersion": 1,
+    "keyId": "key-result-001",
+    "keyVersion": 1,
+    "algorithm": "AES-256-GCM",
+    "nonceB64": "DA0ODxAREhMUFRYX",
+    "aadB64": "eyJhc3NldElkIjoicmVzdWx0LXN5bnRoZXRpYy0wMDEiLCJhc3NldFZlcnNpb24iOjEsImtleUlkIjoia2V5LXJlc3VsdC0wMDEiLCJrZXlWZXJzaW9uIjoxfQ==",
+    "ciphertextB64": "kFU5aldSddGqX9X+",
+    "tagB64": "igIE+658I0154WTP2Rq4lw==",
+    "ciphertextSha256": "34b70fe265bb435f6c958abef9f85f1df55f4d1faf40a3f313d4c62b226f101b"
+  },
+  "receipt": {
+    "contractVersion": "tee-contract/1.0",
+    "taskId": "task-001",
+    "requestId": "req-task-001",
+    "status": "SUCCEEDED",
+    "runtimeMode": "SIMULATION",
+    "attestationVerified": false,
+    "policyVersion": 1,
+    "keyReleaseCount": 1,
+    "outputs": [
+      {
+        "kind": "REPORT",
+        "reportKind": "EVALUATION_METRICS",
+        "encrypted": false,
+        "content": {
+          "syntheticMetric": 0.5
+        }
+      },
+      {
+        "kind": "DATA",
+        "resultId": "result-synthetic-001",
+        "encrypted": true,
+        "objectId": "object-output-001",
+        "keyId": "key-result-001",
+        "keyVersion": 1,
+        "ciphertextSha256": "34b70fe265bb435f6c958abef9f85f1df55f4d1faf40a3f313d4c62b226f101b",
+        "contributors": [
+          "org-synthetic-a"
+        ],
+        "exportState": "PENDING_APPROVAL"
+      }
+    ],
+    "startedAt": "2026-08-31T08:00:01Z",
+    "finishedAt": "2026-08-31T08:00:02Z",
+    "errorCode": null
+  },
+  "environment": {
+    "status": {
+      "code": 0,
+      "msg": "success"
+    },
+    "data": {
+      "contractVersion": "tee-contract/1.0",
+      "runtimeMode": "SIMULATION",
+      "checkedAt": "2026-08-31T08:00:00Z",
+      "hardwareDetected": false,
+      "deviceChecks": {
+        "sgx": false,
+        "tdx": false,
+        "csv": false
+      },
+      "attestationVerified": false,
+      "keyServiceReachable": true,
+      "realModeReady": false,
+      "blockers": [
+        "NO_VERIFIED_HARDWARE_RUNTIME"
+      ]
+    }
+  },
+  "idempotentRetry": {
+    "requestId": "req-key-001",
+    "sameRequestBody": true,
+    "expectedKeyId": "key-synthetic-001",
+    "expectedNewKeyCount": 0
+  },
+  "scenarios": [
+    {
+      "id": "end-role-denied",
+      "conditions": {
+        "allowedEndRoles": [
+          "CLIENT"
+        ],
+        "endRole": "CENTER"
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49001,
+          "msg": "END_ROLE_DENIED"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "END_ROLE_DENIED",
+          "requestId": "req-end-role-denied",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "missing-role",
+      "conditions": {
+        "allowedEndRoles": [
+          "CLIENT",
+          "CENTER"
+        ],
+        "endRole": null
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49002,
+          "msg": "END_ROLE_REQUIRED"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "END_ROLE_REQUIRED",
+          "requestId": "req-missing-role",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "old-token",
+      "conditions": {
+        "sessionEndRole": null
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49003,
+          "msg": "RELOGIN_REQUIRED"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "RELOGIN_REQUIRED",
+          "requestId": "req-old-token",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "owner-mismatch",
+      "conditions": {
+        "certificateOwner": "org-synthetic-b",
+        "assetOwner": "org-synthetic-a"
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49004,
+          "msg": "ASSET_OWNER_MISMATCH"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "ASSET_OWNER_MISMATCH",
+          "requestId": "req-owner-mismatch",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "key-revoked",
+      "conditions": {
+        "keyId": "key-synthetic-001",
+        "keyVersion": 1,
+        "keyState": "REVOKED"
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49005,
+          "msg": "KEY_REVOKED"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "KEY_REVOKED",
+          "requestId": "req-key-revoked",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "column-denied",
+      "conditions": {
+        "requestedColumns": [
+          "city"
+        ],
+        "allowedColumns": [
+          "age",
+          "income"
+        ]
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49006,
+          "msg": "POLICY_DENIED"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "POLICY_DENIED",
+          "requestId": "req-column-denied",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "operator-denied",
+      "conditions": {
+        "requestedOperator": "ml.dnn",
+        "allowedOperators": [
+          "ml.xgboost"
+        ]
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49006,
+          "msg": "POLICY_DENIED"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "POLICY_DENIED",
+          "requestId": "req-operator-denied",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "request-conflict",
+      "conditions": {
+        "requestId": "req-key-001",
+        "previousAssetId": "asset-synthetic-001",
+        "requestedAssetId": "asset-synthetic-other"
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49007,
+          "msg": "REQUEST_ID_CONFLICT"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "REQUEST_ID_CONFLICT",
+          "requestId": "req-request-conflict",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "signature-tampered",
+      "conditions": {
+        "originalJwsRef": "taskJws",
+        "payloadPatch": {
+          "operatorId": "ml.dnn"
+        },
+        "keepOriginalSignature": true
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49008,
+          "msg": "TASK_SIGNATURE_INVALID"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "TASK_SIGNATURE_INVALID",
+          "requestId": "req-signature-tampered",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "task-replayed",
+      "conditions": {
+        "taskId": "task-001",
+        "nonce": "task-nonce-synthetic-001",
+        "nonceAlreadyConsumed": true
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49009,
+          "msg": "TASK_REPLAYED"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "TASK_REPLAYED",
+          "requestId": "req-task-replayed",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "export-not-approved",
+      "conditions": {
+        "resultId": "result-synthetic-001",
+        "contributors": [
+          "org-synthetic-a",
+          "org-synthetic-b"
+        ],
+        "votes": {
+          "org-synthetic-a": "APPROVED",
+          "org-synthetic-b": "PENDING"
+        }
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49010,
+          "msg": "EXPORT_NOT_APPROVED"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "EXPORT_NOT_APPROVED",
+          "requestId": "req-export-not-approved",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "real-mode-unavailable",
+      "conditions": {
+        "requestedMode": "HARDWARE",
+        "hardwareDetected": false,
+        "attestationVerified": false
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49011,
+          "msg": "REAL_MODE_UNAVAILABLE"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "REAL_MODE_UNAVAILABLE",
+          "requestId": "req-real-mode-unavailable",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "audit-access-denied",
+      "conditions": {
+        "viewerOwner": "org-synthetic-other",
+        "taskOwners": [
+          "org-synthetic-a"
+        ]
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49012,
+          "msg": "AUDIT_ACCESS_DENIED"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "AUDIT_ACCESS_DENIED",
+          "requestId": "req-audit-access-denied",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "contract-invalid",
+      "conditions": {
+        "contractVersion": "unsupported"
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49013,
+          "msg": "CONTRACT_INVALID"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "CONTRACT_INVALID",
+          "requestId": "req-contract-invalid",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "payload-too-large",
+      "conditions": {
+        "plaintextBytes": 67108865
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49014,
+          "msg": "PAYLOAD_TOO_LARGE"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "PAYLOAD_TOO_LARGE",
+          "requestId": "req-payload-too-large",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "key-service-unavailable",
+      "conditions": {
+        "keyServiceReachable": false
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49015,
+          "msg": "KEY_SERVICE_UNAVAILABLE"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "KEY_SERVICE_UNAVAILABLE",
+          "requestId": "req-key-service-unavailable",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "id": "task-expired",
+      "conditions": {
+        "expiresAt": "2026-08-31T08:05:00Z",
+        "now": "2026-08-31T08:06:00Z"
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49016,
+          "msg": "TASK_EXPIRED"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "TASK_EXPIRED",
+          "requestId": "req-task-expired",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "data-integrity-failed",
+      "conditions": {
+        "objectId": "object-input-001",
+        "tamperedTag": true
+      },
+      "expectedResponse": {
+        "status": {
+          "code": 49017,
+          "msg": "DATA_INTEGRITY_FAILED"
+        },
+        "data": {
+          "contractVersion": "tee-contract/1.0",
+          "errorCode": "DATA_INTEGRITY_FAILED",
+          "requestId": "req-data-integrity-failed",
+          "retryable": false
+        }
+      }
+    }
+  ],
+  "receiptJws": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXUyIsImtpZCI6ImUzMjQ1YTkxNjVlYjczNDZjZTg4NDdjMDg0YzIzMDJiM2ZiMmU4M2JjNmEzZmU5MTk1NmFlMTk0ZTlkZWY0YTIifQ.eyJjb250cmFjdFZlcnNpb24iOiJ0ZWUtY29udHJhY3QvMS4wIiwidGFza0lkIjoidGFzay0wMDEiLCJyZXF1ZXN0SWQiOiJyZXEtdGFzay0wMDEiLCJzdGF0dXMiOiJTVUNDRUVERUQiLCJydW50aW1lTW9kZSI6IlNJTVVMQVRJT04iLCJhdHRlc3RhdGlvblZlcmlmaWVkIjpmYWxzZSwicG9saWN5VmVyc2lvbiI6MSwia2V5UmVsZWFzZUNvdW50IjoxLCJvdXRwdXRzIjpbeyJraW5kIjoiUkVQT1JUIiwicmVwb3J0S2luZCI6IkVWQUxVQVRJT05fTUVUUklDUyIsImVuY3J5cHRlZCI6ZmFsc2UsImNvbnRlbnQiOnsic3ludGhldGljTWV0cmljIjowLjV9fSx7ImtpbmQiOiJEQVRBIiwicmVzdWx0SWQiOiJyZXN1bHQtc3ludGhldGljLTAwMSIsImVuY3J5cHRlZCI6dHJ1ZSwib2JqZWN0SWQiOiJvYmplY3Qtb3V0cHV0LTAwMSIsImtleUlkIjoia2V5LXJlc3VsdC0wMDEiLCJrZXlWZXJzaW9uIjoxLCJjaXBoZXJ0ZXh0U2hhMjU2IjoiMzRiNzBmZTI2NWJiNDM1ZjZjOTU4YWJlZjlmODVmMWRmNTVmNGQxZmFmNDBhM2YzMTNkNGM2MmIyMjZmMTAxYiIsImNvbnRyaWJ1dG9ycyI6WyJvcmctc3ludGhldGljLWEiXSwiZXhwb3J0U3RhdGUiOiJQRU5ESU5HX0FQUFJPVkFMIn1dLCJzdGFydGVkQXQiOiIyMDI2LTA4LTMxVDA4OjAwOjAxWiIsImZpbmlzaGVkQXQiOiIyMDI2LTA4LTMxVDA4OjAwOjAyWiIsImVycm9yQ29kZSI6bnVsbH0.HBExs7c4mzgHk_kHkin-RxyI8QfO-dh6T0nP4CjVQlvtY8eZPSjfqHLVhuuw12dOqGXdz47xRO4EjBqLXRua7P26FROrzTTWQngnSmQvn-_72PaiDO9s3IoV6T3qxC3EMFmFy1ML1Y7XdO7EG7YufpsOIVdjPqez2y_eMl0eGimq7S8kADjwfgIlakoVO8pQLarSUpX-CBG-aRRdxxxXhb7QaNPUll7PLEb1dssutE1ADvlGeMWTcOEeObvKjAij05MHnMlEU0t2TXdwSvGr-ENNZULF9mz1_lhKDvs4HJugkkXN1YUm6fhAGtahUEt5BBXJJQzYMUHV8E9vlthj8g"
+}
