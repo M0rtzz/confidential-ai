@@ -107,15 +107,83 @@ def platform_digest():
     return source_digest(ROOT, ('scripts/deploy/tee', 'develop.sh', 'docs/tee-dev-a'))
 
 
+# 实际复用的六个输入；并行开发的其他 runner 文件不进入本次打包。
+TOOLKIT_INPUTS = ['Dockerfile', 'build.sh', 'data-sandbox.env.example',
+                  'deploy/common/log.sh', 'deploy/common/utils.sh', 'develop.sh']
+TOOLKIT_PIN = CACHE / 'toolkit-pin'
+
+
+def toolkit_source():
+    """A 构建实际读取的工具链目录。
+
+    共享工具链是他人也在改的工作副本。A 固定使用自己钉住的副本，
+    只有显式执行 sync-toolkit 才采纳共享副本的新版本；这样 B 的并行改动
+    既不会中断 A 的构建，A 也不去改动共享目录里的任何文件。
+    """
+    return TOOLKIT_PIN if (TOOLKIT_PIN / 'develop.sh').is_file() else TOOLKIT
+
+
+def toolkit_file(name):
+    file = toolkit_source() / name
+    if file.is_symlink() or not file.is_file():
+        raise RuntimeError('工具链输入不是普通文件：' + name)
+    return file
+
+
 def toolkit_digest():
-    # 只锁定实际复用的六个输入；并行开发的其他 runner 文件不进入本次打包。
     digest = hashlib.sha256()
-    for name in ['Dockerfile', 'build.sh', 'data-sandbox.env.example', 'deploy/common/log.sh', 'deploy/common/utils.sh', 'develop.sh']:
+    for name in TOOLKIT_INPUTS:
+        digest.update(name.encode() + b'\0' + toolkit_file(name).read_bytes())
+    return digest.hexdigest()
+
+
+def shared_toolkit_digest():
+    digest = hashlib.sha256()
+    for name in TOOLKIT_INPUTS:
         file = TOOLKIT / name
         if file.is_symlink() or not file.is_file():
-            raise RuntimeError('工具链输入不是普通文件：' + name)
+            raise RuntimeError('共享工具链输入不是普通文件：' + name)
         digest.update(name.encode() + b'\0' + file.read_bytes())
     return digest.hexdigest()
+
+
+def pin_toolkit(adopt):
+    """把共享工具链的六个输入钉成 A 自己的副本，只读共享目录，不写回。
+
+    adopt 为真时采纳共享副本的当前版本；为假时只在尚未钉住时建立初始副本。
+    每次采纳都留下上一版摘要，便于对照并在需要时回到旧版重建。
+    """
+    pinned = (TOOLKIT_PIN / 'develop.sh').is_file()
+    if pinned and not adopt:
+        return False
+    previous = toolkit_digest() if pinned else None
+    TOOLKIT_PIN.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for name in TOOLKIT_INPUTS:
+        source = TOOLKIT / name
+        if source.is_symlink() or not source.is_file():
+            raise RuntimeError('共享工具链输入不是普通文件：' + name)
+        target = TOOLKIT_PIN / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    record = {'pinnedAt': utc(), 'source': str(TOOLKIT), 'digest': shared_toolkit_digest(),
+              'inputs': {name: hashlib.sha256((TOOLKIT / name).read_bytes()).hexdigest()
+                         for name in TOOLKIT_INPUTS}}
+    if previous:
+        record['previousDigest'] = previous
+    atomic(TOOLKIT_PIN / 'pin.json', record, 0o600)
+    return True
+
+
+def sync_toolkit():
+    """显式采纳共享工具链的当前版本，作为 A 后续构建的输入。"""
+    before = toolkit_digest() if (TOOLKIT_PIN / 'develop.sh').is_file() else None
+    pin_toolkit(adopt=True)
+    after = toolkit_digest()
+    if before == after:
+        print('共享工具链与已钉住副本一致，未发生变化。')
+    else:
+        print(f'已采纳共享工具链当前版本：{after[:12]}；上一版 {(before or "无")[:12]}。')
+        print('随后需要重新构建平台镜像，本命令不触发构建。')
 
 
 def source_snapshot(src, dest):
@@ -251,13 +319,18 @@ def prepare():
         detect(name)
     target = CACHE / 'toolkit'
     target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # 首次执行时把共享工具链钉成 A 自己的副本；此后只用钉住的版本。
+    pin_toolkit(adopt=False)
+    if shared_toolkit_digest() != toolkit_digest():
+        print('注意：共享工具链已被改动，本次仍使用 A 钉住的副本；'
+              '确认要采纳新版本时执行 ./develop.sh sync-toolkit --tee。')
     for name in ['deploy/common/log.sh', 'deploy/common/utils.sh', 'data-sandbox.env.example', 'Dockerfile']:
         dest = target / name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(TOOLKIT / name, dest)
+        shutil.copy2(toolkit_file(name), dest)
     # 使用公开默认配置，不复制原工具链 data-sandbox.env 中的运行凭据。
-    shutil.copy2(TOOLKIT / 'data-sandbox.env.example', target / 'data-sandbox.env')
-    script = (TOOLKIT / 'develop.sh').read_text()
+    shutil.copy2(toolkit_file('data-sandbox.env.example'), target / 'data-sandbox.env')
+    script = toolkit_file('develop.sh').read_text()
     script = replace_once(script, 'WORKSPACE_DIR="$(cd "${PACKAGE_DIR}/.." && pwd)"', f'WORKSPACE_DIR="{ROOT}"')
     script = replace_once(script, 'BACKEND_DIR="$(realpath -m "${WORKSPACE_DIR}/confidential-ai")"', 'BACKEND_DIR="$WORKSPACE_DIR"')
     script = replace_once(script, 'FRONTEND_DIR="$(realpath -m "${WORKSPACE_DIR}/confidential-ai-frontend")"', f'FRONTEND_DIR="{FRONTEND}"')
@@ -509,7 +582,8 @@ def main():
     parser.add_argument('command', choices=['prepare', 'status', 'build-platform', 'up', 'down', 'fetch-sources',
         'register-sampler', 'certificates', 'render', 'base-up', 'probe-up', 'register', 'smoke', 'pair',
         'verify-tls', 'verify-native', 'verify-persistence', 'verify-environment', 'verify-isolation', 'verify-repeat', 'verify-release', 'lock-image', 'build-components',
-        'refresh-detection', 'detect-schedule', 'adapter-up', 'publish-identities', 'verify-p4'])
+        'refresh-detection', 'detect-schedule', 'adapter-up', 'publish-identities', 'verify-p4',
+        'sync-toolkit'])
     parser.add_argument('--tee', action='store_true', required=True)
     parser.add_argument('--name', choices=list(INSTANCES), default='tee-a-center')
     parser.add_argument('--image-key')
@@ -527,6 +601,8 @@ def main():
         return refresh_detection()
     if args.command == 'detect-schedule':
         return schedule_detection(args.remove_schedule)
+    if args.command == 'sync-toolkit':
+        return sync_toolkit()
     with (CACHE / 'operation.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.command == 'prepare': prepare()

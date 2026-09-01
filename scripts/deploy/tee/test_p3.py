@@ -334,6 +334,60 @@ class IdentityPublishTests(unittest.TestCase):
             self.assertEqual(['sha256:aa', 'sha256:bb'], foundation.runtime_image_digests())
 
 
+
+class ToolkitPinTests(unittest.TestCase):
+    """共享工具链是他人也在改的工作副本；A 只用自己钉住的副本，且不写回共享目录。"""
+
+    @contextlib.contextmanager
+    def workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shared = root / 'shared'
+            for name in p3.TOOLKIT_INPUTS:
+                file = shared / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text('原始 ' + name + '\n')
+            with patch.object(p3, 'ROOT', root), patch.object(p3, 'TOOLKIT', shared), \
+                    patch.object(p3, 'CACHE', root / 'cache'), \
+                    patch.object(p3, 'TOOLKIT_PIN', root / 'cache/toolkit-pin'):
+                yield shared
+
+    def test_pin_is_created_once_and_shared_changes_do_not_leak_in(self):
+        with self.workspace() as shared:
+            self.assertTrue(p3.pin_toolkit(adopt=False))
+            pinned = p3.toolkit_digest()
+            # 他人改动共享副本后，A 读到的仍是钉住的版本。
+            (shared / 'develop.sh').write_text('他人改动\n')
+            self.assertEqual(pinned, p3.toolkit_digest())
+            self.assertNotEqual(pinned, p3.shared_toolkit_digest())
+            # 重复调用不会自动采纳。
+            self.assertFalse(p3.pin_toolkit(adopt=False))
+            self.assertEqual(pinned, p3.toolkit_digest())
+
+    def test_sync_adopts_current_shared_version_and_keeps_previous_digest(self):
+        with self.workspace() as shared:
+            p3.pin_toolkit(adopt=False)
+            first = p3.toolkit_digest()
+            (shared / 'develop.sh').write_text('他人改动\n')
+            quiet(p3.sync_toolkit)
+            self.assertEqual(p3.shared_toolkit_digest(), p3.toolkit_digest())
+            record = json.loads((p3.TOOLKIT_PIN / 'pin.json').read_text())
+            self.assertEqual(first, record['previousDigest'])
+
+    def test_pinning_never_writes_to_the_shared_toolkit(self):
+        with self.workspace() as shared:
+            before = {name: (shared / name).read_bytes() for name in p3.TOOLKIT_INPUTS}
+            p3.pin_toolkit(adopt=False)
+            quiet(p3.sync_toolkit)
+            for name, content in before.items():
+                self.assertEqual(content, (shared / name).read_bytes())
+
+    def test_missing_pin_falls_back_to_shared_source(self):
+        with self.workspace() as shared:
+            self.assertEqual(shared, p3.toolkit_source())
+            p3.pin_toolkit(adopt=False)
+            self.assertEqual(p3.TOOLKIT_PIN, p3.toolkit_source())
+
 if __name__ == '__main__':
     os.umask(0o077)
     unittest.main()
