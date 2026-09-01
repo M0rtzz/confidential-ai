@@ -30,8 +30,8 @@ class IsolationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             runtime = Path(folder)
             instance = runtime / 'client-a'
-            instance.mkdir()
-            (instance / '.domain-id').write_text('dev-gpu-a\n')
+            (instance / 'kuscia/config').mkdir(parents=True)
+            (instance / 'kuscia/config/kuscia.yaml').write_text('mode: autonomy\ndomainID: dev-gpu-a\n')
             credentials = instance / 'secretpad.env'
             credentials.write_text(
                 'NODE_ID=old\nKUSCIA_API_ADDRESS=old:8083\n'
@@ -53,8 +53,8 @@ class IsolationTests(unittest.TestCase):
     def test_invalid_migrated_domain_is_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             runtime = Path(folder)
-            (runtime / 'center').mkdir()
-            (runtime / 'center/.domain-id').write_text('../escape')
+            (runtime / 'center/kuscia/config').mkdir(parents=True)
+            (runtime / 'center/kuscia/config/kuscia.yaml').write_text('domainID: ../escape\n')
             with patch.object(deploy, 'RUNTIME', runtime):
                 with self.assertRaises(RuntimeError):
                     deploy.domain_id('center')

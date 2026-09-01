@@ -262,9 +262,14 @@ def save_manifest(data):
 
 
 def domain_id(name):
-    """新实例默认使用可读名称；迁移实例可通过标记保留既有 Kuscia 域。"""
-    marker = RUNTIME / name / '.domain-id'
-    value = marker.read_text().strip() if marker.exists() else f'dev-{name}'
+    """新实例使用可读名称；迁移实例自动沿用既有 Kuscia 域。"""
+    config = RUNTIME / name / 'kuscia/config/kuscia.yaml'
+    value = f'dev-{name}'
+    if config.exists():
+        matches = re.findall(r'(?m)^domainID:\s*([^\s#]+)\s*(?:#.*)?$', config.read_text())
+        if len(matches) != 1:
+            raise RuntimeError(f'实例 {name} 的 Kuscia 配置缺少唯一 domainID')
+        value = matches[0]
     if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', value):
         raise RuntimeError(f'实例 {name} 的 Kuscia 域标记不合法')
     return value
