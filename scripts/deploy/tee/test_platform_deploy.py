@@ -122,6 +122,17 @@ class IsolationTests(unittest.TestCase):
         self.assertTrue(mount['readOnly'])
         self.assertEqual(foundation.GET_RA, '/secretflowapis.v2.sdc.capsule_manager.CapsuleManager/GetRaCert')
 
+    def test_kubernetes_ownership_migration_requires_manifest_and_explicit_repair(self):
+        legacy = '/data/collab/Projects/gpu-tee-dev-a'
+        labels = {'tee.secretflow.dev/owner': 'collab',
+                  'tee.secretflow.dev/workspace': hashlib.sha256(legacy.encode()).hexdigest()[:32]}
+        with patch.object(foundation, 'manifest', return_value={
+                'migratedFrom': {'workspace': legacy}}):
+            self.assertFalse(foundation.kube_labels_owned_or_migrated(labels))
+            self.assertTrue(foundation.kube_labels_owned_or_migrated(labels, True))
+        with patch.object(foundation, 'manifest', return_value={}):
+            self.assertFalse(foundation.kube_labels_owned_or_migrated(labels, True))
+
     def test_partial_ca_and_external_key_path_are_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

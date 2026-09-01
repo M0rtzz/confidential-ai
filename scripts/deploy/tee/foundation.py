@@ -373,6 +373,20 @@ def kube_labels():
             'tee.secretflow.dev/workspace': hashlib.sha256(str(ROOT).encode()).hexdigest()[:32]}
 
 
+def kube_labels_owned_or_migrated(existing, repair_startup=False):
+    """只在显式修复时接管运行清单记录的来源工作树资源。"""
+    expected = kube_labels()
+    if all(existing.get(key) == value for key, value in expected.items()):
+        return True
+    migrated = manifest().get('migratedFrom', {})
+    workspace = migrated.get('workspace') if isinstance(migrated, dict) else None
+    if not repair_startup or not workspace:
+        return False
+    legacy = {'tee.secretflow.dev/owner': 'collab',
+              'tee.secretflow.dev/workspace': hashlib.sha256(workspace.encode()).hexdigest()[:32]}
+    return all(existing.get(key) == value for key, value in legacy.items())
+
+
 def import_image(name, key):
     ref = checked_image(key)
     ctr = f'data-sandbox-dev-{name}-kuscia'
@@ -580,7 +594,8 @@ def base_up(repair_startup=False):
     if marker.exists():
         if marker.read_text().strip() != digest:
             existing = json.loads(kube('center', 'get', 'deployment', 'tee-a-capsule', '-n', DOMAIN, '-o', 'json'))
-            if any(existing['metadata'].get('labels', {}).get(k) != v for k, v in kube_labels().items()):
+            if not kube_labels_owned_or_migrated(
+                    existing['metadata'].get('labels', {}), repair_startup):
                 raise RuntimeError('底座归属不符，拒绝操作')
             if existing.get('status', {}).get('readyReplicas', 0) > 0 and not repair_startup:
                 raise RuntimeError('不替换健康或归属不符的底座；需单独核对配置变化')
