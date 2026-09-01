@@ -45,11 +45,13 @@ public class DataAssetService {
     private final SandboxApprovalService approvalService;
     private final NodeDatasetStore nodeDatasetStore;
     private final AssetSyncService assetSyncService;
+    private final org.secretflow.secretpad.web.service.tee.TeeAssetEncryptor teeAssetEncryptor;
 
     public DataAssetService(@Qualifier("jdbcTemplate") JdbcTemplate jdbc, ObjectMapper mapper,
             MinioAssetStorage storage, ProjectAssetRepository projectAssetRepository,
             SandboxApprovalService approvalService, NodeDatasetStore nodeDatasetStore,
-            AssetSyncService assetSyncService) {
+            AssetSyncService assetSyncService,
+            org.secretflow.secretpad.web.service.tee.TeeAssetEncryptor teeAssetEncryptor) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.storage = storage;
@@ -57,6 +59,7 @@ public class DataAssetService {
         this.approvalService = approvalService;
         this.nodeDatasetStore = nodeDatasetStore;
         this.assetSyncService = assetSyncService;
+        this.teeAssetEncryptor = teeAssetEncryptor;
     }
 
     /**
@@ -152,19 +155,80 @@ public class DataAssetService {
         return registerGovernedResult(taskId, resultNodeId, resultDatatableId, "", Map.of());
     }
 
-    /** Persist a governance result in managed MinIO and register it in the unified catalog. */
+    /**
+     * 抽样脱敏产出的落盘。
+     *
+     * <p>方案第 04 节第 3 步要求产出加密后落盘：具备密钥服务条件时，先把明文物化进本节点
+     * 权威库供本机构自用，再向中心端申领密钥、在内存中加密，对象存储里只留密文。
+     * 密钥用完即清除，中心端与跨节点通道自始至终只见得到密文。
+     *
+     * <p>密钥服务不可用时保留原有明文落盘，并在元数据中如实标记未加密，
+     * 不以静默降级掩盖缺失的保护。
+     */
     @Transactional
     public Map<String, Object> registerGovernedResult(String taskId, String resultNodeId, byte[] csv) {
         String resultDatatableId="asset-"+UUID.randomUUID().toString().replace("-","").substring(0,12);
         Path temp=null;
         try {
+            String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(csv));
+            if (teeAssetEncryptor.available()) {
+                materializeGovernedPlaintext(resultDatatableId, csv, checksum);
+                var sealed = teeAssetEncryptor.seal(teeOwner(), resultDatatableId, "1", csv);
+                temp=Files.createTempFile("secretpad-governed-",".enc");
+                Files.write(temp, sealed.payload());
+                String payloadChecksum=HexFormat.of().formatHex(
+                        MessageDigest.getInstance("SHA-256").digest(sealed.payload()));
+                String uri=storage.put("governed/"+taskId+"/"+resultDatatableId+".enc",temp.toFile(),
+                        "application/json",payloadChecksum);
+                Map<String,Object> metadata=new LinkedHashMap<>();
+                metadata.put("contentType","application/json");
+                metadata.put("sizeBytes",sealed.payload().length);
+                metadata.put("sha256",payloadChecksum);
+                metadata.put("encrypted",Boolean.TRUE);
+                metadata.put("algorithm",org.secretflow.secretpad.web.service.tee.TeeContract.KEY_ALGORITHM);
+                metadata.put("assetVersion","1");
+                metadata.put("keyId",sealed.keyId());
+                metadata.put("keyVersion",sealed.keyVersion());
+                metadata.put("ciphertextSha256",sealed.ciphertextSha256());
+                metadata.put("plaintextSha256",checksum);
+                metadata.put("plaintextBytes",csv.length);
+                return registerGovernedResult(taskId,resultNodeId,resultDatatableId,uri,metadata);
+            }
+            log.warn("密钥服务不可用，抽样脱敏产出以明文落盘 assetId={}", resultDatatableId);
             temp=Files.createTempFile("secretpad-governed-",".csv");
             Files.write(temp,csv);
-            String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(csv));
             String uri=storage.put("governed/"+taskId+"/"+resultDatatableId+".csv",temp.toFile(),"text/csv",checksum);
-            return registerGovernedResult(taskId,resultNodeId,resultDatatableId,uri,Map.of("sizeBytes",csv.length,"sha256",checksum,"contentType","text/csv"));
+            return registerGovernedResult(taskId,resultNodeId,resultDatatableId,uri,
+                    Map.of("sizeBytes",csv.length,"sha256",checksum,"contentType","text/csv","encrypted",Boolean.FALSE));
         }catch(Exception e){throw new IllegalStateException("保存抽样脱敏结果失败",e);}
         finally {if(temp!=null)try{Files.deleteIfExists(temp);}catch(IOException ignored){}}
+    }
+
+    /**
+     * 密文落盘前先把明文物化进本节点权威库。
+     *
+     * <p>抽样脱敏是本机构的本地明文处理，产出在本地仍需可用；物化后节点库索引已存在，
+     * 后续的 {@code ensureMaterialized} 不会再去读那份已经是密文的存储对象。
+     */
+    private void materializeGovernedPlaintext(String assetId, byte[] csv, String checksum) {
+        List<List<String>> parsed = org.secretflow.secretpad.web.service.governance.CsvUtil.parse(
+                new String(csv, StandardCharsets.UTF_8));
+        if (parsed.isEmpty()) {
+            throw new IllegalStateException("抽样脱敏产出表头为空: " + assetId);
+        }
+        List<String> header = new ArrayList<>(parsed.get(0));
+        List<List<String>> rows = parsed.size() > 1
+                ? new ArrayList<>(parsed.subList(1, parsed.size())) : new ArrayList<>();
+        nodeDatasetStore.materializeExternal(assetId, owner(), assetId, header, rows, checksum);
+    }
+
+    /** 契约层的机构标识；与密钥台账、授权规则使用同一个取值，不用平台节点标识替代。 */
+    private String teeOwner() {
+        UserContextDTO user = UserContext.getUserOrNotExist();
+        if (user == null || user.getOwnerId() == null || user.getOwnerId().isBlank()) {
+            throw new IllegalStateException("缺少机构标识，无法为抽样脱敏产出申领密钥");
+        }
+        return user.getOwnerId();
     }
 
     private Map<String, Object> registerGovernedResult(String taskId, String resultNodeId, String resultDatatableId,

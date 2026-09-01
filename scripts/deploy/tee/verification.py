@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from datetime import datetime
 
-from p3 import ROOT, ORIGINAL, RUNTIME, INSTANCES, run, atomic, kube, checked_image, managed, manifest, utc
+from platform_deploy import ROOT, ORIGINAL, RUNTIME, INSTANCES, run, atomic, kube, checked_image, managed, manifest, utc
 from foundation import CENTER, PKI, DOMAIN, openssl, issue, make_ca, labels, pod_exec
 
 
@@ -391,7 +391,7 @@ def verify_isolation():
 
 def verify_repeat():
     from foundation import certificates, base_up, probe_up, pair
-    from p3 import up
+    from platform_deploy import up
     def state():
         containers = {name + '-' + suffix: managed('data-sandbox-dev-' + name + '-' + suffix)['State']['StartedAt']
             for name in INSTANCES for suffix in ['secretpad', 'kuscia', 'minio', 'tee-probe']}
@@ -462,7 +462,7 @@ def verify_release():
 
 def verify_p4():
     """用一份示例数据跑完密钥、加密、登记、放行、解密全链路，并逐项验证拒绝行为。"""
-    script = ROOT / 'scripts/deploy/tee/p4_e2e.py'
+    script = ROOT / 'scripts/deploy/tee/contract_acceptance.py'
     result = subprocess.run(['python3', str(script)], capture_output=True, text=True, timeout=600)
     if result.returncode:
         raise RuntimeError('P4 全链路验收未通过')
@@ -480,6 +480,8 @@ def verify_p4():
     print('规则登记、资产登记后由签名任务在运行时放行并解密还原，中心端全程只持有密文。')
     print('覆盖的拒绝错误码：' + '、'.join(denials))
     print('授权规则的审批来源、运行镜像摘要、程序结构与结果对象写入端均已逐项校验。')
+    print('两个客户端实例经平台间双向 TLS 向中心端申请密钥并登记规则，台账只在中心端；')
+    print('三个实例的抽样脱敏产出均加密落盘，跨节点同步送出的字节确认为密文。')
 
 
 def verify(command):

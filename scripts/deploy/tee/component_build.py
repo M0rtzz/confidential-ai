@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 import shlex
 
-from p3 import ROOT, CACHE, SOURCES, run, atomic, manifest, save_manifest, checked_image, image_info, replace_once
+from platform_deploy import ROOT, CACHE, SOURCES, run, atomic, manifest, save_manifest, checked_image, image_info, replace_once
 from foundation import labels
 
 

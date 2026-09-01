@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P3 隔离部署：默认只准备文件；网络下载、镜像构建及启动分别执行。"""
+"""隔离工作树的部署编排：默认只准备文件；网络下载、镜像构建及启动分别执行。"""
 import argparse
 import contextlib
 import datetime as dt
@@ -27,6 +27,9 @@ CACHE = ROOT / '.cache/tee-p3'
 RUNTIME = ROOT / '.dev-runtime'
 LABEL = 'io.hustnlp.data-sandbox.'
 INSTANCES = {'tee-a-center': 196, 'tee-a-client-1': 197, 'tee-a-client-2': 198}
+# 中心端平台间契约入口的对外地址；客户端实例按此申请密钥与登记规则。
+CONTRACT_PORT = 19686
+CONTRACT_CENTER_URL = f'https://222.20.99.38:{CONTRACT_PORT}'
 SOURCES = {
     'trustflow': ('trustflow', '13b13e0729f42accd1c0f15bb42c5b57e09fdabe'),
     'teeapps': ('trustflow-teeapps', 'd68428fc4d9ee9ffa6d229a90f052fcfe5560587'),
@@ -241,6 +244,7 @@ def port_check(name):
     ports = {base + n for n in [80, 81, 82, 83, 84, 88]}
     if name == 'tee-a-center':
         ports.add(19685)
+        ports.add(CONTRACT_PORT)
     own = {f'data-sandbox-dev-{name}-{suffix}' for suffix in ['kuscia', 'secretpad']}
     ids = run('docker', 'ps', '-aq', capture=True).split()
     mapped = set()
@@ -359,7 +363,7 @@ def prepare():
     end = script.index('start_kuscia() {', start)
     script = script[:start] + '''ensure_sampler_runtime() {
   import_sampler_image
-  python3 "$BACKEND_DIR/scripts/deploy/tee/p3.py" register-sampler --name "$DEV_NAME" --tee
+  python3 "$BACKEND_DIR/scripts/deploy/tee/platform_deploy.py" register-sampler --name "$DEV_NAME" --tee
 }
 
 ''' + script[end:]
@@ -384,6 +388,9 @@ def prepare():
                           '  if verify_managed_container "$SECRETPAD_CONTAINER"; then\n    log_error "P3 refuses implicit platform replacement."\n    exit 1\n  fi')
     # 只给中心 Kuscia 发布密钥服务入口，原生 CM 端口不发布。
     script = script.replace('-p "${METRICS_PORT}:9091" \\\n', '-p "${METRICS_PORT}:9091" ${TEE_GATEWAY_PORT_ARGS:-} \\\n')
+    # 中心端另开一个平台间契约入口；只有中心实例设置该端口参数。
+    script = replace_once(script, '    -p "${CONSOLE_PORT}:8080" \\\n',
+                          '    -p "${CONSOLE_PORT}:8080" ${TEE_CONTRACT_PORT_ARGS:-} \\\n')
     script = script.replace('-v "${KUSCIA_CONTAINERD_DIR}:/home/kuscia/containerd" \\\n',
                             '-v "${KUSCIA_CONTAINERD_DIR}:/home/kuscia/containerd" \\\n      -v "${DEV_ROOT}/tee:/home/kuscia/tee" \\\n')
     script = replace_once(script, '    --env-file "$CREDENTIAL_FILE" \\\n',
@@ -391,9 +398,14 @@ def prepare():
                           '    -e "TEE_FOUNDATION_PROBE_URL=http://${DEV_PREFIX}-tee-probe:8089/health" \\\n'
                           '    -e "TEE_KEY_ADAPTER_URL=${TEE_KEY_ADAPTER_URL:-}" \\\n'
                           '    -e "TEE_END_ROLES=${TEE_END_ROLES:-CLIENT,CENTER}" \\\n'
+                          '    -e "TEE_CONTRACT_PORT=${TEE_CONTRACT_PORT:-0}" \\\n'
+                          '    -e "TEE_CONTRACT_CENTER_URL=${TEE_CONTRACT_CENTER_URL:-}" \\\n'
                           '    -v "${DEV_ROOT}/status:/app/tee-status:ro" \\\n'
                           '    -v "${DEV_ROOT}/identity-pub:/app/tee-identity:ro" \\\n'
-                          '    -v "${DEV_ROOT}/tee/adapter-client:/app/tee-adapter-client:ro" \\\n')
+                          '    -v "${DEV_ROOT}/tee/adapter-client:/app/tee-adapter-client:ro" \\\n'
+                          '    -v "${DEV_ROOT}/tee/contract-client:/app/tee-contract-client:ro" \\\n'
+                          '    -v "${DEV_ROOT}/tee/identity:/app/tee-identity-key:ro" \\\n'
+                          '    ${TEE_CONTRACT_SERVER_MOUNT:-} \\\n')
     script = script.replace('docker run ', 'docker run --pull=never ').replace('docker create ', 'docker create --pull=never ')
     atomic(target / 'develop.sh', script, 0o700)
     data = manifest()
@@ -510,6 +522,13 @@ def up(name):
                TEE_GATEWAY_PORT_ARGS='-p 19685:31888' if name == 'tee-a-center' else '',
                # 只有中心端直连密钥适配服务；客户端通过中心端的契约接口访问。
                TEE_KEY_ADAPTER_URL='https://data-sandbox-dev-tee-a-center-key-adapter:8090' if name == 'tee-a-center' else '',
+               # 中心端发布平台间契约入口；客户端实例只持有调用地址，不开放任何入口。
+               TEE_CONTRACT_PORT='8443' if name == 'tee-a-center' else '0',
+               TEE_CONTRACT_PORT_ARGS='-p 19686:8443' if name == 'tee-a-center' else '',
+               TEE_CONTRACT_SERVER_MOUNT=(
+                   f'-v {RUNTIME / name}/tee/contract-server:/app/tee-contract-server:ro'
+                   if name == 'tee-a-center' else ''),
+               TEE_CONTRACT_CENTER_URL='' if name == 'tee-a-center' else CONTRACT_CENTER_URL,
                TEE_END_ROLES='CLIENT,CENTER' if name == 'tee-a-center' else 'CLIENT')
     # 独立随机口令只交给上游入口写入本实例 600 凭据文件，不输出到日志。
     password = secrets.token_urlsafe(24) if not (RUNTIME / name / 'secretpad.env').exists() else None

@@ -12,7 +12,7 @@ import tempfile
 import time
 import urllib.request
 
-from p3 import (ROOT, CACHE, RUNTIME, INSTANCES, SOURCES, LABEL, run, atomic, utc,
+from platform_deploy import (ROOT, CACHE, RUNTIME, INSTANCES, SOURCES, LABEL, run, atomic, utc,
                 manifest, save_manifest, checked_image, image_info, managed, kube)
 
 CENTER = RUNTIME / 'tee-a-center/tee'
@@ -80,6 +80,19 @@ commonName=supplied
     openssl('ca', '-batch', '-config', directory / 'openssl.cnf', '-gencrl', '-out', directory / 'ca.crl')
 
 
+def subject_alt_names(cn, server):
+    """服务端证书的附加名称；客户端证书不追加，避免把可路由地址写进调用方身份。"""
+    if not server:
+        return ''
+    if cn == 'capsule.tee-a.test':
+        return (f',DNS:capsule-manager.{DOMAIN}.svc,'
+                f'DNS:capsule-manager.{DOMAIN}.svc.cluster.local,IP:222.20.99.38')
+    if cn == CONTRACT_SERVER_CN:
+        # 客户端实例通过宿主机地址访问中心端契约入口，证书必须覆盖该地址。
+        return ',IP:222.20.99.38,IP:127.0.0.1'
+    return ''
+
+
 def issue(ca, directory, cn, server=False, expired=False):
     if directory.is_symlink() or not directory.resolve().is_relative_to(ROOT):
         raise RuntimeError('证书目录越出 A 工作树')
@@ -98,7 +111,7 @@ def issue(ca, directory, cn, server=False, expired=False):
             '-addext', 'basicConstraints=critical,CA:FALSE',
             '-addext', 'keyUsage=critical,digitalSignature,keyEncipherment',
             '-addext', 'extendedKeyUsage=' + ('serverAuth' if server else 'clientAuth'),
-            '-addext', 'subjectAltName=DNS:' + cn + (f',DNS:capsule-manager.{DOMAIN}.svc,DNS:capsule-manager.{DOMAIN}.svc.cluster.local,IP:222.20.99.38' if server and cn == 'capsule.tee-a.test' else ''))
+            '-addext', 'subjectAltName=DNS:' + cn + subject_alt_names(cn, server))
     args = ['ca', '-batch', '-notext', '-config', ca / 'openssl.cnf',
             '-in', directory / 'client.csr', '-out', directory / 'client.crt']
     if expired:
@@ -108,6 +121,9 @@ def issue(ca, directory, cn, server=False, expired=False):
     (directory / 'client.csr').unlink()
     for f in directory.iterdir():
         if f.is_file(): f.chmod(0o600)
+
+
+CONTRACT_SERVER_CN = 'tee-a-center-contract'
 
 
 def certificates():
@@ -130,6 +146,14 @@ def certificates():
           'data-sandbox-dev-tee-a-center-key-adapter', server=True)
     for name in INSTANCES:
         issue(PKI / 'adapter-ca', RUNTIME / name / 'tee/adapter-client', 'platform-' + name)
+    # 平台之间的契约调用使用第三个信任域：客户端实例凭它向中心端申请密钥，
+    # 与访问密钥适配服务的身份分开，任一方被吊销都不牵连另一条路径。
+    make_ca(PKI / 'contract-ca', 'tee-a-contract-ca')
+    issue(PKI / 'contract-ca', CENTER / 'contract-server', CONTRACT_SERVER_CN, server=True)
+    shutil.copy2(PKI / 'contract-ca/ca.crl', CENTER / 'contract-server/ca.crl')
+    (CENTER / 'contract-server/ca.crl').chmod(0o600)
+    for name in INSTANCES:
+        issue(PKI / 'contract-ca', RUNTIME / name / 'tee/contract-client', 'contract-' + name)
     issue(PKI / 'external-ca', CENTER / 'cm-master-key', 'tee-a-cm-master')
     (CENTER / 'cm-client-ca').mkdir(exist_ok=True)
     shutil.copy2(PKI / 'upstream-ca/ca.crt', CENTER / 'cm-client-ca/ca.crt')
@@ -204,6 +228,24 @@ def published_owner_entries():
     return entries
 
 
+def contract_client_certificates(owners=None):
+    """平台间契约入口的调用方身份：客户端证书 DER SHA-256 → 机构标识。
+
+    中心端只按这张表认调用方。证书通过 CA 验证还不够，必须显式登记过才有机构身份，
+    因此新增实例不会因为签发了证书就自动获得访问权。
+    """
+    stored = owner_map()
+    entries = {}
+    for name in INSTANCES:
+        cert = RUNTIME / name / 'tee/contract-client/client.crt'
+        owner = (owners or {}).get(name) or stored.get(name)
+        if not cert.exists() or not owner:
+            continue
+        der = subprocess.check_output(['openssl', 'x509', '-in', str(cert), '-outform', 'DER'])
+        entries[hashlib.sha256(der).hexdigest()] = owner
+    return entries
+
+
 def runtime_image_digests():
     """仿真模式允许执行的运行镜像摘要；来自已锁定的镜像清单，不接受任意取值。"""
     images = manifest().get('images', {})
@@ -220,7 +262,8 @@ def publish_identities(identities, owners=None):
     """
     published = {'taskSigningCertificates': {
         'tee-a-center-1': der_base64(CENTER / 'task-signer/client.crt')},
-        'runtimeImageDigests': runtime_image_digests()}
+        'runtimeImageDigests': runtime_image_digests(),
+        'contractClientCertificates': contract_client_certificates(owners)}
     published.update(published_owner_entries())
     stored = owner_map()
     for name, value in identities.items():

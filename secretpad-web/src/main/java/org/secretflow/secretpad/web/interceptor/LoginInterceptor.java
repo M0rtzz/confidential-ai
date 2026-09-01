@@ -89,6 +89,10 @@ public class LoginInterceptor implements HandlerInterceptor {
     @Value("${server.http-port-inner}")
     private Integer innerHttpPort;
 
+    /** 平台间契约入口的端口；仅中心实例配置，0 表示本实例不开放该入口。 */
+    @Value("${TEE_CONTRACT_PORT:0}")
+    private Integer contractPort;
+
     @Value("${secretpad.deploy-mode}")
     private String deployMode;
 
@@ -97,6 +101,9 @@ public class LoginInterceptor implements HandlerInterceptor {
 
     @Resource
     private DataSandboxMvpService dataSandboxMvpService;
+
+    @Resource
+    private org.secretflow.secretpad.web.service.tee.TeeContractIdentity teeContractIdentity;
 
     @Resource
     private org.secretflow.secretpad.web.service.model.ModelApiService modelApiService;
@@ -147,10 +154,21 @@ public class LoginInterceptor implements HandlerInterceptor {
     public boolean preHandle(@NotNull HttpServletRequest request, @NotNull HttpServletResponse response, @NotNull Object handler) {
         // 按实际处理器强制验证契约接口，避免路径编码、内部端口或 auth.enabled 绕过会话。
         // 新增契约接口必须实现 TeeApi，否则会落到普通路径上。
+        boolean onContractPort = contractPort != null && contractPort > 0
+                && contractPort.equals(request.getLocalPort());
         if (handler instanceof org.springframework.web.method.HandlerMethod method
                 && org.secretflow.secretpad.web.controller.TeeApi.class.isAssignableFrom(method.getBeanType())) {
             if (innerHttpPort.equals(request.getLocalPort())) {
                 return rejectTee(response, HttpServletResponse.SC_FORBIDDEN, "AUDIT_ACCESS_DENIED", 49012);
+            }
+            // 平台间入口不接受会话令牌，身份一律来自本次连接的客户端证书。
+            if (onContractPort) {
+                try {
+                    UserContext.setBaseUser(contractCaller(teeContractIdentity.requireOwner(request)));
+                } catch (RuntimeException denied) {
+                    return rejectTee(response, HttpServletResponse.SC_FORBIDDEN, "AUDIT_ACCESS_DENIED", 49012);
+                }
+                return checkEndRole(request, response);
             }
             try {
                 processByUserRequest(request, response);
@@ -158,6 +176,10 @@ public class LoginInterceptor implements HandlerInterceptor {
                 return rejectTee(response, HttpServletResponse.SC_UNAUTHORIZED, "AUDIT_ACCESS_DENIED", 49012);
             }
             return checkEndRole(request, response);
+        }
+        // 平台间入口只服务契约接口，其余路径一律不在该端口暴露。
+        if (onContractPort) {
+            return rejectTee(response, HttpServletResponse.SC_FORBIDDEN, "AUDIT_ACCESS_DENIED", 49012);
         }
         // 开发端点跳板：安全关键路径，独立于 auth.enabled 强制校验一次性 token
         if (request.getRequestURI().startsWith("/api/v1alpha1/data-sandbox/proxy/")) {
@@ -222,6 +244,25 @@ public class LoginInterceptor implements HandlerInterceptor {
         devUser.setPlatformNodeId(envService.getPlatformNodeId());
         devUser.setDeployMode(deployMode);
         UserContext.setBaseUser(devUser);
+    }
+
+    /**
+     * 平台间调用方的上下文。
+     *
+     * <p>机构标识来自已登记的客户端证书，端角色固定为数据方：本入口只用于客户端实例
+     * 向中心端申请密钥与登记规则，运行时放行等中心端能力仍会被端角色守卫拒绝。
+     */
+    private UserContextDTO contractCaller(String ownerId) {
+        UserContextDTO caller = new UserContextDTO();
+        caller.setName("tee-contract:" + ownerId);
+        caller.setOwnerId(ownerId);
+        caller.setOwnerType(UserOwnerTypeEnum.EDGE);
+        caller.setToken("tee-contract");
+        caller.setPlatformType(envService.getPlatformType());
+        caller.setPlatformNodeId(envService.getPlatformNodeId());
+        caller.setDeployMode(deployMode);
+        caller.setEndRole("CLIENT");
+        return caller;
     }
 
     private void processByNodeRpcRequest(HttpServletRequest request) {

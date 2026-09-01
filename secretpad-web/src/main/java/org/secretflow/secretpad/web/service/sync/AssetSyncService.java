@@ -109,6 +109,11 @@ public class AssetSyncService {
             byte[] payload = json(ciphertext.get()).getBytes(StandardCharsets.UTF_8);
             return new AssetDownload(payload, sha256(payload));
         }
+        // 抽样脱敏产出已加密落盘但尚未按授权规则登记时，同样只送密文，绝不回退到明文行。
+        byte[] sealed = storedCiphertext(asset);
+        if (sealed != null) {
+            return new AssetDownload(sealed, sha256(sealed));
+        }
         nodeDatasetStore.ensureMaterialized(assetId);
         byte[] bytes = nodeDatasetStore.exportTableCsv(assetId);
         if (bytes == null) {
@@ -122,6 +127,29 @@ public class AssetSyncService {
         // 资产物化为 SQLite 表后经 CsvUtil 重序列化的 CSV 与原始上传文件字节并不逐字节一致，
         // 若沿用原始文件的 metadata sha256 会导致请求方下载后校验失败（"校验和不一致"）。
         return new AssetDownload(bytes, sha256(bytes));
+    }
+
+    /**
+     * 读取已加密落盘的存储对象。
+     *
+     * <p>只认元数据标记为密文、且内容确实是本契约密文封装的对象；两者有一处不符即返回
+     * {@code null} 交由调用方按未加密路径处理，不会把无法确认的字节当成密文送出。
+     */
+    private byte[] storedCiphertext(Map<String, Object> asset) {
+        Map<String, Object> metadata = parseMap(asset.get("metadata_json"));
+        if (!Boolean.TRUE.equals(metadata.get("encrypted"))) {
+            return null;
+        }
+        String uri = string(asset.get("storage_uri"));
+        if (uri.isBlank()) {
+            return null;
+        }
+        try (InputStream in = storage.open(uri)) {
+            byte[] bytes = in.readAllBytes();
+            return ciphertextPayload(bytes) == null ? null : bytes;
+        } catch (Exception failure) {
+            throw new IllegalStateException("读取密文资产失败: " + asset.get("id"), failure);
+        }
     }
 
     private void authorizeRequester(String assetId, String requesterNodeId) {
@@ -388,6 +416,19 @@ public class AssetSyncService {
 
     private String string(Object o) {
         return o == null ? "" : String.valueOf(o);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseMap(Object value) {
+        String text = string(value);
+        if (text.isBlank() || "{}".equals(text)) {
+            return Map.of();
+        }
+        try {
+            return objectMapper.readValue(text, Map.class);
+        } catch (Exception ignored) {
+            return Map.of();
+        }
     }
 
     private boolean notBlank(Object o) {

@@ -5,7 +5,7 @@ import hashlib
 import subprocess
 import urllib.request
 
-from p3 import CACHE, guard, manifest, save_manifest
+from platform_deploy import CACHE, guard, manifest, save_manifest
 
 EXPECTED = 'a71bba80f8da53ce2877f4c2bd2d1713ab97acc4a3e7987d82d7430cda2d8fb1'
 RENAMED = '3a69a687f2222433addd25dfe6e54a6ca164fcbf4c3dec5ad9e8b155c5bb98cb'

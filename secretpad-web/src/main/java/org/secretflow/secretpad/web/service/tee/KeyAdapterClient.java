@@ -9,25 +9,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManagerFactory;
-import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.KeyFactory;
-import java.security.KeyStore;
-import java.security.PrivateKey;
-import java.security.cert.CertificateFactory;
-import java.security.cert.X509Certificate;
-import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Duration;
-import java.util.Base64;
 import java.util.Map;
 
 /**
@@ -132,37 +120,6 @@ public class KeyAdapterClient {
 
     /** 客户端证书与信任链只从挂载目录读取；不接受配置项传入证书内容。 */
     private SSLContext sslContext() throws Exception {
-        CertificateFactory factory = CertificateFactory.getInstance("X.509");
-        X509Certificate certificate = (X509Certificate) factory.generateCertificate(
-                new ByteArrayInputStream(Files.readAllBytes(certDir.resolve("client.crt"))));
-        X509Certificate authority = (X509Certificate) factory.generateCertificate(
-                new ByteArrayInputStream(Files.readAllBytes(certDir.resolve("ca.crt"))));
-
-        KeyStore identity = KeyStore.getInstance("PKCS12");
-        identity.load(null, null);
-        char[] empty = new char[0];
-        identity.setKeyEntry("adapter-client", privateKey(certDir.resolve("client.key")), empty,
-                new java.security.cert.Certificate[]{certificate});
-        KeyManagerFactory keyManagers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-        keyManagers.init(identity, empty);
-
-        KeyStore trust = KeyStore.getInstance("PKCS12");
-        trust.load(null, null);
-        trust.setCertificateEntry("adapter-ca", authority);
-        TrustManagerFactory trustManagers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        trustManagers.init(trust);
-
-        SSLContext context = SSLContext.getInstance("TLSv1.3");
-        context.init(keyManagers.getKeyManagers(), trustManagers.getTrustManagers(), null);
-        return context;
-    }
-
-    private static PrivateKey privateKey(Path path) throws Exception {
-        String pem = Files.readString(path, StandardCharsets.UTF_8)
-                .replace("-----BEGIN PRIVATE KEY-----", "")
-                .replace("-----END PRIVATE KEY-----", "")
-                .replaceAll("\\s", "");
-        return KeyFactory.getInstance("RSA").generatePrivate(
-                new PKCS8EncodedKeySpec(Base64.getDecoder().decode(pem)));
+        return TeeMutualTls.context(certDir, "adapter-client");
     }
 }

@@ -1,4 +1,4 @@
-"""P3 安全边界定向测试，不启动容器、不联网、不使用业务凭据。"""
+"""部署与契约验收的安全边界定向测试，不启动容器、不联网、不使用业务凭据。"""
 import base64
 import contextlib
 import hashlib
@@ -12,10 +12,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import p3
+import platform_deploy as deploy
 import foundation
 import key_adapter
-import p4_e2e
+import contract_acceptance as acceptance
 import release_client
 
 
@@ -32,44 +32,44 @@ class IsolationTests(unittest.TestCase):
             src = root / 'source'; src.mkdir()
             (src / 'file').write_text('original')
             (src / 'link').symlink_to('file')
-            with patch.object(p3, 'run', return_value='file\0link\0'):
-                p3.source_snapshot(src, root / 'copy')
+            with patch.object(deploy, 'run', return_value='file\0link\0'):
+                deploy.source_snapshot(src, root / 'copy')
             (root / 'copy/link').write_text('copy-only')
             self.assertEqual((src / 'file').read_text(), 'original')
             (root / 'outside').write_text('protected')
             (src / 'escape').symlink_to('../outside')
-            with patch.object(p3, 'run', return_value='escape\0'):
-                with self.assertRaises(RuntimeError): p3.source_snapshot(src, root / 'rejected')
+            with patch.object(deploy, 'run', return_value='escape\0'):
+                with self.assertRaises(RuntimeError): deploy.source_snapshot(src, root / 'rejected')
 
     def test_atomic_rejects_escape_and_symlink(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / 'inside').mkdir()
             (root / 'inside/link').symlink_to(root / 'outside')
-            with patch.object(p3, 'ROOT', root / 'inside'):
+            with patch.object(deploy, 'ROOT', root / 'inside'):
                 for file in [root / 'outside/file', root / 'inside/link/file']:
-                    with self.assertRaises(RuntimeError): p3.atomic(file, 'must-not-write')
+                    with self.assertRaises(RuntimeError): deploy.atomic(file, 'must-not-write')
                 self.assertFalse((root / 'outside').exists())
-                p3.atomic(root / 'inside/ok', 'ok')
+                deploy.atomic(root / 'inside/ok', 'ok')
                 self.assertEqual((root / 'inside/ok').stat().st_mode & 0o777, 0o600)
 
     def test_foreign_docker_resource_is_never_managed(self):
         result = subprocess.CompletedProcess([], 0, json.dumps([{'Config': {'Labels': {
-            p3.LABEL + 'dev': 'true', p3.LABEL + 'dev-owner': 'collab',
-            p3.LABEL + 'dev-workspace': '/data/collab/Projects/gpu'}}}]), '')
-        with patch.object(p3.subprocess, 'run', return_value=result):
-            with self.assertRaises(RuntimeError): p3.managed('data-sandbox-dev-tee-a-center-secretpad')
+            deploy.LABEL + 'dev': 'true', deploy.LABEL + 'dev-owner': 'collab',
+            deploy.LABEL + 'dev-workspace': '/data/collab/Projects/gpu'}}}]), '')
+        with patch.object(deploy.subprocess, 'run', return_value=result):
+            with self.assertRaises(RuntimeError): deploy.managed('data-sandbox-dev-tee-a-center-secretpad')
 
     def test_stopped_foreign_container_reserves_ports(self):
         def run(*args, **kwargs):
             if args[:3] == ('docker', 'ps', '-aq'): return 'foreign-id'
             return json.dumps([{'Name': '/foreign', 'HostConfig': {'PortBindings': {'80/tcp': [{'HostPort': '19688'}]}}, 'State': {'Running': False}}])
-        with patch.object(p3, 'run', side_effect=run):
-            with self.assertRaises(RuntimeError): p3.port_check('tee-a-center')
+        with patch.object(deploy, 'run', side_effect=run):
+            with self.assertRaises(RuntimeError): deploy.port_check('tee-a-center')
 
     def test_digest_drift_blocks_image_use(self):
-        with patch.object(p3, 'manifest', return_value={'images': {'probe': {'ref': 'probe:fixed', 'id': 'sha256:old'}}}), patch.object(p3, 'image_info', return_value={'Id': 'sha256:new'}):
-            with self.assertRaises(RuntimeError): p3.checked_image('probe')
+        with patch.object(deploy, 'manifest', return_value={'images': {'probe': {'ref': 'probe:fixed', 'id': 'sha256:old'}}}), patch.object(deploy, 'image_info', return_value={'Id': 'sha256:new'}):
+            with self.assertRaises(RuntimeError): deploy.checked_image('probe')
 
     def test_kubernetes_labels_and_host_mounts_are_scoped(self):
         for value in foundation.kube_labels().values():
@@ -82,10 +82,10 @@ class IsolationTests(unittest.TestCase):
     def test_partial_ca_and_external_key_path_are_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            with patch.object(foundation, 'ROOT', root), patch.object(p3, 'ROOT', root):
+            with patch.object(foundation, 'ROOT', root), patch.object(deploy, 'ROOT', root):
                 ca = root / 'ca'; ca.mkdir(); (ca / 'ca.key').write_text('partial')
                 with self.assertRaises(RuntimeError): foundation.make_ca(ca, 'test')
-                link = root / 'link'; link.symlink_to(root.parent / 'p3-escape')
+                link = root / 'link'; link.symlink_to(root.parent / 'deploy-escape')
                 with patch.object(foundation, 'openssl') as openssl:
                     with self.assertRaises(RuntimeError): foundation.issue(ca, link, 'test')
                     openssl.assert_not_called()
@@ -93,7 +93,7 @@ class IsolationTests(unittest.TestCase):
     def test_certificate_replay_preserves_private_keys_and_crl_rejects_revocation(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            with patch.object(foundation, 'ROOT', root), patch.object(p3, 'ROOT', root):
+            with patch.object(foundation, 'ROOT', root), patch.object(deploy, 'ROOT', root):
                 ca, client = root / 'ca', root / 'client'
                 foundation.make_ca(ca, 'synthetic-ca')
                 foundation.issue(ca, client, 'synthetic-client')
@@ -112,27 +112,27 @@ class DetectionRefreshTests(unittest.TestCase):
     def test_refresh_only_touches_prepared_instances_and_rewrites_snapshot(self):
         with tempfile.TemporaryDirectory() as folder:
             runtime = Path(folder)
-            prepared = list(p3.INSTANCES)[0]
+            prepared = list(deploy.INSTANCES)[0]
             (runtime / prepared / 'status').mkdir(parents=True)
-            with patch.object(p3, 'ROOT', runtime), patch.object(p3, 'RUNTIME', runtime):
-                quiet(p3.refresh_detection)
+            with patch.object(deploy, 'ROOT', runtime), patch.object(deploy, 'RUNTIME', runtime):
+                quiet(deploy.refresh_detection)
                 snapshot = json.loads((runtime / prepared / 'status/hardware.json').read_text())
                 first = snapshot['checkedAt']
                 self.assertEqual(set(snapshot['deviceChecks']), {'sgx', 'tdx', 'csv'})
                 self.assertIs(snapshot['detectorOk'], True)
-                for name in list(p3.INSTANCES)[1:]:
+                for name in list(deploy.INSTANCES)[1:]:
                     self.assertFalse((runtime / name / 'status/hardware.json').exists())
-                quiet(p3.refresh_detection)
+                quiet(deploy.refresh_detection)
                 self.assertNotEqual(json.loads(
                     (runtime / prepared / 'status/hardware.json').read_text())['checkedAt'], first)
 
     def test_refresh_snapshot_is_world_readable_but_not_writable(self):
         with tempfile.TemporaryDirectory() as folder:
             runtime = Path(folder)
-            prepared = list(p3.INSTANCES)[0]
+            prepared = list(deploy.INSTANCES)[0]
             (runtime / prepared / 'status').mkdir(parents=True)
-            with patch.object(p3, 'ROOT', runtime), patch.object(p3, 'RUNTIME', runtime):
-                quiet(p3.refresh_detection)
+            with patch.object(deploy, 'ROOT', runtime), patch.object(deploy, 'RUNTIME', runtime):
+                quiet(deploy.refresh_detection)
             mode = (runtime / prepared / 'status/hardware.json').stat().st_mode & 0o777
             self.assertEqual(mode, 0o644)
 
@@ -148,28 +148,28 @@ class DetectionScheduleTests(unittest.TestCase):
             written['payload'] = kwargs['input']
             return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
 
-        with patch.object(p3.subprocess, 'run', side_effect=fake):
-            quiet(p3.schedule_detection, remove)
+        with patch.object(deploy.subprocess, 'run', side_effect=fake):
+            quiet(deploy.schedule_detection, remove)
         return written['payload']
 
     def test_install_keeps_unrelated_entries_and_is_idempotent(self):
         other = '0 3 * * * /usr/bin/other-job\n'
         once = self.crontab(other)
         self.assertIn('/usr/bin/other-job', once)
-        self.assertEqual(once.count(p3.CRON_MARK), 1)
+        self.assertEqual(once.count(deploy.CRON_MARK), 1)
         self.assertIn('refresh-detection --tee', once)
         twice = self.crontab(once)
-        self.assertEqual(twice.count(p3.CRON_MARK), 1)
+        self.assertEqual(twice.count(deploy.CRON_MARK), 1)
         self.assertIn('/usr/bin/other-job', twice)
 
     def test_install_without_existing_crontab(self):
         payload = self.crontab(None)
-        self.assertEqual(payload.count(p3.CRON_MARK), 1)
+        self.assertEqual(payload.count(deploy.CRON_MARK), 1)
 
     def test_remove_drops_only_its_own_entry(self):
         installed = self.crontab('0 3 * * * /usr/bin/other-job\n')
         payload = self.crontab(installed, remove=True)
-        self.assertNotIn(p3.CRON_MARK, payload)
+        self.assertNotIn(deploy.CRON_MARK, payload)
         self.assertIn('/usr/bin/other-job', payload)
 
 
@@ -243,26 +243,26 @@ class AcceptanceFixtureTests(unittest.TestCase):
     """验收脚本写入平台库的合成审批必须能被原样删除，且时间取值不会立刻过期。"""
 
     def test_sql_literals_escape_quotes(self):
-        self.assertEqual("'it''s'", p4_e2e.quote("it's"))
+        self.assertEqual("'it''s'", acceptance.quote("it's"))
 
     def test_platform_time_is_naive_local_and_ahead(self):
-        value = p4_e2e.platform_time(2)
+        value = acceptance.platform_time(2)
         self.assertNotIn('+', value)
-        self.assertGreater(value, p4_e2e.platform_time(0))
+        self.assertGreater(value, acceptance.platform_time(0))
 
     def test_utc_time_is_rfc3339_zulu(self):
-        self.assertTrue(p4_e2e.utc_time(60).endswith('Z'))
+        self.assertTrue(acceptance.utc_time(60).endswith('Z'))
 
     def test_fixture_install_and_remove_are_symmetric(self):
         statements = []
-        original = p4_e2e.sqlite
-        p4_e2e.sqlite = lambda instance, script: statements.append((instance, script))
+        original = acceptance.sqlite
+        acceptance.sqlite = lambda instance, script: statements.append((instance, script))
         try:
-            fixture = p4_e2e.install_approval('tee-a-center', 'inst-a', 'asset-1',
+            fixture = acceptance.install_approval('tee-a-center', 'inst-a', 'asset-1',
                                               ['age'], ['ml.xgboost'])
-            p4_e2e.remove_approval(fixture)
+            acceptance.remove_approval(fixture)
         finally:
-            p4_e2e.sqlite = original
+            acceptance.sqlite = original
         inserted = ' '.join(statements[0][1])
         deleted = ' '.join(statements[1][1])
         for table in ('ds_sandbox', 'ds_sandbox_approval', 'ds_sandbox_dataset_mount',
@@ -310,7 +310,7 @@ class IdentityPublishTests(unittest.TestCase):
             center = Path(directory) / 'center'
             center.mkdir()
             # atomic 只允许写隔离工作树内，测试目录同时替换 ROOT 才能落盘。
-            with patch.object(p3, 'ROOT', Path(directory)), \
+            with patch.object(deploy, 'ROOT', Path(directory)), \
                     patch.object(foundation, 'OWNER_MAP', center / 'owner-map.json'):
                 names = list(foundation.INSTANCES)
                 foundation.save_owner_map({names[0]: 'ownera'})
@@ -335,6 +335,62 @@ class IdentityPublishTests(unittest.TestCase):
 
 
 
+class CrossInstanceChannelTests(unittest.TestCase):
+    """平台间契约通道的部署配置：身份登记、端口占用与容器挂载。"""
+
+    def test_only_registered_instances_get_a_contract_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            certificates = {}
+            for name in deploy.INSTANCES:
+                target = runtime / name / 'tee/contract-client'
+                target.mkdir(parents=True)
+                (target / 'client.crt').write_bytes(b'cert-' + name.encode())
+                certificates[name] = b'der-' + name.encode()
+
+            def der(command):
+                for name in deploy.INSTANCES:
+                    if name in ' '.join(str(item) for item in command):
+                        return certificates[name]
+                raise AssertionError('未知证书路径')
+
+            owners = {'tee-a-center': 'inst-center', 'tee-a-client-1': 'inst-client-1'}
+            with patch.object(foundation, 'RUNTIME', runtime), \
+                    patch.object(foundation.subprocess, 'check_output', side_effect=der), \
+                    patch.object(foundation, 'owner_map', lambda: {}):
+                entries = foundation.contract_client_certificates(owners)
+            # 没有机构标识的实例不进登记：证书通过 CA 校验也不会自动获得机构身份。
+            self.assertEqual(2, len(entries))
+            self.assertEqual({'inst-center', 'inst-client-1'}, set(entries.values()))
+            for fingerprint in entries:
+                self.assertEqual(64, len(fingerprint))
+
+    def test_contract_port_is_reserved_on_the_center(self):
+        def run(*args, **kwargs):
+            if args[:3] == ('docker', 'ps', '-aq'):
+                return 'foreign-id'
+            return json.dumps([{'Name': '/foreign', 'HostConfig': {'PortBindings': {
+                '8443/tcp': [{'HostPort': str(deploy.CONTRACT_PORT)}]}}, 'State': {'Running': False}}])
+        with patch.object(deploy, 'run', side_effect=run):
+            with self.assertRaises(RuntimeError):
+                deploy.port_check('tee-a-center')
+
+    def test_contract_server_certificate_covers_the_published_address(self):
+        names = foundation.subject_alt_names(foundation.CONTRACT_SERVER_CN, True)
+        self.assertIn('IP:222.20.99.38', names)
+        # 客户端证书不追加可路由地址，避免把入口地址写进调用方身份。
+        self.assertEqual('', foundation.subject_alt_names('contract-tee-a-client-1', False))
+
+    def test_only_the_center_publishes_the_contract_entry(self):
+        source = Path(deploy.__file__).read_text()
+        self.assertIn("TEE_CONTRACT_PORT_ARGS='-p 19686:8443' if name == 'tee-a-center' else ''", source)
+        self.assertIn("TEE_CONTRACT_CENTER_URL='' if name == 'tee-a-center' else CONTRACT_CENTER_URL", source)
+        # 三个实例都要挂载本机构私钥与调用方证书，中心端另挂服务端证书。
+        for mount in ['/app/tee-contract-client:ro', '/app/tee-identity-key:ro',
+                      '${TEE_CONTRACT_SERVER_MOUNT:-}']:
+            self.assertIn(mount, source)
+
+
 class ToolkitPinTests(unittest.TestCase):
     """共享工具链是他人也在改的工作副本；A 只用自己钉住的副本，且不写回共享目录。"""
 
@@ -343,50 +399,50 @@ class ToolkitPinTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shared = root / 'shared'
-            for name in p3.TOOLKIT_INPUTS:
+            for name in deploy.TOOLKIT_INPUTS:
                 file = shared / name
                 file.parent.mkdir(parents=True, exist_ok=True)
                 file.write_text('原始 ' + name + '\n')
-            with patch.object(p3, 'ROOT', root), patch.object(p3, 'TOOLKIT', shared), \
-                    patch.object(p3, 'CACHE', root / 'cache'), \
-                    patch.object(p3, 'TOOLKIT_PIN', root / 'cache/toolkit-pin'):
+            with patch.object(deploy, 'ROOT', root), patch.object(deploy, 'TOOLKIT', shared), \
+                    patch.object(deploy, 'CACHE', root / 'cache'), \
+                    patch.object(deploy, 'TOOLKIT_PIN', root / 'cache/toolkit-pin'):
                 yield shared
 
     def test_pin_is_created_once_and_shared_changes_do_not_leak_in(self):
         with self.workspace() as shared:
-            self.assertTrue(p3.pin_toolkit(adopt=False))
-            pinned = p3.toolkit_digest()
+            self.assertTrue(deploy.pin_toolkit(adopt=False))
+            pinned = deploy.toolkit_digest()
             # 他人改动共享副本后，A 读到的仍是钉住的版本。
             (shared / 'develop.sh').write_text('他人改动\n')
-            self.assertEqual(pinned, p3.toolkit_digest())
-            self.assertNotEqual(pinned, p3.shared_toolkit_digest())
+            self.assertEqual(pinned, deploy.toolkit_digest())
+            self.assertNotEqual(pinned, deploy.shared_toolkit_digest())
             # 重复调用不会自动采纳。
-            self.assertFalse(p3.pin_toolkit(adopt=False))
-            self.assertEqual(pinned, p3.toolkit_digest())
+            self.assertFalse(deploy.pin_toolkit(adopt=False))
+            self.assertEqual(pinned, deploy.toolkit_digest())
 
     def test_sync_adopts_current_shared_version_and_keeps_previous_digest(self):
         with self.workspace() as shared:
-            p3.pin_toolkit(adopt=False)
-            first = p3.toolkit_digest()
+            deploy.pin_toolkit(adopt=False)
+            first = deploy.toolkit_digest()
             (shared / 'develop.sh').write_text('他人改动\n')
-            quiet(p3.sync_toolkit)
-            self.assertEqual(p3.shared_toolkit_digest(), p3.toolkit_digest())
-            record = json.loads((p3.TOOLKIT_PIN / 'pin.json').read_text())
+            quiet(deploy.sync_toolkit)
+            self.assertEqual(deploy.shared_toolkit_digest(), deploy.toolkit_digest())
+            record = json.loads((deploy.TOOLKIT_PIN / 'pin.json').read_text())
             self.assertEqual(first, record['previousDigest'])
 
     def test_pinning_never_writes_to_the_shared_toolkit(self):
         with self.workspace() as shared:
-            before = {name: (shared / name).read_bytes() for name in p3.TOOLKIT_INPUTS}
-            p3.pin_toolkit(adopt=False)
-            quiet(p3.sync_toolkit)
+            before = {name: (shared / name).read_bytes() for name in deploy.TOOLKIT_INPUTS}
+            deploy.pin_toolkit(adopt=False)
+            quiet(deploy.sync_toolkit)
             for name, content in before.items():
                 self.assertEqual(content, (shared / name).read_bytes())
 
     def test_missing_pin_falls_back_to_shared_source(self):
         with self.workspace() as shared:
-            self.assertEqual(shared, p3.toolkit_source())
-            p3.pin_toolkit(adopt=False)
-            self.assertEqual(p3.TOOLKIT_PIN, p3.toolkit_source())
+            self.assertEqual(shared, deploy.toolkit_source())
+            deploy.pin_toolkit(adopt=False)
+            self.assertEqual(deploy.TOOLKIT_PIN, deploy.toolkit_source())
 
 if __name__ == '__main__':
     os.umask(0o077)

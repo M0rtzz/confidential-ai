@@ -7,6 +7,7 @@ package org.secretflow.secretpad.web.controller;
 import org.secretflow.secretpad.common.util.UserContext;
 import org.secretflow.secretpad.service.model.common.SecretPadResponse;
 import org.secretflow.secretpad.web.service.tee.TeeContract;
+import org.secretflow.secretpad.web.service.tee.TeeKeyGateway;
 import org.secretflow.secretpad.web.service.tee.TeeKeyService;
 import org.secretflow.secretpad.web.service.tee.TeePolicyService;
 import lombok.RequiredArgsConstructor;
@@ -19,40 +20,44 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 import java.util.Map;
 
-/** 密钥签发、申领、吊销与授权规则登记；调用主体一律取自会话，不接受请求自报机构。 */
+/**
+ * 密钥签发、申领、吊销与授权规则登记。
+ *
+ * <p>调用主体取自会话，或在平台间入口上取自客户端证书，两条路径都不接受请求自报机构。
+ * 请求落在哪一端由 {@link TeeKeyGateway} 决定：中心实例本地裁决，客户端实例转交中心端。
+ */
 @RestController
 @RequiredArgsConstructor
 @RequestMapping("/api/v1alpha1/tee")
 public class TeeKeyController implements TeeApi {
 
-    private final TeeKeyService keyService;
-    private final TeePolicyService policyService;
+    private final TeeKeyGateway gateway;
 
     @PostMapping("/keys/issue")
     public SecretPadResponse<TeeKeyService.IssueResult> issue(@RequestBody TeeKeyService.IssueRequest request) {
-        return SecretPadResponse.success(keyService.issue(owner(), request));
+        return SecretPadResponse.success(gateway.issue(owner(), request));
     }
 
     @PostMapping("/keys/claim")
     public SecretPadResponse<TeeKeyService.ClaimResult> claim(@RequestBody TeeKeyService.ClaimRequest request) {
-        return SecretPadResponse.success(keyService.claim(owner(), request));
+        return SecretPadResponse.success(gateway.claim(owner(), request));
     }
 
     @PostMapping("/keys/revoke")
     public SecretPadResponse<TeeKeyService.RevokeResult> revoke(@RequestBody TeeKeyService.RevokeRequest request) {
-        return SecretPadResponse.success(keyService.revoke(owner(), request));
+        return SecretPadResponse.success(gateway.revoke(owner(), request));
     }
 
     @PostMapping("/policies/register")
     public SecretPadResponse<TeePolicyService.RegisterResult> register(
             @RequestBody TeePolicyService.RegisterRequest request) {
-        return SecretPadResponse.success(policyService.register(owner(), request));
+        return SecretPadResponse.success(gateway.registerPolicy(owner(), request));
     }
 
     /** 密钥台账；按机构过滤，只返回标识与计数，不返回任何密钥材料。 */
     @GetMapping("/keys")
     public SecretPadResponse<Map<String, Object>> ledger() {
-        List<TeeKeyService.LedgerItem> items = keyService.ledger(owner());
+        List<TeeKeyService.LedgerItem> items = gateway.ledger(owner());
         return SecretPadResponse.success(Map.of("contractVersion", TeeContract.VERSION, "items", items));
     }
 

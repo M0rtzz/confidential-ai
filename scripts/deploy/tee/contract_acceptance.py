@@ -1,4 +1,4 @@
-"""P4 全链路验收：用一份示例数据跑完签发、加密、登记、放行、解密，并逐项验证拒绝行为。
+"""全链路契约验收：用一份示例数据跑完签发、加密、登记、放行、解密，并逐项验证拒绝行为。
 
 示例数据为合成客户表，不涉及任何真实业务数据。脚本使用运行目录中的机构私钥、
 可信运行时私钥与任务签名私钥；这些材料只在本进程内存中使用，不输出、不落盘。
@@ -241,12 +241,145 @@ def pem_of(path):
     return Path(path).read_text()
 
 
-def client_instance_boundary(instance, checks, prefix):
-    """在真实客户端实例上核对契约接口的部署边界。
+def sqlite_query(instance, statement):
+    """只读查询实例平台库；用于直接核对中心端台账，不改写任何业务数据。"""
+    result = subprocess.run(['docker', 'exec', '-i', f'data-sandbox-dev-{instance}-secretpad',
+                             'sqlite3', '-cmd', '.timeout 8000', '/app/db/secretpad.sqlite'],
+                            input=statement.encode(), check=True, capture_output=True)
+    return result.stdout.decode().strip()
 
-    当前部署只有中心端直连密钥适配服务，客户端实例没有本地密钥服务，
-    因此客户端上的密钥、规则、资产接口必须以可重试的 KEY_SERVICE_UNAVAILABLE 拒绝，
-    而不是静默成功或退回其他路径；运行时接口则按端角色拒绝。
+
+def multipart(field, filename, content, content_type):
+    boundary = '----p4' + uuid4().hex
+    body = (f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; '
+            f'filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n').encode()
+    body += content + f'\r\n--{boundary}--\r\n'.encode()
+    return body, f'multipart/form-data; boundary={boundary}'
+
+
+def upload_csv(instance, token, filename, content):
+    body, content_type = multipart('file', filename, content, 'text/csv')
+    req = urllib.request.Request(
+        f'http://127.0.0.1:{PORTS[instance]}/api/v1alpha1/data-assets/files/upload',
+        data=body, headers={'Content-Type': content_type, 'User-Token': token})
+    with urllib.request.urlopen(req, timeout=60) as response:
+        payload = json.load(response)
+    if payload.get('status', {}).get('code') != 0:
+        raise Failure(f'{instance} 上传样例数据失败')
+    return payload['data']
+
+
+def get(path, token, instance):
+    req = urllib.request.Request(f'http://127.0.0.1:{PORTS[instance]}/api' + path,
+                                 headers={'User-Token': token})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as error:
+        return error.code, json.load(error)
+
+
+def install_sync_grant(instance, asset_id, requester):
+    """写入一份合成的项目授权，使同步下载端点认为请求方已获授权；跑完即删除。"""
+    project_id = 'prj-p4-' + uuid4().hex[:10]
+    now = platform_time(0)
+    sqlite(instance, [
+        'insert into project_node(project_id,node_id,is_deleted) values('
+        f'{quote(project_id)},{quote(requester)},0);',
+        'insert into ds_project_asset(project_id,asset_id,provider_node_id,attached_by,'
+        f'attached_at,expires_at,deleted) values({quote(project_id)},{quote(asset_id)},'
+        f"{quote(instance)},'p4-acceptance',{quote(now)},'',0);",
+    ])
+    return {'instance': instance, 'projectId': project_id, 'requester': requester}
+
+
+def remove_sync_grant(grant):
+    sqlite(grant['instance'], [
+        f'delete from ds_project_asset where project_id={quote(grant["projectId"])};',
+        f'delete from project_node where project_id={quote(grant["projectId"])};',
+    ])
+
+
+def sync_download(instance, token, asset_id, requester):
+    """按跨节点同步端点取回这份资产实际会送出的字节。"""
+    path = (f'/v1alpha1/data-assets/sync/download?assetId={asset_id}'
+            f'&requesterNodeId={requester}')
+    req = urllib.request.Request(f'http://127.0.0.1:{PORTS[instance]}/api' + path,
+                                 headers={'User-Token': token})
+    with urllib.request.urlopen(req, timeout=60) as response:
+        return response.read()
+
+
+def governed_encryption(instance, token, owner, checks, prefix):
+    """核对抽样脱敏产出加密落盘，并核对出节点的字节确实是密文。
+
+    走真实页面链路：上传样例 → 提交内置治理任务 → 读取产出资产。要求产出标记为密文、
+    存储对象扩展名为 .enc、密钥记在中心端台账；再按同步下载端点取回出节点的字节，
+    确认它是本契约的密文封装，且只有向中心端重新申领密钥才能解回原文。
+    """
+    source = upload_csv(instance, token, 'p4-governed.csv', SAMPLE_CSV.encode())
+    detail = expect_ok('提交治理任务', '/v1alpha1/data-governance/tasks/submit', {
+        'name': 'p4 加密落盘验收', 'nodeId': source['provider_node_id'],
+        'datatableId': source['datatable_id'], 'sourceAssetId': source['id'],
+        'sampling': {}, 'masking': []}, token, instance)
+    if detail.get('status') != 'SUCCEEDED':
+        raise Failure(f'{instance} 治理任务未成功：{detail.get("status")}')
+    asset_id = detail['result_datatable_id']
+
+    code, body = get('/v1alpha1/data-assets/detail?id=' + asset_id, token, instance)
+    if code != 200 or body.get('status', {}).get('code') != 0:
+        raise Failure(f'{instance} 无法读取治理产出资产')
+    asset = body['data']
+    metadata = asset.get('metadata_json')
+    metadata = json.loads(metadata) if isinstance(metadata, str) else (metadata or {})
+    if metadata.get('encrypted') is not True:
+        raise Failure(f'{instance} 抽样脱敏产出未加密落盘')
+    if not str(asset.get('storage_uri', '')).endswith('.enc'):
+        raise Failure(f'{instance} 加密产出的存储对象扩展名不符')
+    if metadata.get('sha256') == metadata.get('plaintextSha256'):
+        raise Failure(f'{instance} 落盘对象与明文同摘要，未真正加密')
+
+    ledger_owner = sqlite_query('tee-a-center', 'select owner_id from tee_key where key_id='
+                                + quote(metadata['keyId']) + ';')
+    if ledger_owner != owner:
+        raise Failure(f'{instance} 治理产出的密钥未记入中心端台账')
+
+    grant = install_sync_grant(instance, asset_id, 'p4-acceptance-peer')
+    try:
+        payload = json.loads(sync_download(instance, token, asset_id, grant['requester']))
+    finally:
+        remove_sync_grant(grant)
+    if payload.get('algorithm') != 'AES-256-GCM' or payload.get('contractVersion') != CONTRACT:
+        raise Failure(f'{instance} 出节点的字节不是契约密文封装')
+    if payload.get('assetId') != asset_id or payload.get('keyId') != metadata['keyId']:
+        raise Failure(f'{instance} 出节点密文与登记的资产或密钥不符')
+
+    claimed = expect_ok('重新申领治理产出密钥', '/v1alpha1/tee/keys/claim', {
+        'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'assetId': asset_id,
+        'assetVersion': '1', 'keyId': metadata['keyId'], 'keyVersion': metadata['keyVersion'],
+        'recipientCertPem': pem_of(RUNTIME / instance / 'tee/identity/client.crt')}, token, instance)
+    data_key = unwrap(claimed['keyEnvelope'], RUNTIME / instance / 'tee/identity/client.key')
+    recovered = decrypt(data_key, payload).decode()
+    if recovered.splitlines()[0] != ','.join(SAMPLE_COLUMNS):
+        raise Failure(f'{instance} 密文解回的表头与产出不符')
+    for city in ['hangzhou', 'shanghai', 'wuhan']:
+        if city not in recovered:
+            raise Failure(f'{instance} 密文解回的内容缺行')
+
+    checks[prefix] = {'instance': instance, 'assetId': asset_id, 'keyId': metadata['keyId'],
+                      'encryptedAtRest': True, 'ciphertextOnlyOnSync': True,
+                      'plaintextBytes': metadata.get('plaintextBytes'),
+                      'ledgerAtCenter': True}
+    return {'assetId': asset_id, 'metadata': metadata}
+
+
+def client_instance_chain(instance, checks, prefix):
+    """在真实客户端实例上跑完「向中心端申请密钥并加密落盘」。
+
+    客户端实例不直连密钥服务，签发、申领与规则登记都经平台间双向 TLS 通道交给中心端；
+    机构标识由中心端从客户端证书推导，客户端无法自报。验收要求：
+    密钥台账落在中心端、信封只有客户端自己的机构私钥能解开、
+    资产登记在本地成密文对象，且运行时接口仍按端角色拒绝。
     """
     token, owner = login(None, instance)
     result = {'instance': instance, 'ownerId': owner}
@@ -257,14 +390,67 @@ def client_instance_boundary(instance, checks, prefix):
         raise Failure(f'{instance} 未认证访问未被拒绝')
     result['sessionGuard'] = True
 
-    # 客户端没有本地密钥服务：接口按契约以可重试错误拒绝，不伪装成功。
-    code, body = request('/v1alpha1/tee/keys/issue', {
+    asset_id = 'demo-client-' + uuid4().hex[:8]
+    issued = expect_ok('客户端申请密钥', '/v1alpha1/tee/keys/issue', {
         'contractVersion': CONTRACT, 'requestId': uuid4().hex,
-        'assetId': 'boundary-' + uuid4().hex[:8], 'assetVersion': '1'}, token, instance)
-    data = body.get('data', {})
-    if code != 503 or data.get('errorCode') != 'KEY_SERVICE_UNAVAILABLE' or data.get('retryable') is not True:
-        raise Failure(f'{instance} 缺少密钥服务时的拒绝不符合契约')
-    result['keyServiceAbsentIsRetryable'] = True
+        'assetId': asset_id, 'assetVersion': '1'}, token, instance)
+    result['keyId'] = issued['keyId']
+
+    # 台账唯一在中心端：中心库里必须有这条记录，且归属为客户端机构。
+    ledger_owner = sqlite_query('tee-a-center',
+                                'select owner_id from tee_key where key_id='
+                                + quote(issued['keyId']) + ';')
+    if ledger_owner != owner:
+        raise Failure(f'{instance} 的密钥未记入中心端台账')
+    result['ledgerAtCenter'] = True
+
+    claimed = expect_ok('客户端申领密钥', '/v1alpha1/tee/keys/claim', {
+        'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'assetId': asset_id,
+        'assetVersion': '1', 'keyId': issued['keyId'], 'keyVersion': issued['keyVersion'],
+        'recipientCertPem': pem_of(RUNTIME / instance / 'tee/identity/client.crt')}, token, instance)
+    data_key = unwrap(claimed['keyEnvelope'], RUNTIME / instance / 'tee/identity/client.key')
+    result['envelopeOpensWithOwnKey'] = True
+
+    # 别的机构证书拿不到这把密钥。
+    result['foreignRecipientDenied'] = expect_denied(
+        '客户端用他方证书申领', '/v1alpha1/tee/keys/claim', {
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'assetId': asset_id,
+            'assetVersion': '1', 'keyId': issued['keyId'], 'keyVersion': issued['keyVersion'],
+            'recipientCertPem': pem_of(CENTER / 'tee/identity/client.crt')},
+        token, 'ASSET_OWNER_MISMATCH', instance)
+
+    # 规则由中心端按审批核验：审批写在中心库，客户端只发起登记。
+    fixture = install_approval('tee-a-center', owner, asset_id, SAMPLE_COLUMNS, [OPERATOR])
+    try:
+        policy = expect_ok('客户端登记授权规则', '/v1alpha1/tee/policies/register', {
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+            'policy': {'contractVersion': CONTRACT, 'policyId': '', 'policyVersion': '',
+                       'assetId': asset_id, 'assetVersion': '1', 'ownerId': owner,
+                       'sandboxId': fixture['sandboxId'], 'columns': GRANTED_COLUMNS,
+                       'operators': [OPERATOR], 'expiresAt': utc_time(3600),
+                       'reportKinds': ['EVALUATION_METRICS']}}, token, instance)
+        result['policyId'] = policy['policyId']
+
+        encrypted = encrypt(data_key, SAMPLE_CSV.encode(), asset_id, '1',
+                            issued['keyId'], issued['keyVersion'])
+        asset = expect_ok('客户端登记密文资产', '/v1alpha1/tee/assets/register', {
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'ownerId': owner,
+            'schema': SAMPLE_COLUMNS, 'encryptedObject': encrypted,
+            'policyId': policy['policyId'], 'policyVersion': policy['policyVersion']}, token, instance)
+        result['objectId'] = asset['objectId']
+
+        # 超出审批范围的规则仍然被中心端拒绝，委派不会放宽任何判定。
+        result['policyBeyondApprovalDenied'] = expect_denied(
+            '客户端登记越权规则', '/v1alpha1/tee/policies/register', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+                'policy': {'contractVersion': CONTRACT, 'policyId': '', 'policyVersion': '',
+                           'assetId': asset_id, 'assetVersion': '1', 'ownerId': owner,
+                           'sandboxId': fixture['sandboxId'], 'columns': GRANTED_COLUMNS,
+                           'operators': ['ml.dnn'], 'expiresAt': utc_time(3600),
+                           'reportKinds': ['EVALUATION_METRICS']}},
+            token, 'POLICY_DENIED', instance)
+    finally:
+        remove_approval(fixture)
 
     # 客户端不承担运行时职责，运行时接口按端角色拒绝。
     result['runtimeDenied'] = expect_denied(
@@ -280,6 +466,10 @@ def client_instance_boundary(instance, checks, prefix):
             or environment['realModeReady'] is not False:
         raise Failure(f'{instance} 环境接口未如实标注仿真模式')
     result['environmentHonest'] = True
+
+    # 抽样脱敏产出在客户端同样加密落盘，密钥同样来自中心端。
+    governed = governed_encryption(instance, token, owner, checks, prefix + 'Governed')
+    result['governedAssetId'] = governed['assetId']
     checks[prefix] = result
 
 
@@ -584,9 +774,12 @@ def run():
     finally:
         remove_approval(fixture)
 
-    # 36 两个客户端实例上的部署边界：会话守卫、缺密钥服务的拒绝、端角色与环境如实标注
-    client_instance_boundary('tee-a-client-1', checks, 'clientInstance1')
-    client_instance_boundary('tee-a-client-2', checks, 'clientInstance2')
+    # 36 中心实例的抽样脱敏产出加密落盘
+    governed_encryption('tee-a-center', client_token, owner, checks, 'centerGoverned')
+
+    # 37 两个客户端实例：向中心端申请密钥、登记规则、加密落盘，端角色与环境如实标注
+    client_instance_chain('tee-a-client-1', checks, 'clientInstance1')
+    client_instance_chain('tee-a-client-2', checks, 'clientInstance2')
 
     return {'assetId': asset_id, 'keyId': issued['keyId'], 'policyId': policy['policyId'],
             'objectId': asset['objectId'], 'sampleBytes': len(SAMPLE_CSV),

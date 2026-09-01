@@ -57,6 +57,21 @@ public class TeeIdentityRegistry {
         return certificate;
     }
 
+    /**
+     * 平台间契约入口的调用方身份：客户端证书 DER SHA-256 → 机构标识。
+     *
+     * <p>映射在部署时随公开登记一同发布，未登记的证书即使通过了 CA 验证也一律拒绝，
+     * 因此新增一台客户端实例必须显式发布登记，不会因为签发了证书就自动获得机构身份。
+     */
+    public String ownerByContractCertificate(String certificateSha256) {
+        JsonNode node = read().path("contractClientCertificates")
+                .path(TeeGuard.requireText(certificateSha256, "certificateSha256"));
+        if (!node.isTextual() || node.asText().isBlank()) {
+            throw TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "调用方证书未登记为平台间契约身份");
+        }
+        return node.asText();
+    }
+
     /** 可信运行时的工作负载证书；SIMULATION 下预注册，HARDWARE 下另按度量值绑定。 */
     public String workloadCertificatePem() {
         try {

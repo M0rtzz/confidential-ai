@@ -32,39 +32,9 @@ class TeeTaskSignatureTest {
     private static final String KID = "tee-task-1";
 
     // 一次性合成测试材料，仅用于本用例验签；不是任何真实签发身份，禁止导入信任库。
-    private static final String TEST_SIGNER_CERT_B64 = "MIIDHzCCAgegAwIBAgIULFzwCQ6wb0nrBoGOoFiqUSEwHXswDQYJKoZIhvcNAQELBQAwHzEdMBsGA1UEAwwUdGVl"
-            + "LXRhc2stc2lnbmVyLXRlc3QwHhcNMjYwODMxMTczOTMzWhcNNDYwODI2MTczOTMzWjAfMR0wGwYDVQQDDBR0ZWUt"
-            + "dGFzay1zaWduZXItdGVzdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALdqOY9UzN9QEeY2cq5eDrO3"
-            + "/xSNJOjwugQ0cFjZrhnEYbd2z5Kqk4w/k26RxQWNvvR0eitDTTXTi4GskU8KJGbGnvXNiQRndfOygAlLmffLDVu1"
-            + "5oUXg60l6lQjHBWsj5n46UrLLH55tvHXFH1hGYp1JRgyU8M65ctSUnhlfYNOgTeycaUa/ucO+lXRbhjY3rPmOl1R"
-            + "XX3GT5S6VH8QPlsBLqndCpQ4BxZod6+xv6P/tCyGhTdUDST862MgKsOnElvems6Okf9mNVwEACUsE51JxeA9dYsR"
-            + "OBdny25jTnSVnFWkKlPQ7mNa29VN4vqiCExW37jkUBLdQ/CfOaMH4S8CAwEAAaNTMFEwHQYDVR0OBBYEFOuhx/2I"
-            + "pPJPV3Ta8gN3D6hpLLeWMB8GA1UdIwQYMBaAFOuhx/2IpPJPV3Ta8gN3D6hpLLeWMA8GA1UdEwEB/wQFMAMBAf8w"
-            + "DQYJKoZIhvcNAQELBQADggEBAFr8QLVMPHysvbNycL0tQBhsxKtH8Rgoye6ZQBQfMjCbUgIiXkl5+QCO8Z5zvcjD"
-            + "lyTXJVEv8q+Biw6btpythh5ZDX8Lz8hNnzy6vE2gmoqqQ+nFVzhqmbxmKIn94i/mutnRqL0eSwrLK9PT2v08QMIs"
-            + "mHUtlcoqNONhpUEkUaMnMJZHQ4cyQZVblgWHY/BysSB6h1sKH2heQUQOB3SAD9yHhEIpTyGG55E/3kCk+2b8dgdf"
-            + "DtMpuRaUBdTrbixZk18OkJwfKtvPsuLMp+cehtcr3pYtfTjXxHZbfsuM9iewWs2DgkDYV/M0ewNzQegvXNcULmi5"
-            + "tKAtYUZfX3riass=";
+    private static final String TEST_SIGNER_CERT_B64 = TeeTestMaterial.CERTIFICATE_B64;
 
-    private static final String TEST_SIGNER_KEY_B64 = "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC3ajmPVMzfUBHmNnKuXg6zt/8UjSTo8LoENHBY"
-            + "2a4ZxGG3ds+SqpOMP5NukcUFjb70dHorQ00104uBrJFPCiRmxp71zYkEZ3XzsoAJS5n3yw1bteaFF4OtJepUIxwV"
-            + "rI+Z+OlKyyx+ebbx1xR9YRmKdSUYMlPDOuXLUlJ4ZX2DToE3snGlGv7nDvpV0W4Y2N6z5jpdUV19xk+UulR/ED5b"
-            + "AS6p3QqUOAcWaHevsb+j/7QshoU3VA0k/OtjICrDpxJb3prOjpH/ZjVcBAAlLBOdScXgPXWLETgXZ8tuY050lZxV"
-            + "pCpT0O5jWtvVTeL6oghMVt+45FAS3UPwnzmjB+EvAgMBAAECggEAA7FcUlHzRAXBLoDnIzKamiy4som69gOuwxnp"
-            + "LyjG1Bb7nq2CNWJA0UCQb9f4fwmhEBvuP8O9oLlPJD+8tzotjHIwTiOiwBdzLQJpiIZgpbgNX0zUxNY53PkX9DS2"
-            + "wor0YzW7QLnBfhRmRg0+CN41HPAJ3KhavmIHsWXJakok0klwGxzkR51aNwzdR1MntwRrXqKrL089WweNWHgqmJL2"
-            + "rvVX2igvgvxIvRiIopjLuBJmSCGe+lCFhQSFw65QQQyXyBh4wlTKWYhF5CwnPr7JQdQdcj++4vhf7BZuhnvIhS8H"
-            + "xne2PmSOI5if67j+4wJCixRylSvzDZeyEgHE5y0zAQKBgQDnOyAu+Dve+LYTDECtDpKCQy9ITDuuJ8GESzie6BFM"
-            + "mdNnIXUbyeNkH9vv5W7f6O8IqaocT32fO4tg4w6Q/WxBPzbqH1xmo+WtOBFnATUlDcXYxkBfN7ymTHmmxe6s4Rxh"
-            + "0cmrjeyv79SMOFlol6LOtzqXVEaZ7CUPmbJJL2j8LwKBgQDLD+BGQ2ZifxDDjWLD6rjA7abHxrIG+kS+3bruMedS"
-            + "Y15RxFlAiJmQjh3+yqmjtZwYvARCHZRNmePbXTpz9+0+mHutbKPTaC+kq7995r9YwqmbvU9rW7gedZfJGbMBbMIW"
-            + "n4C5JoyLQEELi1Dna8vNKQwNGVU0QGDFIYGSEy0rAQKBgQCR3IU/u80gqSlJuLfvsrqOu0zPQW+AO4niJwUvkFqh"
-            + "RIPLkZprDh6H4WT+3m7jhe+LOmOZejdXQ9t3IaPlqEcqnXLJm0DRamAOtcicfnGEzzxXsy+WIPW6vZEbt84IdfRO"
-            + "bGTX+C4vCY29aipURRspZQHrxfjHTeRPA/goHGUQdwKBgQCyoLWmuZWwYZyqmY5fT/TUanqDVOu4raGZ0U2mSan2"
-            + "1Mjc3v+wgDmuawZB45+VDqZRL9wDGSgjl5NUnk9UQq2lmdd6OI5o40a98gOSylBa0WsIQGFDzLxLtyAd3IiWYUjf"
-            + "Q9KljR6nRI+ziwtReIcgY9JhF37XZyZ5Yz8q88mRAQKBgBGCu2vtfpOeik+qr7CZPOeto7boW3Ot3MCoJjYqYEjA"
-            + "9jmKZmsmfZuNunUgOSMmAYdkRtUlk9y/JFZDXsbeCyLV3/95pWqsHNN7XPcERNgsqWPJq/hs5bNbTB334E8tGhak"
-            + "AUKnlr08vgqP46BBHgenboNaP9mHjgfE01cMQqZZ";
+    private static final String TEST_SIGNER_KEY_B64 = TeeTestMaterial.PRIVATE_KEY_B64;
 
     private final ObjectMapper mapper = new ObjectMapper();
     /** 部署登记的仿真运行镜像摘要；任务声明其他摘要一律拒绝。 */
