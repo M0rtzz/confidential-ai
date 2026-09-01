@@ -26,6 +26,39 @@ def quiet(function, *args):
 
 
 class IsolationTests(unittest.TestCase):
+    def test_migrated_domain_and_routes_preserve_credentials(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder)
+            instance = runtime / 'client-a'
+            instance.mkdir()
+            (instance / '.domain-id').write_text('dev-gpu-a\n')
+            credentials = instance / 'secretpad.env'
+            credentials.write_text(
+                'NODE_ID=old\nKUSCIA_API_ADDRESS=old:8083\n'
+                'SECRETPAD_PASSWORD=keep-me\nMINIO_ROOT_USER=keep-user\n')
+            with patch.object(deploy, 'ROOT', runtime), patch.object(deploy, 'RUNTIME', runtime):
+                domain = deploy.domain_id('client-a')
+                deploy.refresh_runtime_credentials('client-a', domain)
+            values = dict(line.split('=', 1) for line in credentials.read_text().splitlines())
+            self.assertEqual(domain, 'dev-gpu-a')
+            self.assertEqual(values['NODE_ID'], 'dev-gpu-a')
+            self.assertEqual(values['KUSCIA_API_ADDRESS'], 'data-sandbox-dev-client-a-kuscia:8083')
+            self.assertEqual(values['KUSCIA_GW_ADDRESS'], 'data-sandbox-dev-client-a-kuscia:80')
+            self.assertEqual(values['SECRETPAD_DATA_ASSETS_MINIO_ENDPOINT'],
+                             'http://data-sandbox-dev-client-a-minio:9000')
+            self.assertEqual(values['SECRETPAD_PASSWORD'], 'keep-me')
+            self.assertEqual(values['MINIO_ROOT_USER'], 'keep-user')
+            self.assertEqual(credentials.stat().st_mode & 0o777, 0o600)
+
+    def test_invalid_migrated_domain_is_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder)
+            (runtime / 'center').mkdir()
+            (runtime / 'center/.domain-id').write_text('../escape')
+            with patch.object(deploy, 'RUNTIME', runtime):
+                with self.assertRaises(RuntimeError):
+                    deploy.domain_id('center')
+
     def test_source_snapshot_links_cannot_write_back_or_escape(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

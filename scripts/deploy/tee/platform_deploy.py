@@ -261,6 +261,41 @@ def save_manifest(data):
     atomic(RUNTIME / 'p3-manifest.json', data)
 
 
+def domain_id(name):
+    """新实例默认使用可读名称；迁移实例可通过标记保留既有 Kuscia 域。"""
+    marker = RUNTIME / name / '.domain-id'
+    value = marker.read_text().strip() if marker.exists() else f'dev-{name}'
+    if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', value):
+        raise RuntimeError(f'实例 {name} 的 Kuscia 域标记不合法')
+    return value
+
+
+def refresh_runtime_credentials(name, domain):
+    """迁移后只刷新节点路由字段，保留管理员、MinIO 和 KMS 凭据。"""
+    file = RUNTIME / name / 'secretpad.env'
+    if not file.exists():
+        return
+    prefix = f'data-sandbox-dev-{name}'
+    updates = {
+        'NODE_ID': domain,
+        'INST_NAME': f'DataSandbox-{name}',
+        'KUSCIA_API_ADDRESS': f'{prefix}-kuscia:8083',
+        'KUSCIA_GW_ADDRESS': f'{prefix}-kuscia:80',
+        'SECRETPAD_DATA_ASSETS_MINIO_ENDPOINT': f'http://{prefix}-minio:9000',
+    }
+    kept = []
+    seen = set()
+    for line in file.read_text().splitlines():
+        key = line.split('=', 1)[0] if '=' in line else ''
+        if key in updates:
+            kept.append(f'{key}={updates[key]}')
+            seen.add(key)
+        else:
+            kept.append(line)
+    kept.extend(f'{key}={value}' for key, value in updates.items() if key not in seen)
+    atomic(file, '\n'.join(kept) + '\n', 0o600)
+
+
 def managed(name, kind='container'):
     query = subprocess.run(['docker', kind, 'inspect', name], text=True, capture_output=True)
     if query.returncode:
@@ -374,6 +409,8 @@ def prepare():
     script = replace_once(script, 'BACKEND_DIR="$(realpath -m "${WORKSPACE_DIR}/confidential-ai")"', 'BACKEND_DIR="$WORKSPACE_DIR"')
     script = replace_once(script, 'FRONTEND_DIR="$(realpath -m "${WORKSPACE_DIR}/confidential-ai-frontend")"', f'FRONTEND_DIR="{FRONTEND}"')
     script = replace_once(script, 'SECRETPAD_IMAGE="data-sandbox-secretpad:dev-${DEV_NAME}"', 'SECRETPAD_IMAGE="${TEE_PLATFORM_IMAGE:?Missing pinned platform image}"')
+    script = replace_once(script, 'DOMAIN_ID="dev-${DEV_NAME}"',
+                          'DOMAIN_ID="${DATA_SANDBOX_DOMAIN_ID:-dev-${DEV_NAME}}"')
     # 校验在真实输入仓库执行，不能要求只读前端切换到 A 分支。
     script = replace_once(script, '  local branch\n', '  local branch\n  local expected="$EXPECTED_BRANCH"\n  [ "$repository" != "$FRONTEND_DIR" ] || expected=master\n')
     script = replace_once(script, '[ "$branch" = "$EXPECTED_BRANCH" ]', '[ "$branch" = "$expected" ]')
@@ -542,7 +579,10 @@ def up(name):
         raise RuntimeError('实例已存在且状态或镜像不符；需明确授权后替换，拒绝隐式操作')
     (RUNTIME / name / 'tee').mkdir(exist_ok=True, mode=0o700)
     base = INSTANCES[name] * 100
-    env = dict(os.environ, DATA_SANDBOX_DEV_ROOT=str(RUNTIME / name), TEE_PLATFORM_IMAGE=platform, DATA_SANDBOX_DEV_SAMPLER_IMAGE=sampler, DATA_SANDBOX_DEV_KUSCIA_IMAGE=checked_image('kuscia'),
+    domain = domain_id(name)
+    refresh_runtime_credentials(name, domain)
+    env = dict(os.environ, DATA_SANDBOX_DEV_ROOT=str(RUNTIME / name), DATA_SANDBOX_DOMAIN_ID=domain,
+               TEE_PLATFORM_IMAGE=platform, DATA_SANDBOX_DEV_SAMPLER_IMAGE=sampler, DATA_SANDBOX_DEV_KUSCIA_IMAGE=checked_image('kuscia'),
                DATA_SANDBOX_DEV_MINIO_IMAGE=checked_image('minio'),
                TEE_GATEWAY_PORT_ARGS='-p 19685:31888' if name == 'center' else '',
                # 只有中心端直连密钥适配服务；客户端通过中心端的契约接口访问。
