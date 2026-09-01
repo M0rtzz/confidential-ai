@@ -159,18 +159,76 @@ def der_base64(certificate):
         ['openssl', 'x509', '-in', str(certificate), '-outform', 'DER'])).decode()
 
 
+OWNER_MAP = CENTER / 'owner-map.json'
+
+
+def owner_map():
+    """实例到机构标识的持久映射，是机构别名的事实来源。
+
+    机构标识只有平台起来之后才能取到。若后续再次执行 certificates 而不带 owners，
+    重写登记会把机构条目抹掉，导致 /keys/claim 与 /policies/register 立即失效。
+    映射保存在中心私有运行目录，不随已发布文件被清理而丢失。
+    """
+    if not OWNER_MAP.exists():
+        return {}
+    stored = json.loads(OWNER_MAP.read_text())
+    return {name: owner for name, owner in stored.items()
+            if name in INSTANCES and isinstance(owner, str) and owner}
+
+
+def save_owner_map(owners):
+    """记录本次取到的机构标识；已有映射发生变化时拒绝覆盖，避免顶替既有机构身份。"""
+    stored = owner_map()
+    for name, owner in owners.items():
+        if stored.get(name, owner) != owner:
+            raise RuntimeError('实例机构标识与已有映射不一致，拒绝覆盖：' + name)
+    stored.update(owners)
+    atomic(OWNER_MAP, stored, 0o600)
+    return stored
+
+
+def published_owner_entries():
+    """反读已发布登记里的机构条目，作为持久映射缺失时的兜底。
+
+    映射文件是事实来源；这里只在运行目录里已有发布结果、而映射尚未建立时补位，
+    例如从早期版本升级上来的部署。
+    """
+    entries = {}
+    for name in INSTANCES:
+        file = RUNTIME / name / 'identity-pub/registry.json'
+        if not file.exists():
+            continue
+        for key, value in json.loads(file.read_text()).items():
+            if isinstance(value, dict) and value.get('instance') in INSTANCES:
+                entries[key] = value
+    return entries
+
+
+def runtime_image_digests():
+    """仿真模式允许执行的运行镜像摘要；来自已锁定的镜像清单，不接受任意取值。"""
+    images = manifest().get('images', {})
+    digests = [images[key]['id'] for key in ('teeapps', 'probe') if key in images]
+    return sorted({digest for digest in digests if digest})
+
+
 def publish_identities(identities, owners=None):
     """把契约层需要的公开证书发布到各实例；只含公钥材料，不含任何私钥。
 
     机构标识由平台首次启动时生成，证书阶段还取不到；此时先按实例名发布，
     平台起来后用 publish-identities 按实际 ownerId 重新发布。
+    已发布的机构条目在重新发布时保留，避免不带 owners 的执行把它们抹掉。
     """
     published = {'taskSigningCertificates': {
-        'tee-a-center-1': der_base64(CENTER / 'task-signer/client.crt')}}
+        'tee-a-center-1': der_base64(CENTER / 'task-signer/client.crt')},
+        'runtimeImageDigests': runtime_image_digests()}
+    published.update(published_owner_entries())
+    stored = owner_map()
     for name, value in identities.items():
         published[name] = value
-        if owners and name in owners:
-            published[owners[name]] = dict(value, instance=name)
+        # 别名的证书指纹始终取本次的机构证书，不沿用兜底读到的旧值。
+        owner = (owners or {}).get(name) or stored.get(name)
+        if owner:
+            published[owner] = dict(value, instance=name)
     workload = (CENTER / 'workload-cert/client.crt').read_text()
     for name in INSTANCES:
         target = RUNTIME / name / 'identity-pub'
@@ -206,6 +264,7 @@ def publish_live_identities():
     owners = {}
     for name in INSTANCES:
         owners[name] = platform_login(name, 'CLIENT')['ownerId']
+    save_owner_map(owners)
     publish_identities(identities, owners)
     print('已按实际机构标识发布公开证书登记：' + '、'.join(sorted(owners.values())))
     print('独立机构、服务及探测证书已准备；私钥未输出，未写入普通平台目录。')

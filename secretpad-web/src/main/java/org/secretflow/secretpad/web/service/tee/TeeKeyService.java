@@ -109,12 +109,18 @@ public class TeeKeyService {
         String requestId = TeeGuard.requireText(request.requestId(), "requestId");
         String keyId = TeeGuard.requireText(request.keyId(), "keyId");
         String keyVersion = TeeGuard.requireText(request.keyVersion(), "keyVersion");
+        String assetId = TeeGuard.requireText(request.assetId(), "assetId");
+        String assetVersion = TeeGuard.requireText(request.assetVersion(), "assetVersion");
         X509Certificate recipient = registry.requireInstitutionCertificate(ownerId, request.recipientCertPem());
         String fingerprint = TeeIdempotency.fingerprint(
-                List.of(keyId, keyVersion, TeeCrypto.certificateSha256(recipient)));
+                List.of(assetId, assetVersion, keyId, keyVersion, TeeCrypto.certificateSha256(recipient)));
         return idempotency.execute(ownerId, "keys/claim", requestId, fingerprint, ClaimResult.class, () -> {
             TeeKeyDO key = require(keyId, keyVersion);
             TeeGuard.requireOwner(key.getOwnerId(), ownerId);
+            // 申领必须指向该密钥实际绑定的资产版本，避免调用方误取其他资产的密钥。
+            if (!key.getAssetId().equals(assetId) || !key.getAssetVersion().equals(assetVersion)) {
+                throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "密钥与资产版本绑定不符");
+            }
             requireActive(key);
             JsonNode sealed = adapter.call("/v1/keys/escrow-seal", Map.of(
                     "resourceUri", key.getResourceUri(),

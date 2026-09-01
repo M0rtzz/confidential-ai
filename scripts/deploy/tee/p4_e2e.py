@@ -2,25 +2,33 @@
 
 示例数据为合成客户表，不涉及任何真实业务数据。脚本使用运行目录中的机构私钥、
 可信运行时私钥与任务签名私钥；这些材料只在本进程内存中使用，不输出、不落盘。
+
+规则登记要求「由有效审批生成」，因此验收会在本实例平台库中写入一份合成审批、挂载与
+使用管控记录作为来源，跑完即删除；这些记录只用于本验收，不代表真实业务审批。
 """
 import base64
 import hashlib
 import json
 import secrets
+import subprocess
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 CONTRACT = 'tee-contract/1.0'
-RUNTIME = Path('/data/collab/Projects/gpu-tee-dev-a/.dev-runtime')
+ROOT = Path('/data/collab/Projects/gpu-tee-dev-a')
+RUNTIME = ROOT / '.dev-runtime'
 CENTER = RUNTIME / 'tee-a-center'
-BASE = 'http://127.0.0.1:19688/api'
+CLIENT = RUNTIME / 'tee-a-client-1'
+PORTS = {'tee-a-center': 19688, 'tee-a-client-1': 19788, 'tee-a-client-2': 19888}
+PLATFORM_ZONE = ZoneInfo('Asia/Shanghai')
 
 SAMPLE_COLUMNS = ['age', 'income', 'city', 'id_card']
 GRANTED_COLUMNS = ['age', 'income', 'city']
@@ -35,11 +43,11 @@ class Failure(Exception):
     pass
 
 
-def request(path, payload=None, token=None):
+def request(path, payload=None, token=None, instance='tee-a-center'):
     headers = {'Content-Type': 'application/json'}
     if token:
         headers['User-Token'] = token
-    req = urllib.request.Request(BASE + path, headers=headers,
+    req = urllib.request.Request(f'http://127.0.0.1:{PORTS[instance]}/api' + path, headers=headers,
                                  data=json.dumps(payload).encode() if payload is not None else None)
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
@@ -48,32 +56,103 @@ def request(path, payload=None, token=None):
         return error.code, json.load(error)
 
 
-def login(end_role):
+def login(end_role=None, instance='tee-a-center'):
     env = dict(line.split('=', 1) for line in
-               (CENTER / 'secretpad.env').read_text().splitlines() if '=' in line)
-    code, body = request('/login', {'name': env['SECRETPAD_USER_NAME'],
-                                    'passwordHash': hashlib.sha256(env['SECRETPAD_PASSWORD'].encode()).hexdigest(),
-                                    'endRole': end_role})
+               (RUNTIME / instance / 'secretpad.env').read_text().splitlines() if '=' in line)
+    payload = {'name': env['SECRETPAD_USER_NAME'],
+               'passwordHash': hashlib.sha256(env['SECRETPAD_PASSWORD'].encode()).hexdigest()}
+    if end_role:
+        payload['endRole'] = end_role
+    code, body = request('/login', payload, instance=instance)
     if code != 200 or body.get('status', {}).get('code') != 0:
-        raise Failure('登录失败：' + end_role)
+        raise Failure(f'登录失败：{instance} {end_role}')
     return body['data']['token'], body['data']['ownerId']
 
 
-def expect_ok(name, path, payload, token):
-    code, body = request(path, payload, token)
+def expect_ok(name, path, payload, token, instance='tee-a-center'):
+    code, body = request(path, payload, token, instance)
     if code != 200 or body.get('status', {}).get('code') != 0:
         raise Failure(f'{name} 应成功但被拒绝：{body.get("data", {}).get("errorCode")}')
     return body['data']
 
 
-def expect_denied(name, path, payload, token, error_code):
-    code, body = request(path, payload, token)
+def expect_denied(name, path, payload, token, error_code, instance='tee-a-center'):
+    code, body = request(path, payload, token, instance)
     actual = body.get('data', {}).get('errorCode')
     if body.get('status', {}).get('code') == 0:
         raise Failure(f'{name} 应被拒绝但成功了')
     if actual != error_code:
         raise Failure(f'{name} 拒绝原因不符：期望 {error_code}，实际 {actual}')
     return {'errorCode': actual, 'httpStatus': code}
+
+
+def sqlite(instance, statements):
+    """在实例平台库上执行语句；库启用 WAL，必须进容器执行。"""
+    script = 'pragma busy_timeout=8000;\n' + '\n'.join(statements)
+    subprocess.run(['docker', 'exec', '-i', f'data-sandbox-dev-{instance}-secretpad',
+                    'sqlite3', '/app/db/secretpad.sqlite'],
+                   input=script.encode(), check=True, capture_output=True)
+
+
+def quote(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def platform_time(offset_hours):
+    moment = datetime.now(PLATFORM_ZONE) + timedelta(hours=offset_hours)
+    return moment.replace(microsecond=0, tzinfo=None).isoformat()
+
+
+def utc_time(offset_seconds):
+    moment = datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
+    return moment.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def install_approval(instance, owner, asset_id, columns, operators, hours=2):
+    """写入一份合成的沙箱审批、挂载与使用管控，作为授权规则的来源。
+
+    沙箱记录以 STOPPED 且资源为零写入，不参与调度、不占配额；到期时间取当前之后，
+    避免被到期回收任务触及。返回的标识用于跑完后原样删除。
+    """
+    sandbox_id = 'sbx-p4-' + uuid4().hex[:10]
+    approval_id = 'apr-p4-' + uuid4().hex[:10]
+    mount_id = 'mnt-p4-' + uuid4().hex[:10]
+    control_id = 'ctl-p4-' + uuid4().hex[:10]
+    now = platform_time(0)
+    until = platform_time(hours)
+    payload = json.dumps({'datasetAssetIds': [asset_id], 'teeColumns': columns,
+                          'teeOperators': operators, 'teeExpiresAt': utc_time(hours * 3600)},
+                         separators=(',', ':'))
+    sqlite(instance, [
+        'insert into ds_sandbox(id,name,owner_id,project_id,image_id,status,expires_at,network_policy,'
+        'cpu_cores,memory_gb,gpu_count,storage_gb,kuscia_job_id,endpoint,last_error,created_by,'
+        f'created_at,updated_at,deleted) values({quote(sandbox_id)},{quote("p4 验收沙箱")},'
+        f'{quote(owner)},{quote("")},{quote("")},{quote("STOPPED")},{quote(until)},'
+        f"{quote('NO_NETWORK')},0,0,0,0,'','','','p4-acceptance',{quote(now)},{quote(now)},0);",
+        'insert into ds_sandbox_approval(id,approval_type,sandbox_id,owner_id,submitter,payload_json,'
+        'status,current_stage,version,submitted_at,approved_at,completed_at,created_at,updated_at,deleted) '
+        f'values({quote(approval_id)},{quote("DATA_CHANGE")},{quote(sandbox_id)},{quote(owner)},'
+        f"'p4-acceptance',{quote(payload)},{quote('COMPLETED')},{quote('COMPLETED')},1,"
+        f'{quote(now)},{quote(now)},{quote(now)},{quote(now)},{quote(now)},0);',
+        'insert into ds_sandbox_dataset_mount(id,sandbox_id,asset_id,asset_version,provider_node_id,'
+        f'staging_uri,mount_path,checksum,status,expires_at,created_at,updated_at,deleted) values('
+        f'{quote(mount_id)},{quote(sandbox_id)},{quote(asset_id)},1,{quote(owner)},'
+        f"'','','',{quote('READY')},{quote(until)},{quote(now)},{quote(now)},0);",
+        'insert into ds_sandbox_mount_control(id,sandbox_id,asset_id,allow_use,use_until,version,'
+        f'updated_by,updated_at) values({quote(control_id)},{quote(sandbox_id)},{quote(asset_id)},1,'
+        f"{quote(until)},1,'p4-acceptance',{quote(now)});",
+    ])
+    return {'instance': instance, 'sandboxId': sandbox_id, 'approvalId': approval_id,
+            'mountId': mount_id, 'controlId': control_id}
+
+
+def remove_approval(fixture):
+    sqlite(fixture['instance'], [
+        f'delete from ds_sandbox_mount_control where id={quote(fixture["controlId"])};',
+        f'delete from ds_sandbox_dataset_mount where id={quote(fixture["mountId"])};',
+        f'delete from ds_sandbox_approval where id={quote(fixture["approvalId"])};',
+        f'delete from ds_sandbox where id={quote(fixture["sandboxId"])};',
+    ])
 
 
 def private_key(path):
@@ -120,36 +199,88 @@ def b64url(value):
     return base64.urlsafe_b64encode(value).decode().rstrip('=')
 
 
-def sign_task(payload):
-    header = b64url(json.dumps({'alg': 'RS256', 'typ': 'JWS', 'kid': 'tee-a-center-1'}).encode())
+def runtime_digest():
+    """任务声明的运行镜像摘要必须落在部署登记的集合内。"""
+    registry = json.loads((CENTER / 'identity-pub/registry.json').read_text())
+    digests = registry.get('runtimeImageDigests') or []
+    if not digests:
+        raise Failure('部署未登记可信运行镜像摘要')
+    return digests[0]
+
+
+def sign_task(payload, kid='tee-a-center-1', alg='RS256'):
+    header = b64url(json.dumps({'alg': alg, 'typ': 'JWS', 'kid': kid}).encode())
     body = b64url(json.dumps(payload).encode())
     signature = private_key(CENTER / 'tee/task-signer/client.key').sign(
         f'{header}.{body}'.encode('ascii'), padding.PKCS1v15(), hashes.SHA256())
     return f'{header}.{body}.{b64url(signature)}'
 
 
-def task_payload(asset, key, policy, columns, operator, nonce=None):
-    now = datetime.now(timezone.utc).replace(microsecond=0)
+def task_payload(asset, key, policy, columns, operator, nonce=None, sandbox_id='sandbox-demo',
+                 lifetime=240, issued_offset=0, program=None, image_digest=None, plaintext_bytes=None):
+    now = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=issued_offset)
     return {'contractVersion': CONTRACT, 'taskId': 'task-' + uuid4().hex[:12],
             'requestId': uuid4().hex, 'issuer': 'tee-a-center', 'audience': 'tee-a-runtime',
-            'sandboxId': 'sandbox-demo', 'operatorId': operator, 'columns': columns,
+            'sandboxId': sandbox_id, 'operatorId': operator, 'columns': columns,
             'inputs': [{'assetId': asset['assetId'], 'assetVersion': asset['assetVersion'],
                         'keyId': key['keyId'], 'keyVersion': key['keyVersion'],
                         'policyId': policy['policyId'], 'policyVersion': policy['policyVersion'],
                         'objectId': asset['objectId'], 'ciphertextSha256': asset['ciphertextSha256'],
-                        'plaintextBytes': len(SAMPLE_CSV)}],
-            'program': {'kind': 'BUILTIN', 'objectId': None,
-                        'sha256': hashlib.sha256(b'builtin').hexdigest(), 'parameters': '{}'},
+                        'plaintextBytes': plaintext_bytes or len(SAMPLE_CSV)}],
+            'program': program or {'kind': 'BUILTIN', 'objectId': None,
+                                   'sha256': hashlib.sha256(b'builtin').hexdigest(), 'parameters': '{}'},
             'issuedAt': now.isoformat().replace('+00:00', 'Z'),
-            'expiresAt': (now + timedelta(seconds=240)).isoformat().replace('+00:00', 'Z'),
+            'expiresAt': (now + timedelta(seconds=lifetime)).isoformat().replace('+00:00', 'Z'),
             'nonce': nonce or uuid4().hex,
             'outputPolicy': {'reportKinds': ['EVALUATION_METRICS'], 'encryptData': True,
                              'encryptModel': True, 'exportRequiresAllContributors': True},
-            'runtimeImageDigest': 'sha256:' + hashlib.sha256(b'runtime').hexdigest()}
+            'runtimeImageDigest': image_digest or runtime_digest()}
 
 
 def pem_of(path):
     return Path(path).read_text()
+
+
+def client_instance_boundary(instance, checks, prefix):
+    """在真实客户端实例上核对契约接口的部署边界。
+
+    当前部署只有中心端直连密钥适配服务，客户端实例没有本地密钥服务，
+    因此客户端上的密钥、规则、资产接口必须以可重试的 KEY_SERVICE_UNAVAILABLE 拒绝，
+    而不是静默成功或退回其他路径；运行时接口则按端角色拒绝。
+    """
+    token, owner = login(None, instance)
+    result = {'instance': instance, 'ownerId': owner}
+
+    # 无会话一律拒绝，且响应保持冻结的契约包装。
+    code, body = request('/v1alpha1/tee/keys', instance=instance)
+    if code != 401 or body.get('data', {}).get('errorCode') != 'AUDIT_ACCESS_DENIED':
+        raise Failure(f'{instance} 未认证访问未被拒绝')
+    result['sessionGuard'] = True
+
+    # 客户端没有本地密钥服务：接口按契约以可重试错误拒绝，不伪装成功。
+    code, body = request('/v1alpha1/tee/keys/issue', {
+        'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+        'assetId': 'boundary-' + uuid4().hex[:8], 'assetVersion': '1'}, token, instance)
+    data = body.get('data', {})
+    if code != 503 or data.get('errorCode') != 'KEY_SERVICE_UNAVAILABLE' or data.get('retryable') is not True:
+        raise Failure(f'{instance} 缺少密钥服务时的拒绝不符合契约')
+    result['keyServiceAbsentIsRetryable'] = True
+
+    # 客户端不承担运行时职责，运行时接口按端角色拒绝。
+    result['runtimeDenied'] = expect_denied(
+        '客户端调用运行时放行', '/v1alpha1/tee/runtime/release', {
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskJws': 'x.y.z',
+            'attestationEvidence': None, 'recipientCertPem': ''},
+        token, 'END_ROLE_DENIED', instance)
+
+    # 环境接口在客户端同样如实标注仿真，不出现夸大表述。
+    code, body = request('/v1alpha1/tee/environment', token=token, instance=instance)
+    environment = body['data']
+    if environment['runtimeMode'] != 'SIMULATION' or environment['attestationVerified'] is not False \
+            or environment['realModeReady'] is not False:
+        raise Failure(f'{instance} 环境接口未如实标注仿真模式')
+    result['environmentHonest'] = True
+    checks[prefix] = result
 
 
 def run():
@@ -158,154 +289,309 @@ def run():
     center_token, _ = login('CENTER')
     asset_id = 'demo-customers-' + uuid4().hex[:8]
     institution_cert = pem_of(CENTER / 'tee/identity/client.crt')
+    foreign_cert = pem_of(CLIENT / 'tee/identity/client.crt')
     workload_cert = pem_of(CENTER / 'tee/workload-cert/client.crt')
+    fixture = install_approval('tee-a-center', owner, asset_id, SAMPLE_COLUMNS, [OPERATOR])
+    sandbox_id = fixture['sandboxId']
 
-    # 1 签发密钥
-    issued = expect_ok('密钥签发', '/v1alpha1/tee/keys/issue', {
-        'contractVersion': CONTRACT, 'requestId': uuid4().hex,
-        'assetId': asset_id, 'assetVersion': '1'}, client_token)
-    checks['keyIssued'] = issued['state'] == 'ACTIVE'
-
-    # 2 申领并解开信封，得到数据密钥
-    claim_request = {'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'assetId': asset_id,
-                     'assetVersion': '1', 'keyId': issued['keyId'], 'keyVersion': issued['keyVersion'],
-                     'recipientCertPem': institution_cert}
-    claimed = expect_ok('密钥申领', '/v1alpha1/tee/keys/claim', claim_request, client_token)
-    data_key = unwrap(claimed['keyEnvelope'], CENTER / 'tee/identity/client.key')
-    checks['keyClaimedAndUnwrapped'] = True
-
-    # 3 本地加密示例数据
-    encrypted = encrypt(data_key, SAMPLE_CSV.encode(), asset_id, '1',
-                        issued['keyId'], issued['keyVersion'])
-    checks['clientSideEncrypted'] = True
-
-    # 4 登记授权规则
-    policy_body = {'contractVersion': CONTRACT, 'policyId': None, 'policyVersion': None,
-                   'assetId': asset_id, 'assetVersion': '1', 'ownerId': owner,
-                   'sandboxId': 'sandbox-demo', 'columns': GRANTED_COLUMNS, 'operators': [OPERATOR],
-                   'expiresAt': (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace('+00:00', 'Z'),
-                   'reportKinds': ['EVALUATION_METRICS']}
-    policy = expect_ok('规则登记', '/v1alpha1/tee/policies/register', {
-        'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'policy': policy_body}, client_token)
-    checks['policyRegistered'] = policy['state'] == 'ACTIVE'
-
-    # 5 登记密文资产
-    asset = expect_ok('资产登记', '/v1alpha1/tee/assets/register', {
-        'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'ownerId': owner,
-        'schema': SAMPLE_COLUMNS, 'encryptedObject': encrypted,
-        'policyId': policy['policyId'], 'policyVersion': policy['policyVersion']}, client_token)
-    asset['ciphertextSha256'] = encrypted['ciphertextSha256']
-    checks['assetRegistered'] = True
-
-    # 6 中心端只拿得到密文
-    code, stored = request(f'/v1alpha1/tee/objects/{asset["objectId"]}', token=client_token)
-    if code != 200 or stored['data']['ciphertextB64'] != encrypted['ciphertextB64']:
-        raise Failure('中心端存储的对象与提交的密文不一致')
-    if SAMPLE_CSV.split('\n')[1] in json.dumps(stored):
-        raise Failure('中心端对象响应中出现了明文数据行')
-    checks['centerHoldsOnlyCiphertext'] = True
-
-    # 7 运行时按签名任务放行，解密还原示例数据
-    task = task_payload(asset, issued, policy, GRANTED_COLUMNS, OPERATOR)
-    released = expect_ok('运行时放行', '/v1alpha1/tee/runtime/release', {
-        'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskJws': sign_task(task),
-        'attestationEvidence': None, 'recipientCertPem': workload_cert}, center_token)
-    runtime_key = unwrap(released['keyEnvelopes'][0], CENTER / 'tee/workload-cert/client.key')
-    recovered = decrypt(runtime_key, encrypted).decode()
-    if recovered != SAMPLE_CSV:
-        raise Failure('运行时解密结果与原始示例数据不一致')
-    checks['runtimeReleasedAndDecrypted'] = True
-    checks['simulationNotClaimingAttestation'] = (
-        released['runtimeMode'] == 'SIMULATION' and released['attestationVerified'] is False)
-
-    # 8 越权算子被拒
-    denied = task_payload(asset, issued, policy, GRANTED_COLUMNS, 'ml.dnn')
-    checks['deniedUnauthorizedOperator'] = expect_denied(
-        '越权算子', '/v1alpha1/tee/runtime/release', {
-            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskJws': sign_task(denied),
-            'attestationEvidence': None, 'recipientCertPem': workload_cert},
-        center_token, 'POLICY_DENIED')
-
-    # 9 越权列被拒
-    denied = task_payload(asset, issued, policy, GRANTED_COLUMNS + ['id_card'], OPERATOR)
-    checks['deniedUnauthorizedColumn'] = expect_denied(
-        '越权列', '/v1alpha1/tee/runtime/release', {
-            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskJws': sign_task(denied),
-            'attestationEvidence': None, 'recipientCertPem': workload_cert},
-        center_token, 'POLICY_DENIED')
-
-    # 10 非登记的可信运行时被拒
-    checks['deniedForeignRecipient'] = expect_denied(
-        '伪造接收者', '/v1alpha1/tee/runtime/release', {
+    try:
+        # 1 签发密钥
+        issued = expect_ok('密钥签发', '/v1alpha1/tee/keys/issue', {
             'contractVersion': CONTRACT, 'requestId': uuid4().hex,
-            'taskJws': sign_task(task_payload(asset, issued, policy, GRANTED_COLUMNS, OPERATOR)),
-            'attestationEvidence': None, 'recipientCertPem': institution_cert},
-        center_token, 'TASK_SIGNATURE_INVALID')
+            'assetId': asset_id, 'assetVersion': '1'}, client_token)
+        checks['keyIssued'] = issued['state'] == 'ACTIVE'
 
-    # 11 重放同一 nonce
-    replay = task_payload(asset, issued, policy, GRANTED_COLUMNS, OPERATOR, nonce=task['nonce'])
-    checks['deniedReplayedNonce'] = expect_denied(
-        'nonce 重放', '/v1alpha1/tee/runtime/release', {
-            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskJws': sign_task(replay),
-            'attestationEvidence': None, 'recipientCertPem': workload_cert},
-        center_token, 'TASK_REPLAYED')
+        # 2 申领并解开信封，得到数据密钥
+        claim_request = {'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'assetId': asset_id,
+                         'assetVersion': '1', 'keyId': issued['keyId'], 'keyVersion': issued['keyVersion'],
+                         'recipientCertPem': institution_cert}
+        claimed = expect_ok('密钥申领', '/v1alpha1/tee/keys/claim', claim_request, client_token)
+        data_key = unwrap(claimed['keyEnvelope'], CENTER / 'tee/identity/client.key')
+        checks['keyClaimedAndUnwrapped'] = True
 
-    # 12 幂等：相同请求标识不同内容
-    conflict_id = uuid4().hex
-    expect_ok('幂等首次', '/v1alpha1/tee/keys/issue', {
-        'contractVersion': CONTRACT, 'requestId': conflict_id,
-        'assetId': asset_id, 'assetVersion': '1'}, client_token)
-    checks['deniedRequestIdConflict'] = expect_denied(
-        '幂等冲突', '/v1alpha1/tee/keys/issue', {
+        # 3 本地加密示例数据
+        encrypted = encrypt(data_key, SAMPLE_CSV.encode(), asset_id, '1',
+                            issued['keyId'], issued['keyVersion'])
+        checks['clientSideEncrypted'] = True
+
+        # 4 登记授权规则
+        policy_body = {'contractVersion': CONTRACT, 'policyId': None, 'policyVersion': None,
+                       'assetId': asset_id, 'assetVersion': '1', 'ownerId': owner,
+                       'sandboxId': sandbox_id, 'columns': GRANTED_COLUMNS, 'operators': [OPERATOR],
+                       'expiresAt': utc_time(3600), 'reportKinds': ['EVALUATION_METRICS']}
+        policy = expect_ok('规则登记', '/v1alpha1/tee/policies/register', {
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'policy': policy_body}, client_token)
+        checks['policyRegistered'] = policy['state'] == 'ACTIVE'
+
+        # 5 登记密文资产
+        asset = expect_ok('资产登记', '/v1alpha1/tee/assets/register', {
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'ownerId': owner,
+            'schema': SAMPLE_COLUMNS, 'encryptedObject': encrypted,
+            'policyId': policy['policyId'], 'policyVersion': policy['policyVersion']}, client_token)
+        asset['ciphertextSha256'] = encrypted['ciphertextSha256']
+        checks['assetRegistered'] = True
+
+        # 6 中心端只拿得到密文
+        code, stored = request(f'/v1alpha1/tee/objects/{asset["objectId"]}', token=client_token)
+        if code != 200 or stored['data']['ciphertextB64'] != encrypted['ciphertextB64']:
+            raise Failure('中心端存储的对象与提交的密文不一致')
+        if SAMPLE_CSV.split('\n')[1] in json.dumps(stored):
+            raise Failure('中心端对象响应中出现了明文数据行')
+        checks['centerHoldsOnlyCiphertext'] = True
+
+        # 7 运行时按签名任务放行，解密还原示例数据
+        task = task_payload(asset, issued, policy, GRANTED_COLUMNS, OPERATOR, sandbox_id=sandbox_id)
+        released = expect_ok('运行时放行', '/v1alpha1/tee/runtime/release', {
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskJws': sign_task(task),
+            'attestationEvidence': None, 'recipientCertPem': workload_cert}, center_token)
+        runtime_key = unwrap(released['keyEnvelopes'][0], CENTER / 'tee/workload-cert/client.key')
+        recovered = decrypt(runtime_key, encrypted).decode()
+        if recovered != SAMPLE_CSV:
+            raise Failure('运行时解密结果与原始示例数据不一致')
+        checks['runtimeReleasedAndDecrypted'] = True
+        checks['simulationNotClaimingAttestation'] = (
+            released['runtimeMode'] == 'SIMULATION' and released['attestationVerified'] is False)
+
+        def release_denied(name, payload_task, error, evidence=None, recipient=None, signer=None):
+            return expect_denied(name, '/v1alpha1/tee/runtime/release', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+                'taskJws': signer(payload_task) if signer else sign_task(payload_task),
+                'attestationEvidence': evidence,
+                'recipientCertPem': recipient or workload_cert}, center_token, error)
+
+        def task_for(columns=None, operator=OPERATOR, **kwargs):
+            return task_payload(asset, issued, policy, columns or GRANTED_COLUMNS, operator,
+                                sandbox_id=sandbox_id, **kwargs)
+
+        # 8 越权算子被拒
+        checks['deniedUnauthorizedOperator'] = release_denied(
+            '越权算子', task_for(operator='ml.dnn'), 'POLICY_DENIED')
+
+        # 9 越权列被拒；拒绝原因不含列的数据内容
+        code, body = request('/v1alpha1/tee/runtime/release', {
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+            'taskJws': sign_task(task_for(columns=GRANTED_COLUMNS + ['id_card'])),
+            'attestationEvidence': None, 'recipientCertPem': workload_cert}, center_token)
+        if body.get('data', {}).get('errorCode') != 'POLICY_DENIED':
+            raise Failure('越权列未被按 POLICY_DENIED 拒绝')
+        if any(row.split(',')[3] in json.dumps(body) for row in SAMPLE_CSV.splitlines()[1:]):
+            raise Failure('拒绝响应中出现了列的数据内容')
+        checks['deniedUnauthorizedColumn'] = {'errorCode': 'POLICY_DENIED', 'httpStatus': code,
+                                              'noColumnDataInReason': True}
+
+        # 10 非登记的可信运行时被拒
+        checks['deniedForeignRecipient'] = release_denied(
+            '伪造接收者', task_for(), 'TASK_SIGNATURE_INVALID', recipient=institution_cert)
+
+        # 11 重放同一 nonce
+        checks['deniedReplayedNonce'] = release_denied(
+            'nonce 重放', task_for(nonce=task['nonce']), 'TASK_REPLAYED')
+
+        # 12 幂等：相同请求标识不同内容
+        conflict_id = uuid4().hex
+        expect_ok('幂等首次', '/v1alpha1/tee/keys/issue', {
             'contractVersion': CONTRACT, 'requestId': conflict_id,
-            'assetId': asset_id, 'assetVersion': '2'}, client_token, 'REQUEST_ID_CONFLICT')
+            'assetId': asset_id, 'assetVersion': '1'}, client_token)
+        checks['deniedRequestIdConflict'] = expect_denied(
+            '幂等冲突', '/v1alpha1/tee/keys/issue', {
+                'contractVersion': CONTRACT, 'requestId': conflict_id,
+                'assetId': asset_id, 'assetVersion': '2'}, client_token, 'REQUEST_ID_CONFLICT')
 
-    # 13 通配符与空集合授权被拒
-    checks['deniedWildcardPolicy'] = expect_denied(
-        '通配符授权', '/v1alpha1/tee/policies/register', {
-            'contractVersion': CONTRACT, 'requestId': uuid4().hex,
-            'policy': dict(policy_body, columns=['*'])}, client_token, 'POLICY_DENIED')
-    checks['deniedEmptyPolicy'] = expect_denied(
-        '空授权集合', '/v1alpha1/tee/policies/register', {
-            'contractVersion': CONTRACT, 'requestId': uuid4().hex,
-            'policy': dict(policy_body, columns=[])}, client_token, 'POLICY_DENIED')
+        # 13 通配符与空集合授权被拒
+        checks['deniedWildcardPolicy'] = expect_denied(
+            '通配符授权', '/v1alpha1/tee/policies/register', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+                'policy': dict(policy_body, columns=['*'])}, client_token, 'POLICY_DENIED')
+        checks['deniedEmptyPolicy'] = expect_denied(
+            '空授权集合', '/v1alpha1/tee/policies/register', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+                'policy': dict(policy_body, columns=[])}, client_token, 'POLICY_DENIED')
 
-    # 14 端角色越权
-    checks['deniedEndRole'] = expect_denied(
-        '端角色越权', '/v1alpha1/tee/keys/issue', {
-            'contractVersion': CONTRACT, 'requestId': uuid4().hex,
-            'assetId': asset_id, 'assetVersion': '3'}, center_token, 'END_ROLE_DENIED')
+        # 14 端角色越权
+        checks['deniedEndRole'] = expect_denied(
+            '端角色越权', '/v1alpha1/tee/keys/issue', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+                'assetId': asset_id, 'assetVersion': '3'}, center_token, 'END_ROLE_DENIED')
 
-    # 15 台账可查且不含密钥材料
-    code, ledger = request('/v1alpha1/tee/keys', token=client_token)
-    if code != 200 or not ledger['data']['items']:
-        raise Failure('密钥台账为空')
-    if 'wrappedKeyB64' in json.dumps(ledger) or 'dataKey' in json.dumps(ledger):
-        raise Failure('台账返回了密钥材料')
-    checks['ledgerWithoutKeyMaterial'] = True
+        # 15 台账可查且不含密钥材料
+        code, ledger = request('/v1alpha1/tee/keys', token=client_token)
+        if code != 200 or not ledger['data']['items']:
+            raise Failure('密钥台账为空')
+        if 'wrappedKeyB64' in json.dumps(ledger) or 'dataKey' in json.dumps(ledger):
+            raise Failure('台账返回了密钥材料')
+        checks['ledgerWithoutKeyMaterial'] = True
 
-    # 16 跨节点同步只给密文：已登记为密文资产的数据不再以明文出节点
-    code, sync = request(f'/v1alpha1/data-assets/sync/download?assetId={asset_id}', token=client_token)
-    body = json.dumps(sync)
-    first_row = SAMPLE_CSV.splitlines()[1]
-    if first_row in body or 'id_card' in body:
-        raise Failure('跨节点同步响应中出现了明文数据行')
-    checks['syncServesNoPlaintext'] = True
+        # 16 跨节点同步只给密文
+        code, sync = request(f'/v1alpha1/data-assets/sync/download?assetId={asset_id}', token=client_token)
+        body = json.dumps(sync)
+        if SAMPLE_CSV.splitlines()[1] in body or 'id_card' in body:
+            raise Failure('跨节点同步响应中出现了明文数据行')
+        checks['syncServesNoPlaintext'] = True
 
-    # 17 吊销后立即算不动
-    expect_ok('吊销密钥', '/v1alpha1/tee/keys/revoke', {
-        'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'keyId': issued['keyId'],
-        'keyVersion': issued['keyVersion'], 'reason': 'p4 acceptance'}, client_token)
-    revoked_task = task_payload(asset, issued, policy, GRANTED_COLUMNS, OPERATOR)
-    checks['deniedAfterRevoke'] = expect_denied(
-        '吊销后放行', '/v1alpha1/tee/runtime/release', {
-            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskJws': sign_task(revoked_task),
-            'attestationEvidence': None, 'recipientCertPem': workload_cert},
-        center_token, 'KEY_REVOKED')
+        # 17 换一个机构的证书申领同一份数据的密钥
+        checks['deniedForeignInstitutionClaim'] = expect_denied(
+            '他机构证书申领', '/v1alpha1/tee/keys/claim',
+            dict(claim_request, requestId=uuid4().hex, recipientCertPem=foreign_cert),
+            client_token, 'ASSET_OWNER_MISMATCH')
+
+        # 18 冒充其他机构登记规则
+        checks['deniedForeignOwnerPolicy'] = expect_denied(
+            '冒充机构登记规则', '/v1alpha1/tee/policies/register', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+                'policy': dict(policy_body, ownerId=owner + '-other')},
+            client_token, 'ASSET_OWNER_MISMATCH')
+
+        # 19 申领时资产绑定不符
+        checks['deniedClaimAssetMismatch'] = expect_denied(
+            '申领资产不符', '/v1alpha1/tee/keys/claim',
+            dict(claim_request, requestId=uuid4().hex, assetId=asset_id + '-other'),
+            client_token, 'DATA_INTEGRITY_FAILED')
+
+        # 20 规则没有审批来源
+        checks['deniedPolicyWithoutApproval'] = expect_denied(
+            '无审批来源', '/v1alpha1/tee/policies/register', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+                'policy': dict(policy_body, sandboxId='sbx-not-approved')},
+            client_token, 'POLICY_DENIED')
+
+        # 21 授权列超出审批批准范围
+        checks['deniedPolicyBeyondApproval'] = expect_denied(
+            '超出审批列范围', '/v1alpha1/tee/policies/register', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+                'policy': dict(policy_body, columns=GRANTED_COLUMNS + ['salary'])},
+            client_token, 'POLICY_DENIED')
+
+        # 22 有效期超过审批批准的期限
+        checks['deniedPolicyBeyondDeadline'] = expect_denied(
+            '超出审批期限', '/v1alpha1/tee/policies/register', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+                'policy': dict(policy_body, expiresAt=utc_time(30 * 24 * 3600))},
+            client_token, 'POLICY_DENIED')
+
+        # 23 篡改密文与篡改 AAD
+        tampered = dict(encrypted, ciphertextB64=base64.b64encode(
+            base64.b64decode(encrypted['ciphertextB64'])[:-1] + b'\x00').decode())
+        checks['deniedTamperedCiphertext'] = expect_denied(
+            '篡改密文', '/v1alpha1/tee/assets/register', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'ownerId': owner,
+                'schema': SAMPLE_COLUMNS, 'encryptedObject': tampered,
+                'policyId': policy['policyId'], 'policyVersion': policy['policyVersion']},
+            client_token, 'DATA_INTEGRITY_FAILED')
+        forged_aad = build_aad(asset_id, '9', issued['keyId'], issued['keyVersion'])
+        swapped = dict(encrypted, aadB64=base64.b64encode(forged_aad).decode())
+        swapped['ciphertextSha256'] = hashlib.sha256(
+            base64.b64decode(swapped['nonceB64']) + forged_aad
+            + base64.b64decode(swapped['ciphertextB64'])
+            + base64.b64decode(swapped['tagB64'])).hexdigest()
+        checks['deniedTamperedAad'] = expect_denied(
+            '篡改 AAD', '/v1alpha1/tee/assets/register', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'ownerId': owner,
+                'schema': SAMPLE_COLUMNS, 'encryptedObject': swapped,
+                'policyId': policy['policyId'], 'policyVersion': policy['policyVersion']},
+            client_token, 'DATA_INTEGRITY_FAILED')
+
+        # 24 任务时效：已过期与有效期超过契约上限
+        checks['deniedExpiredTask'] = release_denied(
+            '过期任务', task_for(lifetime=60, issued_offset=-600), 'TASK_EXPIRED')
+        checks['deniedTaskLifetimeTooLong'] = release_denied(
+            '有效期超上限', task_for(lifetime=600), 'CONTRACT_INVALID')
+
+        # 25 签名不可信：未知 kid 与非 RS256
+        checks['deniedUnknownKid'] = release_denied(
+            '未知 kid', task_for(), 'TASK_SIGNATURE_INVALID',
+            signer=lambda payload: sign_task(payload, kid='tee-a-center-unknown'))
+        checks['deniedNonRs256'] = release_denied(
+            '非 RS256', task_for(), 'TASK_SIGNATURE_INVALID',
+            signer=lambda payload: sign_task(payload, alg='HS256'))
+
+        # 26 运行镜像摘要未登记
+        checks['deniedUnregisteredImageDigest'] = release_denied(
+            '未登记镜像摘要', task_for(image_digest='sha256:' + '0' * 64), 'TASK_SIGNATURE_INVALID')
+
+        # 27 程序引用结构不符契约
+        checks['deniedProgramShape'] = release_denied(
+            'BUILTIN 携带程序对象', task_for(program={
+                'kind': 'BUILTIN', 'objectId': 'obj-x',
+                'sha256': hashlib.sha256(b'builtin').hexdigest(), 'parameters': '{}'}),
+            'CONTRACT_INVALID')
+
+        # 28 仿真部署不接受硬件证明证据
+        checks['deniedAttestationInSimulation'] = release_denied(
+            '仿真下提交证明', task_for(), 'REAL_MODE_UNAVAILABLE', evidence='c3ludGhldGlj')
+
+        # 29 输入明文总量超契约上限
+        checks['deniedOversizedInput'] = release_denied(
+            '输入超限', task_for(plaintext_bytes=300 * 1024 * 1024), 'PAYLOAD_TOO_LARGE')
+
+        # 30 契约版本不匹配
+        checks['deniedContractVersion'] = expect_denied(
+            '契约版本不符', '/v1alpha1/tee/keys/issue', {
+                'contractVersion': 'tee-contract/9.9', 'requestId': uuid4().hex,
+                'assetId': asset_id, 'assetVersion': '1'}, client_token, 'CONTRACT_INVALID')
+
+        # 31 结果密钥：DATA 可申领，REPORT 不需要结果密钥
+        result_task = task_for()
+        result_id = 'res-' + uuid4().hex[:10]
+        output = expect_ok('结果密钥申领', '/v1alpha1/tee/runtime/output-key', {
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskJws': sign_task(result_task),
+            'resultId': result_id, 'resultKind': 'DATA',
+            'recipientCertPem': workload_cert}, center_token)
+        result_key = unwrap(output['keyEnvelope'], CENTER / 'tee/workload-cert/client.key')
+        checks['outputKeyIssuedAndUnwrapped'] = len(result_key) == 32
+        checks['deniedReportOutputKey'] = expect_denied(
+            '报告申领结果密钥', '/v1alpha1/tee/runtime/output-key', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskJws': sign_task(task_for()),
+                'resultId': 'res-' + uuid4().hex[:10], 'resultKind': 'REPORT',
+                'recipientCertPem': workload_cert}, center_token, 'CONTRACT_INVALID')
+
+        # 32 运行时写回结果对象；存储与读回都是密文
+        result_object = encrypt(result_key, b'metric,value\nauc,0.91\n', 'result-' + result_id,
+                                result_task['taskId'], output['keyEnvelope']['keyId'],
+                                output['keyEnvelope']['keyVersion'])
+        written = expect_ok('结果对象写入', '/v1alpha1/tee/objects', {
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskId': result_task['taskId'],
+            'resultId': result_id, 'resultKind': 'DATA', 'contributors': [owner],
+            'encryptedObject': result_object}, center_token)
+        code, read_back = request(f'/v1alpha1/tee/objects/{written["objectId"]}', token=center_token)
+        if code != 200 or read_back['data']['ciphertextB64'] != result_object['ciphertextB64']:
+            raise Failure('结果对象读回与写入的密文不一致')
+        if 'auc' in base64.b64decode(read_back['data']['ciphertextB64']).decode('latin-1'):
+            raise Failure('结果对象存储的不是密文')
+        checks['resultObjectStoredAsCiphertext'] = {'objectId': written['objectId'],
+                                                    'exportState': written['exportState']}
+
+        # 33 结果标识不得改挂到其他任务
+        checks['deniedResultBoundToOtherTask'] = expect_denied(
+            '结果改挂其他任务', '/v1alpha1/tee/objects', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+                'taskId': 'task-' + uuid4().hex[:12], 'resultId': result_id, 'resultKind': 'DATA',
+                'contributors': [owner], 'encryptedObject': result_object},
+            center_token, 'POLICY_DENIED')
+
+        # 34 数据方不得写入结果对象
+        checks['deniedClientWritesResultObject'] = expect_denied(
+            '数据方写结果对象', '/v1alpha1/tee/objects', {
+                'contractVersion': CONTRACT, 'requestId': uuid4().hex,
+                'taskId': result_task['taskId'], 'resultId': 'res-' + uuid4().hex[:10],
+                'resultKind': 'DATA', 'contributors': [owner], 'encryptedObject': result_object},
+            client_token, 'END_ROLE_DENIED')
+
+        # 35 吊销后立即算不动
+        expect_ok('吊销密钥', '/v1alpha1/tee/keys/revoke', {
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'keyId': issued['keyId'],
+            'keyVersion': issued['keyVersion'], 'reason': 'p4 acceptance'}, client_token)
+        checks['deniedAfterRevoke'] = release_denied('吊销后放行', task_for(), 'KEY_REVOKED')
+    finally:
+        remove_approval(fixture)
+
+    # 36 两个客户端实例上的部署边界：会话守卫、缺密钥服务的拒绝、端角色与环境如实标注
+    client_instance_boundary('tee-a-client-1', checks, 'clientInstance1')
+    client_instance_boundary('tee-a-client-2', checks, 'clientInstance2')
 
     return {'assetId': asset_id, 'keyId': issued['keyId'], 'policyId': policy['policyId'],
             'objectId': asset['objectId'], 'sampleBytes': len(SAMPLE_CSV),
-            'grantedColumns': GRANTED_COLUMNS, 'operator': OPERATOR, 'checks': checks}
+            'grantedColumns': GRANTED_COLUMNS, 'operator': OPERATOR,
+            'approvalId': fixture['approvalId'], 'checks': checks}
 
 
 if __name__ == '__main__':

@@ -258,7 +258,7 @@ public class LoginInterceptor implements HandlerInterceptor {
      * 端角色守卫。
      *
      * <p>端角色最终由服务器决定，不接受请求头自报；旧会话缺角色时要求重新登录。
-     * 密钥申领与规则登记属于数据方，运行时放行与结果密钥属于可信执行方。
+     * 密钥申领与规则登记属于数据方，运行时放行、结果密钥与结果对象写入属于可信执行方。
      */
     private boolean checkEndRole(HttpServletRequest request, HttpServletResponse response) {
         String uri = request.getRequestURI();
@@ -267,6 +267,9 @@ public class LoginInterceptor implements HandlerInterceptor {
                 || uri.startsWith("/api/v1alpha1/tee/assets/")) {
             required = "CLIENT";
         } else if (uri.startsWith("/api/v1alpha1/tee/runtime/")) {
+            required = "CENTER";
+        } else if ("/api/v1alpha1/tee/objects".equals(uri) && "POST".equalsIgnoreCase(request.getMethod())) {
+            // 契约规定结果对象只允许任务对应的运行时写入；读取按对象权属另行鉴权，不限端。
             required = "CENTER";
         }
         if (required == null) {

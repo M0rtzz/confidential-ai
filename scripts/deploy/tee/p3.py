@@ -295,6 +295,16 @@ def prepare():
         '    # P3 不准备 Python/JAR 业务运行器。\n', script)
     if omitted != 4:
         raise RuntimeError('上游业务运行器调用结构变化，停止隔离适配')
+    # 抽样运行时到 start_kuscia 之间的定义会被上面的裁剪一并移除；上游在该区间新增的
+    # 运行时（如 Jupyter）属于并行开发内容，A 不构建也不注册，调用点必须同步去掉，
+    # 否则适配脚本会调用一个已被裁掉的函数。
+    script, dropped = re.subn(r'(?m)^    ensure_jupyter_runtime\n',
+        '    # P3 不准备 Jupyter 运行时。\n', script)
+    if dropped not in (0, 2):
+        raise RuntimeError('上游 Jupyter 运行时调用结构变化，停止隔离适配')
+    for leftover in re.findall(r'(?m)^\s*(ensure_[a-z_]+_runtime)\b', script):
+        if leftover not in ('ensure_sampler_runtime',) and f'{leftover}() {{' not in script:
+            raise RuntimeError('适配脚本调用了已被裁剪的函数：' + leftover)
     script = replace_once(script, '      docker rm -f "$KUSCIA_CONTAINER" >/dev/null\n      kuscia_status=""',
                           '      log_error "Kuscia requires an explicitly authorized replacement."\n      exit 1')
     script = replace_once(script, '  if verify_managed_container "$SECRETPAD_CONTAINER"; then\n    docker rm -f "$SECRETPAD_CONTAINER" >/dev/null\n  fi',
@@ -314,6 +324,12 @@ def prepare():
     script = script.replace('docker run ', 'docker run --pull=never ').replace('docker create ', 'docker create --pull=never ')
     atomic(target / 'develop.sh', script, 0o700)
     data = manifest()
+    # 工具链是与他人共享的工作副本。输入变化时如实记录上一版摘要并提示，
+    # 不把并行开发的改动当成本次的既有基线静默吸收。
+    if data.get('toolkit_content') and data['toolkit_content'] != toolkit_digest():
+        data['toolkit_content_previous'] = data['toolkit_content']
+        print('注意：共享工具链输入已变化，本次构建采用当前副本；'
+              f'上一版摘要 {data["toolkit_content"][:12]}，当前 {toolkit_digest()[:12]}。')
     if data.get('backend_runtime_content') != platform_digest() or data.get('frontend_content') != source_digest(FRONTEND) or data.get('toolkit_content') != toolkit_digest():
         data['images'].pop('platform', None)
     data.update(workspace=str(ROOT), owner='collab', source_mode='working-tree',

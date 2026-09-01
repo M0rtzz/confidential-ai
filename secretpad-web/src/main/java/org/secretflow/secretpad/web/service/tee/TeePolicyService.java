@@ -20,7 +20,8 @@ import java.util.UUID;
 /**
  * 授权规则登记。
  *
- * <p>规则由有效审批生成，登记到中心密钥服务后由其在放行时强制执行。
+ * <p>规则来源必须是一份已完成的沙箱审批，由 {@link TeeApprovalPolicySource} 核对；
+ * 登记到中心密钥服务后由其在放行时强制执行。
  * 列与算子精确匹配、不支持通配符、空集合即禁止——这三条底座不校验，必须在此拦住。
  */
 @Service
@@ -28,15 +29,18 @@ public class TeePolicyService {
 
     private final TeePolicyRepository policies;
     private final TeeKeyService keyService;
+    private final TeeApprovalPolicySource approvals;
     private final KeyAdapterClient adapter;
     private final TeeIdentityRegistry registry;
     private final TeeIdempotency idempotency;
     private final ObjectMapper mapper;
 
-    public TeePolicyService(TeePolicyRepository policies, TeeKeyService keyService, KeyAdapterClient adapter,
+    public TeePolicyService(TeePolicyRepository policies, TeeKeyService keyService,
+                            TeeApprovalPolicySource approvals, KeyAdapterClient adapter,
                             TeeIdentityRegistry registry, TeeIdempotency idempotency, ObjectMapper mapper) {
         this.policies = policies;
         this.keyService = keyService;
+        this.approvals = approvals;
         this.adapter = adapter;
         this.registry = registry;
         this.idempotency = idempotency;
@@ -75,6 +79,9 @@ public class TeePolicyService {
         TeeGuard.requireReportKinds(policy.reportKinds());
         Instant expiresAt = TeeGuard.requireInstant(policy.expiresAt(), "expiresAt");
         TeeGuard.requireNotExpired(expiresAt, TeeContract.Error.POLICY_DENIED, "授权有效期已过");
+        // 契约要求规则由有效审批生成：列、算子与有效期都不得超出沙箱审批和挂载管控批准的范围。
+        TeeApprovalPolicySource.Approved approved =
+                approvals.requireApproved(ownerId, sandboxId, assetId, columns, operators, expiresAt);
 
         String fingerprint = TeeIdempotency.fingerprint(List.of(assetId, assetVersion, sandboxId,
                 String.join(",", columns), String.join(",", operators),
@@ -97,6 +104,7 @@ public class TeePolicyService {
                             "columns", columns,
                             "operators", operators))));
             policies.save(TeePolicyDO.builder()
+                    .approvalId(approved.approvalId())
                     .upk(new TeePolicyDO.UPK(policyId, policyVersion))
                     .assetId(assetId).assetVersion(assetVersion).ownerId(ownerId).sandboxId(sandboxId)
                     .columnsJson(write(columns)).operatorsJson(write(operators))

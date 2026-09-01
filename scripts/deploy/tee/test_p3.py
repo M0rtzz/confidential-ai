@@ -1,4 +1,5 @@
 """P3 安全边界定向测试，不启动容器、不联网、不使用业务凭据。"""
+import base64
 import contextlib
 import hashlib
 import io
@@ -13,6 +14,8 @@ from unittest.mock import patch
 
 import p3
 import foundation
+import key_adapter
+import p4_e2e
 import release_client
 
 
@@ -187,6 +190,149 @@ class ReleaseClientTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 with open(state, 'x'):
                     pass
+
+
+class KeyAdapterTests(unittest.TestCase):
+    """适配服务是三条底座不校验边界的第二道拦截，空集合与通配符必须在此再拒一次。"""
+
+    def test_empty_and_wildcard_grant_sets_are_rejected(self):
+        for values in ([], None, 'age'):
+            with self.assertRaises(key_adapter.AdapterError) as raised:
+                key_adapter.check_names(values, '列')
+            self.assertEqual('POLICY_DENIED' if values in ([], None) else 'POLICY_DENIED',
+                             raised.exception.code)
+        with self.assertRaises(key_adapter.AdapterError) as raised:
+            key_adapter.check_names(['age', '*'], '列')
+        self.assertEqual('POLICY_DENIED', raised.exception.code)
+
+    def test_blank_name_is_contract_invalid(self):
+        with self.assertRaises(key_adapter.AdapterError) as raised:
+            key_adapter.check_names(['age', '  '], '列')
+        self.assertEqual('CONTRACT_INVALID', raised.exception.code)
+
+    def test_valid_grant_set_passes(self):
+        self.assertIsNone(key_adapter.check_names(['age', 'income'], '列'))
+
+    def test_required_field_must_be_non_blank_string(self):
+        for body in ({}, {'scope': ''}, {'scope': 3}):
+            with self.assertRaises(key_adapter.AdapterError) as raised:
+                key_adapter.require(body, 'scope')
+            self.assertEqual('CONTRACT_INVALID', raised.exception.code)
+        self.assertEqual('s1', key_adapter.require({'scope': 's1'}, 'scope'))
+
+    def test_recipient_must_be_rsa_2048_or_stronger(self):
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        import datetime as dt
+        key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'ec-recipient')])
+        now = dt.datetime.now(dt.timezone.utc)
+        cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+                .public_key(key.public_key()).serial_number(x509.random_serial_number())
+                .not_valid_before(now).not_valid_after(now + dt.timedelta(days=1))
+                .sign(key, hashes.SHA256()))
+        with self.assertRaises(key_adapter.AdapterError) as raised:
+            key_adapter.seal_to_recipient(base64.b64encode(b'k' * 32).decode(),
+                                          cert.public_bytes(serialization.Encoding.PEM))
+        self.assertEqual('CONTRACT_INVALID', raised.exception.code)
+
+
+class AcceptanceFixtureTests(unittest.TestCase):
+    """验收脚本写入平台库的合成审批必须能被原样删除，且时间取值不会立刻过期。"""
+
+    def test_sql_literals_escape_quotes(self):
+        self.assertEqual("'it''s'", p4_e2e.quote("it's"))
+
+    def test_platform_time_is_naive_local_and_ahead(self):
+        value = p4_e2e.platform_time(2)
+        self.assertNotIn('+', value)
+        self.assertGreater(value, p4_e2e.platform_time(0))
+
+    def test_utc_time_is_rfc3339_zulu(self):
+        self.assertTrue(p4_e2e.utc_time(60).endswith('Z'))
+
+    def test_fixture_install_and_remove_are_symmetric(self):
+        statements = []
+        original = p4_e2e.sqlite
+        p4_e2e.sqlite = lambda instance, script: statements.append((instance, script))
+        try:
+            fixture = p4_e2e.install_approval('tee-a-center', 'inst-a', 'asset-1',
+                                              ['age'], ['ml.xgboost'])
+            p4_e2e.remove_approval(fixture)
+        finally:
+            p4_e2e.sqlite = original
+        inserted = ' '.join(statements[0][1])
+        deleted = ' '.join(statements[1][1])
+        for table in ('ds_sandbox', 'ds_sandbox_approval', 'ds_sandbox_dataset_mount',
+                      'ds_sandbox_mount_control'):
+            self.assertIn(table, inserted)
+            self.assertIn(table, deleted)
+        # 合成沙箱不参与调度：无 Kuscia Job、资源为零、状态为 STOPPED。
+        self.assertIn("'STOPPED'", inserted)
+        self.assertIn("'COMPLETED'", inserted)
+
+
+class IdentityPublishTests(unittest.TestCase):
+    """机构条目只有平台起来后才能取到；重新发布不得把它们抹掉。"""
+
+    def test_existing_owner_entries_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = list(foundation.INSTANCES)
+            for name in names:
+                target = root / name / 'identity-pub'
+                target.mkdir(parents=True)
+                (target / 'registry.json').write_text(json.dumps({
+                    'taskSigningCertificates': {},
+                    name: {'certificateSha256': 'aa'},
+                    'ownerof' + name: {'certificateSha256': 'aa', 'instance': name}}))
+            with patch.object(foundation, 'RUNTIME', root):
+                entries = foundation.published_owner_entries()
+        for name in names:
+            self.assertIn('ownerof' + name, entries)
+        self.assertNotIn(names[0], entries)
+
+    def test_entries_without_known_instance_are_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name = list(foundation.INSTANCES)[0]
+            target = root / name / 'identity-pub'
+            target.mkdir(parents=True)
+            (target / 'registry.json').write_text(json.dumps({
+                'stray': {'certificateSha256': 'aa', 'instance': 'not-an-instance'}}))
+            with patch.object(foundation, 'RUNTIME', root):
+                self.assertEqual({}, foundation.published_owner_entries())
+
+    def test_owner_map_is_the_source_of_truth_for_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            center = Path(directory) / 'center'
+            center.mkdir()
+            # atomic 只允许写隔离工作树内，测试目录同时替换 ROOT 才能落盘。
+            with patch.object(p3, 'ROOT', Path(directory)), \
+                    patch.object(foundation, 'OWNER_MAP', center / 'owner-map.json'):
+                names = list(foundation.INSTANCES)
+                foundation.save_owner_map({names[0]: 'ownera'})
+                self.assertEqual({names[0]: 'ownera'}, foundation.owner_map())
+                # 重复保存同一映射是幂等的，映射变化则拒绝覆盖既有机构身份。
+                foundation.save_owner_map({names[0]: 'ownera'})
+                with self.assertRaises(RuntimeError):
+                    foundation.save_owner_map({names[0]: 'someone-else'})
+
+    def test_owner_map_ignores_unknown_instances(self):
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / 'owner-map.json'
+            file.write_text(json.dumps({'not-an-instance': 'x', list(foundation.INSTANCES)[0]: 'ok'}))
+            with patch.object(foundation, 'OWNER_MAP', file):
+                self.assertEqual({list(foundation.INSTANCES)[0]: 'ok'}, foundation.owner_map())
+
+    def test_runtime_image_digests_come_from_locked_manifest(self):
+        with patch.object(foundation, 'manifest', lambda: {'images': {
+                'teeapps': {'id': 'sha256:aa'}, 'probe': {'id': 'sha256:bb'},
+                'mysql': {'id': 'sha256:cc'}}}):
+            self.assertEqual(['sha256:aa', 'sha256:bb'], foundation.runtime_image_digests())
+
 
 if __name__ == '__main__':
     os.umask(0o077)

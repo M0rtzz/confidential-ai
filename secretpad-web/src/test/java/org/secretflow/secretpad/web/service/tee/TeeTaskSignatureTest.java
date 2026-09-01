@@ -67,6 +67,9 @@ class TeeTaskSignatureTest {
             + "AUKnlr08vgqP46BBHgenboNaP9mHjgfE01cMQqZZ";
 
     private final ObjectMapper mapper = new ObjectMapper();
+    /** 部署登记的仿真运行镜像摘要；任务声明其他摘要一律拒绝。 */
+    private static final String IMAGE_DIGEST = "sha256:deadbeef";
+
     private PrivateKey signingKey;
     private TeeRuntimeService service;
 
@@ -81,6 +84,13 @@ class TeeTaskSignatureTest {
                     throw TeeException.of(TeeContract.Error.TASK_SIGNATURE_INVALID, "未知 kid");
                 }
                 return TEST_SIGNER_CERT_B64;
+            }
+
+            @Override
+            public void requireRuntimeImageDigest(String digest) {
+                if (!IMAGE_DIGEST.equals(digest)) {
+                    throw TeeException.of(TeeContract.Error.TASK_SIGNATURE_INVALID, "镜像摘要未登记");
+                }
             }
         };
         service = new TeeRuntimeService(null, null, null, null, null, registry, null, mapper);
@@ -176,6 +186,37 @@ class TeeTaskSignatureTest {
     void wildcardColumnsInTaskAreRejected() throws Exception {
         String compact = jws(KID, "RS256", Map.of("columns", List.of("*")));
         assertEquals(TeeContract.Error.POLICY_DENIED,
+                assertThrows(TeeException.class, () -> service.verify(compact)).error());
+    }
+
+    @Test
+    void unregisteredRuntimeImageDigestIsRejected() throws Exception {
+        String compact = jws(KID, "RS256", Map.of("runtimeImageDigest", "sha256:0000"));
+        assertEquals(TeeContract.Error.TASK_SIGNATURE_INVALID,
+                assertThrows(TeeException.class, () -> service.verify(compact)).error());
+    }
+
+    @Test
+    void builtinProgramCarryingObjectIsRejected() throws Exception {
+        String compact = jws(KID, "RS256", Map.of("program",
+                Map.of("kind", "BUILTIN", "objectId", "obj-1", "sha256", "abc", "parameters", "{}")));
+        assertEquals(TeeContract.Error.CONTRACT_INVALID,
+                assertThrows(TeeException.class, () -> service.verify(compact)).error());
+    }
+
+    @Test
+    void nonBuiltinProgramWithoutObjectIsRejected() throws Exception {
+        String compact = jws(KID, "RS256", Map.of("program",
+                Map.of("kind", "PYTHON", "sha256", "abc", "parameters", "{}")));
+        assertEquals(TeeContract.Error.CONTRACT_INVALID,
+                assertThrows(TeeException.class, () -> service.verify(compact)).error());
+    }
+
+    @Test
+    void unknownProgramKindIsRejected() throws Exception {
+        String compact = jws(KID, "RS256", Map.of("program",
+                Map.of("kind", "SHELL", "objectId", "obj-1", "sha256", "abc", "parameters", "{}")));
+        assertEquals(TeeContract.Error.CONTRACT_INVALID,
                 assertThrows(TeeException.class, () -> service.verify(compact)).error());
     }
 }

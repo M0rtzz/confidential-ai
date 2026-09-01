@@ -84,6 +84,26 @@ public class TeeIdentityRegistry {
         return node.asText();
     }
 
+    /**
+     * 仿真模式下允许执行的运行镜像摘要。
+     *
+     * <p>契约第四节规定 SIMULATION 只允许预注册的工作负载证书、指定运行镜像摘要与签名任务，
+     * 因此任务声明的镜像摘要必须落在部署时登记的集合内；未登记即拒绝，不接受任意摘要。
+     */
+    public void requireRuntimeImageDigest(String digest) {
+        String value = TeeGuard.requireText(digest, "runtimeImageDigest");
+        JsonNode digests = read().path("runtimeImageDigests");
+        if (!digests.isArray() || digests.isEmpty()) {
+            throw TeeException.of(TeeContract.Error.TASK_SIGNATURE_INVALID, "部署未登记可信运行镜像摘要");
+        }
+        for (JsonNode allowed : digests) {
+            if (value.equals(allowed.asText())) {
+                return;
+            }
+        }
+        throw TeeException.of(TeeContract.Error.TASK_SIGNATURE_INVALID, "运行镜像摘要不在登记范围内");
+    }
+
     private JsonNode read() {
         try {
             if (Files.size(registryPath) > 256 * 1024) {

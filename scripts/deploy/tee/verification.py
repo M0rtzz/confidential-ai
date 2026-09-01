@@ -470,12 +470,16 @@ def verify_p4():
     failed = [name for name, check in value['checks'].items() if check is False]
     if failed:
         raise RuntimeError('P4 验收存在未通过项：' + '、'.join(failed))
+    denials = sorted({check['errorCode'] for check in value['checks'].values()
+                      if isinstance(check, dict) and 'errorCode' in check})
     atomic(CENTER / 'p4-verification.json', {'checkedAt': utc(), 'result': value,
         'evidence': 'END_TO_END_KEY_ISSUE_ENCRYPT_POLICY_RELEASE_DECRYPT',
+        'checkCount': len(value['checks']), 'deniedErrorCodes': denials,
         'businessChainVerified': True})
-    print('P4 全链路通过：示例数据经签发、申领、客户端加密、规则登记、资产登记后，')
-    print('由签名任务在运行时放行并解密还原，中心端全程只持有密文。')
-    print('越权算子、越权列、伪造接收者、nonce 重放、幂等冲突、通配符、空集合、端角色越权、吊销后放行均被拒绝。')
+    print(f'P4 全链路通过：{len(value["checks"])} 项检查，示例数据经签发、申领、客户端加密、')
+    print('规则登记、资产登记后由签名任务在运行时放行并解密还原，中心端全程只持有密文。')
+    print('覆盖的拒绝错误码：' + '、'.join(denials))
+    print('授权规则的审批来源、运行镜像摘要、程序结构与结果对象写入端均已逐项校验。')
 
 
 def verify(command):

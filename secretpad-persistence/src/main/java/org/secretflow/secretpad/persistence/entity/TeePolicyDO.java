@@ -64,6 +64,10 @@ public class TeePolicyDO extends BaseAggregationRoot<TeePolicyDO> {
     @Column(name = "state", nullable = false, length = 32)
     private String state;
 
+    /** 采信的沙箱审批单，规则来源的审计线索。 */
+    @Column(name = "approval_id", nullable = false, length = 64)
+    private String approvalId;
+
     @Getter
     @Setter
     @ToString

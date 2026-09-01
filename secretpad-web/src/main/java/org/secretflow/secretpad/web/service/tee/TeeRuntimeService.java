@@ -229,8 +229,32 @@ public class TeeRuntimeService {
         if (Instant.now().plusSeconds(TeeContract.CLOCK_SKEW_SECONDS).isBefore(issuedAt)) {
             throw TeeException.of(TeeContract.Error.TASK_EXPIRED, "任务签发时间超出时钟容差");
         }
-        TeeGuard.requireText(task.runtimeImageDigest(), "runtimeImageDigest");
+        registry.requireRuntimeImageDigest(task.runtimeImageDigest());
+        requireProgram(task.program());
         requireOutputPolicy(task);
+    }
+
+    /**
+     * 程序引用的契约结构校验。
+     *
+     * <p>BUILTIN 的 objectId 为空，其摘要指镜像内算子资源；其余模式必须给出程序对象标识，
+     * 由运行时另取程序字节并核对摘要。程序对象不含数据行或数据密钥。
+     */
+    private void requireProgram(TeeTaskSpec.Program program) {
+        if (program == null) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "任务缺少程序引用");
+        }
+        String kind = TeeGuard.requireText(program.kind(), "program.kind");
+        if (!TeeContract.PROGRAM_KINDS.contains(kind)) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "程序类型不在契约白名单内");
+        }
+        TeeGuard.requireText(program.sha256(), "program.sha256");
+        boolean builtin = "BUILTIN".equals(kind);
+        boolean hasObject = program.objectId() != null && !program.objectId().isBlank();
+        if (builtin == hasObject) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID,
+                    builtin ? "BUILTIN 程序不得携带程序对象" : "非 BUILTIN 程序必须给出程序对象");
+        }
     }
 
     private void requireOutputPolicy(TeeTaskSpec task) {
