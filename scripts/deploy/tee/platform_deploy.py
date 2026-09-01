@@ -137,6 +137,21 @@ def platform_digest():
     return source_digest(ROOT, ('scripts/deploy/tee', 'develop.sh', 'docs/tee-dev-a'))
 
 
+def platform_inputs():
+    """当前平台镜像必须绑定的三类构建输入。"""
+    return {'backend_runtime_content': platform_digest(),
+            'frontend_content': source_digest(FRONTEND),
+            'toolkit_content': toolkit_digest()}
+
+
+def platform_image_matches(data, inputs=None):
+    """同时核对顶层清单与镜像自身记录，禁止旧镜像借新清单被复用。"""
+    inputs = inputs or platform_inputs()
+    image = data.get('images', {}).get('platform')
+    return bool(image) and all(data.get(key) == value and image.get(key) == value
+                               for key, value in inputs.items())
+
+
 # 平台构建入口和 B 已恢复的运行器源码共同构成共享工具链输入。
 TOOLKIT_INPUTS = ['Dockerfile', 'build.sh', 'data-sandbox.env.example',
                   'deploy/common/log.sh', 'deploy/common/utils.sh', 'develop.sh']
@@ -424,7 +439,8 @@ def prepare():
         data['toolkit_content_previous'] = data['toolkit_content']
         print('注意：共享工具链输入已变化，本次构建采用当前副本；'
               f'上一版摘要 {data["toolkit_content"][:12]}，当前 {toolkit_digest()[:12]}。')
-    if data.get('backend_runtime_content') != platform_digest() or data.get('frontend_content') != source_digest(FRONTEND) or data.get('toolkit_content') != toolkit_digest():
+    inputs = platform_inputs()
+    if not platform_image_matches(data, inputs):
         data['images'].pop('platform', None)
     data.update(workspace=str(ROOT), owner='collab', source_mode='working-tree',
                 backend_commit=git(ROOT, 'rev-parse', 'HEAD'), backend_content=source_digest(ROOT), backend_runtime_content=platform_digest(),
@@ -509,7 +525,7 @@ def register_sampler(name):
 
 def up(name):
     data = manifest()
-    if data.get('backend_runtime_content') != platform_digest() or data.get('frontend_content') != source_digest(FRONTEND) or data.get('toolkit_content') != toolkit_digest():
+    if not platform_image_matches(data):
         raise RuntimeError('源码已变化，现有镜像不能代表当前工作树')
     data['deployment_source_content'] = source_digest(ROOT)
     save_manifest(data)

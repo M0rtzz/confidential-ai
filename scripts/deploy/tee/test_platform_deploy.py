@@ -71,6 +71,16 @@ class IsolationTests(unittest.TestCase):
         with patch.object(deploy, 'manifest', return_value={'images': {'probe': {'ref': 'probe:fixed', 'id': 'sha256:old'}}}), patch.object(deploy, 'image_info', return_value={'Id': 'sha256:new'}):
             with self.assertRaises(RuntimeError): deploy.checked_image('probe')
 
+    def test_platform_image_cannot_borrow_fresh_top_level_inputs(self):
+        inputs = {'backend_runtime_content': 'backend-new', 'frontend_content': 'frontend-new',
+                  'toolkit_content': 'toolkit-new'}
+        manifest = dict(inputs, images={'platform': {
+            'backend_runtime_content': 'backend-new', 'frontend_content': 'frontend-new',
+            'toolkit_content': 'toolkit-old'}})
+        self.assertFalse(deploy.platform_image_matches(manifest, inputs))
+        manifest['images']['platform']['toolkit_content'] = 'toolkit-new'
+        self.assertTrue(deploy.platform_image_matches(manifest, inputs))
+
     def test_kubernetes_labels_and_host_mounts_are_scoped(self):
         for value in foundation.kube_labels().values():
             self.assertRegex(value, r'^[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$')
