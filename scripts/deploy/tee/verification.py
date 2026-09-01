@@ -375,7 +375,12 @@ def verify_isolation():
                     raise RuntimeError('存在主源码和运行目录之外的可写挂载：' + ctr)
                 if 'docker.sock' in mount.get('Source', ''): raise RuntimeError('新实例不允许挂载 Docker socket')
                 if suffix == 'secretpad' and '/tee/' in mount.get('Source', ''):
-                    raise RuntimeError('普通平台不允许挂载底座私钥目录')
+                    allowed_identity_mounts = {
+                        '/app/tee-adapter-client', '/app/tee-contract-client',
+                        '/app/tee-identity-key', '/app/tee-contract-server',
+                    }
+                    if mount.get('RW') or mount.get('Destination') not in allowed_identity_mounts:
+                        raise RuntimeError('平台挂载了契约身份范围之外的底座目录')
             mounts[ctr] = [{'source': item.get('Source'), 'destination': item['Destination'], 'rw': item['RW']}
                            for item in value['Mounts']]
             if suffix == 'secretpad': images[name] = value['Image']
@@ -388,7 +393,7 @@ def verify_isolation():
     atomic(RUNTIME / 'isolation-verification.json', {'checkedAt': utc(), 'protectedTrackedAndStatusUnchanged': before == after,
         'protectedInputsUnchanged': True, 'concurrentToolkitChanges': concurrent, 'untrackedHistoricalContentsVerified': False,
         'before': before, 'after': after, 'mounts': mounts, 'platformImages': images})
-    print('原后端、前端、实际工具链输入及旧六个容器保持原基线；新实例隔离通过。')
+    print('主后端、前端、实际工具链输入及两个客户端基础容器保持保护基线；三实例隔离通过。')
     if concurrent: print('原工具链在已观察的 runner 路径出现并发改动，已单列证据；不推断修改者或宣称整个原目录未变。')
 
 

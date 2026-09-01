@@ -495,6 +495,13 @@ class CrossInstanceChannelTests(unittest.TestCase):
                       '${TEE_CONTRACT_SERVER_MOUNT:-}']:
             self.assertIn(mount, source)
 
+    def test_isolation_allows_only_explicit_read_only_identity_mounts(self):
+        source = Path(acceptance.__file__).with_name('verification.py').read_text()
+        for destination in ['/app/tee-adapter-client', '/app/tee-contract-client',
+                            '/app/tee-identity-key', '/app/tee-contract-server']:
+            self.assertIn(destination, source)
+        self.assertIn("if mount.get('RW') or mount.get('Destination') not in allowed_identity_mounts", source)
+
 
 class ToolkitIntegrationTests(unittest.TestCase):
     """主工作区直接读取共享工具链，并以摘要发现并发变化。"""
