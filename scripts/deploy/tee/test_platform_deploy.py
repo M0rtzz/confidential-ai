@@ -114,6 +114,13 @@ class IsolationTests(unittest.TestCase):
         manifest['images']['platform']['toolkit_content'] = 'toolkit-new'
         self.assertTrue(deploy.platform_image_matches(manifest, inputs))
 
+    def test_platform_stamp_changes_with_toolkit_input(self):
+        data = {'backend_runtime_content': 'b' * 64, 'frontend_content': 'f' * 64,
+                'toolkit_content': 'a' * 64}
+        first = deploy.platform_stamp(data)
+        data['toolkit_content'] = 'c' * 64
+        self.assertNotEqual(first, deploy.platform_stamp(data))
+
     def test_kubernetes_labels_and_host_mounts_are_scoped(self):
         for value in foundation.kube_labels().values():
             self.assertRegex(value, r'^[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$')

@@ -152,6 +152,12 @@ def platform_image_matches(data, inputs=None):
                                for key, value in inputs.items())
 
 
+def platform_stamp(data):
+    """三类构建输入共同标识暂存目录和平台镜像。"""
+    return (data['backend_runtime_content'][:12] + '-' + data['frontend_content'][:8]
+            + '-' + data['toolkit_content'][:8])
+
+
 # 平台构建入口和 B 已恢复的运行器源码共同构成共享工具链输入。
 TOOLKIT_INPUTS = ['Dockerfile', 'build.sh', 'data-sandbox.env.example',
                   'deploy/common/log.sh', 'deploy/common/utils.sh', 'develop.sh']
@@ -500,7 +506,7 @@ def prepare():
 def build_platform():
     prepare()
     data = manifest()
-    stamp = data['backend_runtime_content'][:12] + '-' + data['frontend_content'][:8]
+    stamp = platform_stamp(data)
     if data['images'].get('platform'):
         checked_image('platform')
         print('平台编译输入未变化，复用已锁定镜像。')
