@@ -413,6 +413,11 @@ def prepare():
     script = replace_once(script, 'WORKSPACE_DIR="$(cd "${PACKAGE_DIR}/.." && pwd)"', f'WORKSPACE_DIR="{ROOT}"')
     script = replace_once(script, 'BACKEND_DIR="$(realpath -m "${WORKSPACE_DIR}/confidential-ai")"', 'BACKEND_DIR="$WORKSPACE_DIR"')
     script = replace_once(script, 'FRONTEND_DIR="$(realpath -m "${WORKSPACE_DIR}/confidential-ai-frontend")"', f'FRONTEND_DIR="{FRONTEND}"')
+    script = replace_once(script, '    "${WORKSPACE_DIR}"/.dev-runtime/*) ;;',
+                          f'    "{RUNTIME}"/*) ;;')
+    script = replace_once(script,
+                          '      log_error "DATA_SANDBOX_DEV_ROOT must stay below ${WORKSPACE_DIR}/.dev-runtime/."',
+                          f'      log_error "DATA_SANDBOX_DEV_ROOT must stay below {RUNTIME}/."')
     script = replace_once(script, 'SECRETPAD_IMAGE="data-sandbox-secretpad:dev-${DEV_NAME}"', 'SECRETPAD_IMAGE="${TEE_PLATFORM_IMAGE:?Missing pinned platform image}"')
     script = replace_once(script, 'DOMAIN_ID="dev-${DEV_NAME}"',
                           'DOMAIN_ID="${DATA_SANDBOX_DOMAIN_ID:-dev-${DEV_NAME}}"')
