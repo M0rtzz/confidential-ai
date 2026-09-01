@@ -124,6 +124,25 @@ def issue(ca, directory, cn, server=False, expired=False):
 
 
 CONTRACT_SERVER_CN = 'center-contract'
+LEGACY_INSTANCE_NAMES = {
+    'tee-a-center': 'center',
+    'tee-a-client-1': 'client-a',
+    'tee-a-client-2': 'client-b',
+}
+
+
+def identity_registry_matches(existing, current):
+    """允许旧实例键名迁移，证书指纹必须逐一保持不变。"""
+    if existing == current:
+        return True
+    if len(existing) != len(current):
+        return False
+    legacy_for = {new: old for old, new in LEGACY_INSTANCE_NAMES.items()}
+    for name, identity in current.items():
+        candidate = existing.get(name) or existing.get(legacy_for.get(name, ''))
+        if not candidate or candidate.get('certificateSha256') != identity['certificateSha256']:
+            return False
+    return True
 
 
 def certificates():
@@ -172,9 +191,14 @@ def certificates():
         identities[name] = {'certificateSha256': hashlib.sha256(der).hexdigest(),
                             'certificatePath': str(cert.relative_to(RUNTIME))}
     registry = CENTER / 'identity-registry.json'
-    if registry.exists() and json.loads(registry.read_text()) != identities:
-        raise RuntimeError('机构登记与已有证书不一致，拒绝覆盖身份')
-    if not registry.exists(): atomic(registry, identities)
+    if registry.exists():
+        existing = json.loads(registry.read_text())
+        if not identity_registry_matches(existing, identities):
+            raise RuntimeError('机构登记与已有证书不一致，拒绝覆盖身份')
+        if existing != identities:
+            atomic(registry, identities)
+    else:
+        atomic(registry, identities)
     publish_identities(identities)
 
 
@@ -196,8 +220,15 @@ def owner_map():
     if not OWNER_MAP.exists():
         return {}
     stored = json.loads(OWNER_MAP.read_text())
-    return {name: owner for name, owner in stored.items()
-            if name in INSTANCES and isinstance(owner, str) and owner}
+    normalized = {}
+    for name, owner in stored.items():
+        name = LEGACY_INSTANCE_NAMES.get(name, name)
+        if name not in INSTANCES or not isinstance(owner, str) or not owner:
+            continue
+        if name in normalized and normalized[name] != owner:
+            raise RuntimeError('旧实例别名对应多个机构标识：' + name)
+        normalized[name] = owner
+    return normalized
 
 
 def save_owner_map(owners):

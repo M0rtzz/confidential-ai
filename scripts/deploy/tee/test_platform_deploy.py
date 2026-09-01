@@ -372,6 +372,29 @@ class IdentityPublishTests(unittest.TestCase):
             with patch.object(foundation, 'OWNER_MAP', file):
                 self.assertEqual({list(foundation.INSTANCES)[0]: 'ok'}, foundation.owner_map())
 
+    def test_legacy_identity_names_keep_certificate_and_owner(self):
+        current = {
+            'center': {'certificateSha256': 'center-cert', 'certificatePath': 'center/new'},
+            'client-a': {'certificateSha256': 'a-cert', 'certificatePath': 'client-a/new'},
+            'client-b': {'certificateSha256': 'b-cert', 'certificatePath': 'client-b/new'},
+        }
+        legacy = {
+            'tee-a-center': {'certificateSha256': 'center-cert', 'certificatePath': 'old/center'},
+            'tee-a-client-1': {'certificateSha256': 'a-cert', 'certificatePath': 'old/a'},
+            'tee-a-client-2': {'certificateSha256': 'b-cert', 'certificatePath': 'old/b'},
+        }
+        self.assertTrue(foundation.identity_registry_matches(legacy, current))
+        legacy['tee-a-client-2']['certificateSha256'] = 'changed'
+        self.assertFalse(foundation.identity_registry_matches(legacy, current))
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / 'owner-map.json'
+            file.write_text(json.dumps({'tee-a-center': 'owner-center',
+                                        'tee-a-client-1': 'owner-a',
+                                        'tee-a-client-2': 'owner-b'}))
+            with patch.object(foundation, 'OWNER_MAP', file):
+                self.assertEqual({'center': 'owner-center', 'client-a': 'owner-a',
+                                  'client-b': 'owner-b'}, foundation.owner_map())
+
     def test_runtime_image_digests_come_from_locked_manifest(self):
         with patch.object(foundation, 'manifest', lambda: {'images': {
                 'teeapps': {'id': 'sha256:aa'}, 'probe': {'id': 'sha256:bb'},
