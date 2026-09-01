@@ -58,14 +58,14 @@ class IsolationTests(unittest.TestCase):
             deploy.LABEL + 'dev': 'true', deploy.LABEL + 'dev-owner': 'collab',
             deploy.LABEL + 'dev-workspace': '/data/collab/Projects/gpu'}}}]), '')
         with patch.object(deploy.subprocess, 'run', return_value=result):
-            with self.assertRaises(RuntimeError): deploy.managed('data-sandbox-dev-tee-a-center-secretpad')
+            with self.assertRaises(RuntimeError): deploy.managed('data-sandbox-dev-center-secretpad')
 
     def test_stopped_foreign_container_reserves_ports(self):
         def run(*args, **kwargs):
             if args[:3] == ('docker', 'ps', '-aq'): return 'foreign-id'
             return json.dumps([{'Name': '/foreign', 'HostConfig': {'PortBindings': {'80/tcp': [{'HostPort': '19688'}]}}, 'State': {'Running': False}}])
         with patch.object(deploy, 'run', side_effect=run):
-            with self.assertRaises(RuntimeError): deploy.port_check('tee-a-center')
+            with self.assertRaises(RuntimeError): deploy.port_check('center')
 
     def test_digest_drift_blocks_image_use(self):
         with patch.object(deploy, 'manifest', return_value={'images': {'probe': {'ref': 'probe:fixed', 'id': 'sha256:old'}}}), patch.object(deploy, 'image_info', return_value={'Id': 'sha256:new'}):
@@ -82,7 +82,8 @@ class IsolationTests(unittest.TestCase):
     def test_partial_ca_and_external_key_path_are_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            with patch.object(foundation, 'ROOT', root), patch.object(deploy, 'ROOT', root):
+            with patch.object(foundation, 'ROOT', root), patch.object(foundation, 'RUNTIME', root), \
+                    patch.object(deploy, 'ROOT', root), patch.object(deploy, 'RUNTIME', root):
                 ca = root / 'ca'; ca.mkdir(); (ca / 'ca.key').write_text('partial')
                 with self.assertRaises(RuntimeError): foundation.make_ca(ca, 'test')
                 link = root / 'link'; link.symlink_to(root.parent / 'deploy-escape')
@@ -93,7 +94,8 @@ class IsolationTests(unittest.TestCase):
     def test_certificate_replay_preserves_private_keys_and_crl_rejects_revocation(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            with patch.object(foundation, 'ROOT', root), patch.object(deploy, 'ROOT', root):
+            with patch.object(foundation, 'ROOT', root), patch.object(foundation, 'RUNTIME', root), \
+                    patch.object(deploy, 'ROOT', root), patch.object(deploy, 'RUNTIME', root):
                 ca, client = root / 'ca', root / 'client'
                 foundation.make_ca(ca, 'synthetic-ca')
                 foundation.issue(ca, client, 'synthetic-client')
@@ -258,7 +260,7 @@ class AcceptanceFixtureTests(unittest.TestCase):
         original = acceptance.sqlite
         acceptance.sqlite = lambda instance, script: statements.append((instance, script))
         try:
-            fixture = acceptance.install_approval('tee-a-center', 'inst-a', 'asset-1',
+            fixture = acceptance.install_approval('center', 'inst-a', 'asset-1',
                                               ['age'], ['ml.xgboost'])
             acceptance.remove_approval(fixture)
         finally:
@@ -354,7 +356,7 @@ class CrossInstanceChannelTests(unittest.TestCase):
                         return certificates[name]
                 raise AssertionError('未知证书路径')
 
-            owners = {'tee-a-center': 'inst-center', 'tee-a-client-1': 'inst-client-1'}
+            owners = {'center': 'inst-center', 'client-a': 'inst-client-1'}
             with patch.object(foundation, 'RUNTIME', runtime), \
                     patch.object(foundation.subprocess, 'check_output', side_effect=der), \
                     patch.object(foundation, 'owner_map', lambda: {}):
@@ -373,26 +375,26 @@ class CrossInstanceChannelTests(unittest.TestCase):
                 '8443/tcp': [{'HostPort': str(deploy.CONTRACT_PORT)}]}}, 'State': {'Running': False}}])
         with patch.object(deploy, 'run', side_effect=run):
             with self.assertRaises(RuntimeError):
-                deploy.port_check('tee-a-center')
+                deploy.port_check('center')
 
     def test_contract_server_certificate_covers_the_published_address(self):
         names = foundation.subject_alt_names(foundation.CONTRACT_SERVER_CN, True)
         self.assertIn('IP:222.20.99.38', names)
         # 客户端证书不追加可路由地址，避免把入口地址写进调用方身份。
-        self.assertEqual('', foundation.subject_alt_names('contract-tee-a-client-1', False))
+        self.assertEqual('', foundation.subject_alt_names('contract-client-a', False))
 
     def test_only_the_center_publishes_the_contract_entry(self):
         source = Path(deploy.__file__).read_text()
-        self.assertIn("TEE_CONTRACT_PORT_ARGS='-p 19686:8443' if name == 'tee-a-center' else ''", source)
-        self.assertIn("TEE_CONTRACT_CENTER_URL='' if name == 'tee-a-center' else CONTRACT_CENTER_URL", source)
+        self.assertIn("TEE_CONTRACT_PORT_ARGS='-p 19686:8443' if name == 'center' else ''", source)
+        self.assertIn("TEE_CONTRACT_CENTER_URL='' if name == 'center' else CONTRACT_CENTER_URL", source)
         # 三个实例都要挂载本机构私钥与调用方证书，中心端另挂服务端证书。
         for mount in ['/app/tee-contract-client:ro', '/app/tee-identity-key:ro',
                       '${TEE_CONTRACT_SERVER_MOUNT:-}']:
             self.assertIn(mount, source)
 
 
-class ToolkitPinTests(unittest.TestCase):
-    """共享工具链是他人也在改的工作副本；A 只用自己钉住的副本，且不写回共享目录。"""
+class ToolkitIntegrationTests(unittest.TestCase):
+    """主工作区直接读取共享工具链，并以摘要发现并发变化。"""
 
     @contextlib.contextmanager
     def workspace(self):
@@ -408,41 +410,35 @@ class ToolkitPinTests(unittest.TestCase):
                     patch.object(deploy, 'TOOLKIT_PIN', root / 'cache/toolkit-pin'):
                 yield shared
 
-    def test_pin_is_created_once_and_shared_changes_do_not_leak_in(self):
+    def test_shared_changes_are_visible_to_the_digest(self):
         with self.workspace() as shared:
-            self.assertTrue(deploy.pin_toolkit(adopt=False))
-            pinned = deploy.toolkit_digest()
-            # 他人改动共享副本后，A 读到的仍是钉住的版本。
+            before = deploy.toolkit_digest()
             (shared / 'develop.sh').write_text('他人改动\n')
-            self.assertEqual(pinned, deploy.toolkit_digest())
-            self.assertNotEqual(pinned, deploy.shared_toolkit_digest())
-            # 重复调用不会自动采纳。
-            self.assertFalse(deploy.pin_toolkit(adopt=False))
-            self.assertEqual(pinned, deploy.toolkit_digest())
-
-    def test_sync_adopts_current_shared_version_and_keeps_previous_digest(self):
-        with self.workspace() as shared:
-            deploy.pin_toolkit(adopt=False)
-            first = deploy.toolkit_digest()
-            (shared / 'develop.sh').write_text('他人改动\n')
-            quiet(deploy.sync_toolkit)
+            self.assertNotEqual(before, deploy.toolkit_digest())
             self.assertEqual(deploy.shared_toolkit_digest(), deploy.toolkit_digest())
-            record = json.loads((deploy.TOOLKIT_PIN / 'pin.json').read_text())
-            self.assertEqual(first, record['previousDigest'])
 
-    def test_pinning_never_writes_to_the_shared_toolkit(self):
+    def test_sync_is_a_read_only_compatibility_command(self):
         with self.workspace() as shared:
             before = {name: (shared / name).read_bytes() for name in deploy.TOOLKIT_INPUTS}
-            deploy.pin_toolkit(adopt=False)
             quiet(deploy.sync_toolkit)
+            self.assertEqual(deploy.shared_toolkit_digest(), deploy.toolkit_digest())
             for name, content in before.items():
                 self.assertEqual(content, (shared / name).read_bytes())
 
-    def test_missing_pin_falls_back_to_shared_source(self):
+    def test_toolkit_source_is_always_the_shared_worktree(self):
         with self.workspace() as shared:
             self.assertEqual(shared, deploy.toolkit_source())
-            deploy.pin_toolkit(adopt=False)
-            self.assertEqual(deploy.TOOLKIT_PIN, deploy.toolkit_source())
+            self.assertFalse((deploy.TOOLKIT_PIN / 'pin.json').exists())
+
+    def test_runner_digest_ignores_generated_bytecode(self):
+        with self.workspace() as shared:
+            runner = shared / deploy.TOOLKIT_DIR_INPUTS[0]
+            runner.mkdir(parents=True)
+            (runner / 'start.py').write_text('print("ok")\n')
+            before = deploy.toolkit_digest()
+            generated = runner / '__pycache__'; generated.mkdir()
+            (generated / 'start.cpython-310.pyc').write_bytes(b'generated')
+            self.assertEqual(before, deploy.toolkit_digest())
 
 if __name__ == '__main__':
     os.umask(0o077)

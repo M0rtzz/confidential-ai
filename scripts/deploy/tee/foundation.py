@@ -1,4 +1,4 @@
-"""P3 密钥底座、证书、Kuscia 模板与验证动作；所有资源限制在 A 工作树。"""
+"""P3 密钥底座、证书、Kuscia 模板与验证动作；资源限制在主工作区运行目录。"""
 import base64
 import datetime as dt
 import hashlib
@@ -12,12 +12,12 @@ import tempfile
 import time
 import urllib.request
 
-from platform_deploy import (ROOT, CACHE, RUNTIME, INSTANCES, SOURCES, LABEL, run, atomic, utc,
+from platform_deploy import (ROOT, CACHE, RUNTIME, INSTANCES, SOURCES, LABEL, CONTRACT_HOST, run, atomic, utc,
                 manifest, save_manifest, checked_image, image_info, managed, kube)
 
-CENTER = RUNTIME / 'tee-a-center/tee'
+CENTER = RUNTIME / 'center/tee'
 PKI = CENTER / 'pki'
-DOMAIN = 'dev-tee-a-center'
+DOMAIN = 'dev-center'
 GET_RA = '/secretflowapis.v2.sdc.capsule_manager.CapsuleManager/GetRaCert'
 
 
@@ -37,8 +37,8 @@ def verify_pair(directory, prefix, ca=None, expired=False):
 
 
 def make_ca(directory, cn):
-    if directory.is_symlink() or not directory.resolve().is_relative_to(ROOT):
-        raise RuntimeError('证书目录越出 A 工作树')
+    if directory.is_symlink() or not directory.resolve().is_relative_to(RUNTIME.resolve()):
+        raise RuntimeError('证书目录越出主运行目录')
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     if (directory / 'ca.key').exists() and (directory / 'ca.crt').exists():
         for name in ['openssl.cnf', 'index.txt', 'serial', 'crlnumber', 'ca.crl', 'newcerts']:
@@ -46,8 +46,8 @@ def make_ca(directory, cn):
                 raise RuntimeError('已有 CA 状态不完整，拒绝重建')
         verify_pair(directory, 'ca')
         return
-    if directory.is_symlink() or not directory.resolve().is_relative_to(ROOT):
-        raise RuntimeError('证书目录越出 A 工作树')
+    if directory.is_symlink() or not directory.resolve().is_relative_to(RUNTIME.resolve()):
+        raise RuntimeError('证书目录越出主运行目录')
     if any(directory.iterdir()):
         raise RuntimeError(f'CA 目录不完整，拒绝覆盖：{directory}')
     openssl('req', '-x509', '-newkey', 'rsa:3072', '-nodes', '-sha256', '-days', '3650',
@@ -86,24 +86,24 @@ def subject_alt_names(cn, server):
         return ''
     if cn == 'capsule.tee-a.test':
         return (f',DNS:capsule-manager.{DOMAIN}.svc,'
-                f'DNS:capsule-manager.{DOMAIN}.svc.cluster.local,IP:222.20.99.38')
+                f'DNS:capsule-manager.{DOMAIN}.svc.cluster.local,IP:{CONTRACT_HOST}')
     if cn == CONTRACT_SERVER_CN:
         # 客户端实例通过宿主机地址访问中心端契约入口，证书必须覆盖该地址。
-        return ',IP:222.20.99.38,IP:127.0.0.1'
+        return f',IP:{CONTRACT_HOST},IP:127.0.0.1'
     return ''
 
 
 def issue(ca, directory, cn, server=False, expired=False):
-    if directory.is_symlink() or not directory.resolve().is_relative_to(ROOT):
-        raise RuntimeError('证书目录越出 A 工作树')
+    if directory.is_symlink() or not directory.resolve().is_relative_to(RUNTIME.resolve()):
+        raise RuntimeError('证书目录越出主运行目录')
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     if (directory / 'client.key').exists() and (directory / 'client.crt').exists():
         if not (directory / 'ca.crt').exists():
             raise RuntimeError('已有证书信任链缺失，拒绝重新签发')
         verify_pair(directory, 'client', ca, expired)
         return
-    if directory.is_symlink() or not directory.resolve().is_relative_to(ROOT):
-        raise RuntimeError('证书目录越出 A 工作树')
+    if directory.is_symlink() or not directory.resolve().is_relative_to(RUNTIME.resolve()):
+        raise RuntimeError('证书目录越出主运行目录')
     if any(directory.iterdir()):
         raise RuntimeError(f'证书目录不完整，拒绝重建身份：{directory}')
     openssl('req', '-new', '-newkey', 'rsa:3072', '-nodes', '-sha256', '-subj', '/CN=' + cn,
@@ -123,7 +123,7 @@ def issue(ca, directory, cn, server=False, expired=False):
         if f.is_file(): f.chmod(0o600)
 
 
-CONTRACT_SERVER_CN = 'tee-a-center-contract'
+CONTRACT_SERVER_CN = 'center-contract'
 
 
 def certificates():
@@ -139,11 +139,11 @@ def certificates():
     issue(PKI / 'upstream-ca', CENTER / 'gateway-upstream-cert', 'tee-a-gateway-upstream')
     issue(PKI / 'external-ca', CENTER / 'workload-cert', 'probe-tee-a-workload')
     # 适配服务访问 CM 的传输身份，同时作为中心密钥服务在 CM 中的签名身份。
-    issue(PKI / 'external-ca', CENTER / 'adapter-identity', 'adapter-tee-a-center')
+    issue(PKI / 'external-ca', CENTER / 'adapter-identity', 'adapter-center')
     # 中心签名任务的身份；P6 用它签发 tee_task_jws，本阶段只登记受信证书。
     issue(PKI / 'external-ca', CENTER / 'task-signer', 'tee-a-task-signer')
     issue(PKI / 'adapter-ca', CENTER / 'adapter-server',
-          'data-sandbox-dev-tee-a-center-key-adapter', server=True)
+          'data-sandbox-dev-center-key-adapter', server=True)
     for name in INSTANCES:
         issue(PKI / 'adapter-ca', RUNTIME / name / 'tee/adapter-client', 'platform-' + name)
     # 平台之间的契约调用使用第三个信任域：客户端实例凭它向中心端申请密钥，
@@ -261,7 +261,7 @@ def publish_identities(identities, owners=None):
     已发布的机构条目在重新发布时保留，避免不带 owners 的执行把它们抹掉。
     """
     published = {'taskSigningCertificates': {
-        'tee-a-center-1': der_base64(CENTER / 'task-signer/client.crt')},
+        'center-1': der_base64(CENTER / 'task-signer/client.crt')},
         'runtimeImageDigests': runtime_image_digests(),
         'contractClientCertificates': contract_client_certificates(owners)}
     published.update(published_owner_entries())
@@ -382,7 +382,7 @@ def runtime_image(key):
 
 def pod_exec(pod, container, *command):
     """Kuscia 未提供标准 kubelet 日志代理时，按精确 Pod 归属执行 CRI 同步命令。"""
-    ctr = 'data-sandbox-dev-tee-a-center-kuscia'
+    ctr = 'data-sandbox-dev-center-kuscia'
     managed(ctr) or (_ for _ in ()).throw(RuntimeError('中心 Kuscia 不存在'))
     values = json.loads(run('docker', 'exec', ctr, '/home/kuscia/bin/crictl', 'ps', '-o', 'json', capture=True))['containers']
     matched = [item for item in values if item.get('metadata', {}).get('name') == container
@@ -404,7 +404,7 @@ def host_volume(name, relative, container_path, read_only=True, directory=True):
 def render():
     for key in ['capsule', 'mysql', 'gateway', 'probe', 'teeapps']:
         checked_image(key)
-    nodes = json.loads(kube('tee-a-center', 'get', 'nodes', '-l', 'kuscia.secretflow/namespace=' + DOMAIN, '-o', 'json'))['items']
+    nodes = json.loads(kube('center', 'get', 'nodes', '-l', 'kuscia.secretflow/namespace=' + DOMAIN, '-o', 'json'))['items']
     if len(nodes) != 1 or not any(c['type'] == 'Ready' and c['status'] == 'True' for c in nodes[0].get('status', {}).get('conditions', [])):
         raise RuntimeError('中心 domain 必须对应唯一 READY 节点')
     node_name = nodes[0]['metadata']['name']
@@ -532,54 +532,54 @@ def base_up(repair_startup=False):
             blocked.update(deploymentStopped=False, resolution='PATCHED_CANDIDATE_PENDING_RUNTIME_ACCEPTANCE',
                 candidateImageId=manifest()['images']['capsule']['id'], sourcePatch=patch, checkedAt=utc())
             atomic(blocker, blocked)
-    for key in ['capsule', 'mysql', 'gateway']: import_image('tee-a-center', key)
+    for key in ['capsule', 'mysql', 'gateway']: import_image('center', key)
     render()
     file = CENTER / 'resources.json'
     digest = hashlib.sha256(file.read_bytes()).hexdigest()
     marker = CENTER / 'applied.sha256'
     if marker.exists():
         if marker.read_text().strip() != digest:
-            existing = json.loads(kube('tee-a-center', 'get', 'deployment', 'tee-a-capsule', '-n', DOMAIN, '-o', 'json'))
+            existing = json.loads(kube('center', 'get', 'deployment', 'tee-a-capsule', '-n', DOMAIN, '-o', 'json'))
             if any(existing['metadata'].get('labels', {}).get(k) != v for k, v in kube_labels().items()):
                 raise RuntimeError('底座归属不符，拒绝操作')
             if existing.get('status', {}).get('readyReplicas', 0) > 0 and not repair_startup:
                 raise RuntimeError('不替换健康或归属不符的底座；需单独核对配置变化')
             print('应用已核对的 A 底座启动修复；保留私钥与数据库，不改变原平台或旧实例。')
-            kube('tee-a-center', 'apply', '-f', '-', value=json.loads(file.read_text()))
+            kube('center', 'apply', '-f', '-', value=json.loads(file.read_text()))
             atomic(marker, digest + '\n')
-            print(kube('tee-a-center', 'rollout', 'status', 'deployment/tee-a-capsule', '-n', DOMAIN, '--timeout=180s'))
+            print(kube('center', 'rollout', 'status', 'deployment/tee-a-capsule', '-n', DOMAIN, '--timeout=180s'))
             record_start()
             return
         else:
-            print(kube('tee-a-center', 'rollout', 'status', 'deployment/tee-a-capsule', '-n', DOMAIN, '--timeout=30s'))
+            print(kube('center', 'rollout', 'status', 'deployment/tee-a-capsule', '-n', DOMAIN, '--timeout=30s'))
             print('相同底座配置已应用且就绪，不重启。')
             record_start()
             return
-    existing = json.loads(kube('tee-a-center', 'get', 'deployment', '-n', DOMAIN, '-o', 'json'))
+    existing = json.loads(kube('center', 'get', 'deployment', '-n', DOMAIN, '-o', 'json'))
     if any(x['metadata']['name'] == 'tee-a-capsule' for x in existing['items']):
         raise RuntimeError('同名底座已存在但没有本次清单，拒绝接管')
-    kube('tee-a-center', 'apply', '-f', '-', value=json.loads(file.read_text()))
+    kube('center', 'apply', '-f', '-', value=json.loads(file.read_text()))
     atomic(marker, digest + '\n')
-    print(kube('tee-a-center', 'rollout', 'status', 'deployment/tee-a-capsule', '-n', DOMAIN, '--timeout=180s'))
+    print(kube('center', 'rollout', 'status', 'deployment/tee-a-capsule', '-n', DOMAIN, '--timeout=180s'))
     record_start()
 
 
 def adapter_up():
     """中心密钥适配服务；复用已验证的探测镜像与 SDK，只挂载脚本与证书。"""
     ref = checked_image('probe')
-    ctr = 'data-sandbox-dev-tee-a-center-key-adapter'
+    ctr = 'data-sandbox-dev-center-key-adapter'
     current = managed(ctr)
     if current:
         if current['Image'] == image_info(ref)['Id'] and current['State']['Running']: return
         raise RuntimeError('适配服务已存在且状态不同，需单独授权替换')
-    network = 'data-sandbox-dev-tee-a-center'
+    network = 'data-sandbox-dev-center'
     managed(network, 'network') or (_ for _ in ()).throw(RuntimeError('中心网络不存在'))
     script = ROOT / 'scripts/deploy/tee/key_adapter.py'
     command = ['docker', 'run', '-d', '--pull=never', '--name', ctr, '--network', network,
                '--user', f'{os.getuid()}:{os.getgid()}',
                '--restart', 'unless-stopped', '--read-only', '--cap-drop=ALL', '--security-opt', 'no-new-privileges',
                '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
-               '--add-host', 'capsule.tee-a.test:222.20.99.38',
+               '--add-host', f'capsule.tee-a.test:{CONTRACT_HOST}',
                '-e', 'TEE_CAPSULE_ENDPOINT=capsule.tee-a.test:19685',
                '-v', str(CENTER / 'adapter-identity') + ':/certs:ro',
                '-v', str(CENTER / 'adapter-server') + ':/server:ro',
@@ -601,7 +601,7 @@ def probe_up(name):
                '--user', f'{os.getuid()}:{os.getgid()}',
                '--restart', 'unless-stopped', '--read-only', '--cap-drop=ALL', '--security-opt', 'no-new-privileges',
                '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
-               '-e', 'TEE_CAPSULE_ENDPOINT=222.20.99.38:19685',
+               '-e', f'TEE_CAPSULE_ENDPOINT={CONTRACT_HOST}:19685',
                '-v', str(RUNTIME / name / 'tee/probe-cert') + ':/certs:ro']
     for k, v in labels().items(): command += ['--label', f'{k}={v}']
     run(*command, ref, 'python', '/opt/p3/probe.py', '--serve')
@@ -624,7 +624,7 @@ def appimage(name, key, command):
                  'deployTemplates': [{'name': 'main', 'replicas': 1, 'spec': {'restartPolicy': 'Never',
                     'containers': [{'name': 'main', 'command': command, 'workingDir': '/tmp', 'imagePullPolicy': 'Never',
                        'envFrom': [{'secretRef': {'name': 'tee-a-probe-cert'}}],
-                       'env': [{'name': 'TEE_CAPSULE_ENDPOINT', 'value': '222.20.99.38:19685'}],
+                       'env': [{'name': 'TEE_CAPSULE_ENDPOINT', 'value': f'{CONTRACT_HOST}:19685'}],
                        'configVolumeMounts': [{'mountPath': '/etc/kuscia/task-config.conf', 'subPath': 'task-config.conf'}],
                        'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '1', 'memory': '512Mi'}},
                        'securityContext': {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}}}]}}]}}
@@ -633,7 +633,7 @@ def appimage(name, key, command):
 def register():
     for instance in INSTANCES:
         for key in ['probe', 'teeapps']: import_image(instance, key)
-    kube('tee-a-center', 'apply', '-f', '-', value=secret('tee-a-probe-cert', CENTER / 'workload-cert'))
+    kube('center', 'apply', '-f', '-', value=secret('tee-a-probe-cert', CENTER / 'workload-cert'))
     # 私钥只通过 Secret 引用传递，不写入 AppImage、TaskSpec 或日志。
     probe = appimage('tee-a-foundation-probe', 'probe', ['python', '/opt/p3/probe.py', '--task-config', '/etc/kuscia/task-config.conf'])
     teeapps = appimage('tee-a-official-teeapps-check', 'teeapps', ['/bin/sh', '-ec',
@@ -660,15 +660,15 @@ def register():
     # 官方入口仅登记为底座组件，当前挂载只读探测身份；业务密钥请求会被网关拒绝。
     # 它不接受 tee_task_jws，也不替代 B 后续提供的契约运行时。
     for resource in [probe, teeapps, official]:
-        kube('tee-a-center', 'apply', '-f', '-', value=resource)
+        kube('center', 'apply', '-f', '-', value=resource)
 
 
 def record_smoke(app, name):
-    job = json.loads(kube('tee-a-center', 'get', 'kusciajob', name, '-n', 'cross-domain', '-o', 'json'))
-    task = json.loads(kube('tee-a-center', 'get', 'kusciatask', name + '-task', '-n', 'cross-domain', '-o', 'json'))
+    job = json.loads(kube('center', 'get', 'kusciajob', name, '-n', 'cross-domain', '-o', 'json'))
+    task = json.loads(kube('center', 'get', 'kusciatask', name + '-task', '-n', 'cross-domain', '-o', 'json'))
     if job.get('status', {}).get('phase') != 'Succeeded' or task.get('status', {}).get('phase') != 'Succeeded' or task['metadata']['labels'].get('kuscia.secretflow/job-uid') != job['metadata']['uid']:
         raise RuntimeError('Job 与实际 Task 的成功状态不一致')
-    ctr = 'data-sandbox-dev-tee-a-center-kuscia'
+    ctr = 'data-sandbox-dev-center-kuscia'
     def cri(*args): return run('docker', 'exec', ctr, '/home/kuscia/bin/crictl', *args, capture=True)
     containers = [c for c in json.loads(cri('ps', '-a', '-o', 'json'))['containers']
         if c.get('metadata', {}).get('name') == 'main' and c.get('labels', {}).get('io.kubernetes.pod.name') == name + '-task-0'
@@ -705,10 +705,10 @@ def smoke():
             'spec': {'initiator': DOMAIN, 'maxParallelism': 1,
                 'tasks': [{'taskID': name + '-task', 'alias': 'p3-probe', 'appImage': app, 'taskInputConfig': '{}', 'scheduleConfig': {'lifecycleSeconds': 120},
                            'parties': [{'domainID': DOMAIN}] }]}}
-        kube('tee-a-center', 'apply', '-f', '-', value=task)
+        kube('center', 'apply', '-f', '-', value=task)
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
-            result = json.loads(kube('tee-a-center', 'get', 'kusciajob', name, '-n', 'cross-domain', '-o', 'json'))
+            result = json.loads(kube('center', 'get', 'kusciajob', name, '-n', 'cross-domain', '-o', 'json'))
             state = result.get('status', {}).get('phase')
             if state == 'Succeeded': break
             if state in ['Failed', 'Cancelled']: raise RuntimeError(f'{app} 调度探测失败：{name}')
@@ -737,7 +737,7 @@ def pair():
         # 中心端双端可用，按契约登录必须显式选择端；单端实例可省略。
         credentials = {'name': env['SECRETPAD_USER_NAME'],
                        'passwordHash': hashlib.sha256(env['SECRETPAD_PASSWORD'].encode()).hexdigest()}
-        if name == 'tee-a-center':
+        if name == 'center':
             credentials['endRole'] = 'CENTER'
         login = api(name, 'login', credentials)
         sessions[name] = login['token']
@@ -745,8 +745,8 @@ def pair():
     for name in INSTANCES:
         result = api(name, 'v1alpha1/node/get', {'nodeId': 'dev-' + name}, sessions[name])
         invitations[name] = json.loads(base64.b64decode(result['nodeAuthenticationCode']))
-    for client in ['tee-a-client-1', 'tee-a-client-2']:
-        for src, dst in [(client, 'tee-a-center'), ('tee-a-center', client)]:
+    for client in ['client-a', 'client-b']:
+        for src, dst in [(client, 'center'), ('center', client)]:
             routes = json.loads(kube(src, 'get', 'clusterdomainroutes', '-o', 'json'))['items']
             if any(x.get('spec', {}).get('source') == 'dev-' + src and x.get('spec', {}).get('destination') == 'dev-' + dst for x in routes):
                 continue

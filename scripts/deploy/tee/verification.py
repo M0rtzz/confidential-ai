@@ -10,14 +10,14 @@ import os
 from pathlib import Path
 from datetime import datetime
 
-from platform_deploy import ROOT, ORIGINAL, RUNTIME, INSTANCES, run, atomic, kube, checked_image, managed, manifest, utc
+from platform_deploy import ROOT, ORIGINAL, RUNTIME, INSTANCES, CONTRACT_HOST, run, atomic, kube, checked_image, managed, manifest, utc
 from foundation import CENTER, PKI, DOMAIN, openssl, issue, make_ca, labels, pod_exec
 
 
 def verify_tls():
     """全部结论来自实际 gRPC 请求，TLS 握手退出码不作为准入证据。"""
-    target = '222.20.99.38:19685'
-    kuscia = 'data-sandbox-dev-tee-a-center-kuscia'
+    target = f'{CONTRACT_HOST}:19685'
+    kuscia = 'data-sandbox-dev-center-kuscia'
     managed(kuscia) or (_ for _ in ()).throw(RuntimeError('中心实例尚未启动'))
     image = checked_image('probe')
     cases = CENTER / 'acceptance-certs'
@@ -32,11 +32,11 @@ def verify_tls():
         openssl('ca', '-batch', '-config', PKI / 'external-ca/openssl.cnf', '-revoke', cases / 'revoked/client.crt')
     openssl('ca', '-batch', '-config', PKI / 'external-ca/openssl.cnf', '-gencrl', '-out', PKI / 'external-ca/ca.crl')
     shutil.copy2(PKI / 'external-ca/ca.crl', CENTER / 'gateway-trust/ca.crl')
-    pods = json.loads(kube('tee-a-center', 'get', 'pods', '-n', DOMAIN, '-l', 'app=tee-a-capsule', '-o', 'json'))['items']
+    pods = json.loads(kube('center', 'get', 'pods', '-n', DOMAIN, '-l', 'app=tee-a-capsule', '-o', 'json'))['items']
     if len(pods) != 1: raise RuntimeError('底座 Pod 数量不符')
     pod, address = pods[0]['metadata']['name'], pods[0]['status']['podIP']
     pod_exec(pod, 'gateway', 'nginx', '-s', 'reload')
-    valid = RUNTIME / 'tee-a-center/tee/probe-cert'
+    valid = RUNTIME / 'center/tee/probe-cert'
     bypass = cases / 'bypass'
     bypass.mkdir(exist_ok=True, mode=0o700)
     for file in ['client.key', 'client.crt']: shutil.copy2(valid / file, bypass / file)
@@ -110,7 +110,7 @@ def verify_native_surface():
     cert = CENTER / 'persistence-cert'
     issue(PKI / 'external-ca', cert, 'p3-persistence-client')
     def capsule_state():
-        pods = json.loads(kube('tee-a-center', 'get', 'pods', '-n', DOMAIN, '-l', 'app=tee-a-capsule', '-o', 'json'))['items']
+        pods = json.loads(kube('center', 'get', 'pods', '-n', DOMAIN, '-l', 'app=tee-a-capsule', '-o', 'json'))['items']
         if len(pods) != 1: raise RuntimeError('CM Pod 数量异常')
         state = next(c for c in pods[0]['status']['containerStatuses'] if c['name'] == 'capsule')
         return pods[0]['metadata']['uid'], state['restartCount']
@@ -144,9 +144,9 @@ with grpc.secure_channel(os.environ['TEE_CAPSULE_ENDPOINT'],creds,options=[('grp
   result[method.name]={'invalidRequestRejected':True,'applicationCode':response.status.code,'positiveControl':True}
 print(json.dumps(result))
 '''
-    command = ['docker', 'run', '--rm', '--pull=never', '--network', 'data-sandbox-dev-tee-a-center',
+    command = ['docker', 'run', '--rm', '--pull=never', '--network', 'data-sandbox-dev-center',
         '--user', f'{os.getuid()}:{os.getgid()}', '--read-only', '--cap-drop=ALL', '--security-opt', 'no-new-privileges',
-        '-e', 'TEE_CAPSULE_ENDPOINT=222.20.99.38:19685', '-v', str(cert) + ':/certs:ro']
+        '-e', f'TEE_CAPSULE_ENDPOINT={CONTRACT_HOST}:19685', '-v', str(cert) + ':/certs:ro']
     for k, v in labels().items(): command += ['--label', k + '=' + v]
     result = subprocess.run(command + [checked_image('probe'), 'python', '-c', code], text=True, capture_output=True, timeout=90)
     if result.returncode:
@@ -167,12 +167,12 @@ def verify_persistence():
     cert = CENTER / 'persistence-cert'
     issue(PKI / 'external-ca', cert, 'p3-persistence-client')
     image = checked_image('probe')
-    network = 'data-sandbox-dev-tee-a-center'
+    network = 'data-sandbox-dev-center'
     managed(network, 'network') or (_ for _ in ()).throw(RuntimeError('中心网络不存在'))
     def phase(name):
         command = ['docker', 'run', '--rm', '--pull=never', '--network', network,
                    '--user', f'{os.getuid()}:{os.getgid()}',
-                   '--add-host', 'capsule.tee-a.test:222.20.99.38', '--read-only', '--cap-drop=ALL',
+                   '--add-host', f'capsule.tee-a.test:{CONTRACT_HOST}', '--read-only', '--cap-drop=ALL',
                    '--security-opt', 'no-new-privileges', '-e', 'TEE_CAPSULE_ENDPOINT=capsule.tee-a.test:19685',
                    '-v', str(cert) + ':/certs:ro', '-v', str(case_root) + ':/case']
         for k, v in labels().items(): command += ['--label', k + '=' + v]
@@ -183,10 +183,10 @@ def verify_persistence():
         if value.get('verified') is not True: raise RuntimeError('合成持久化没有有效证据')
         return value
     before = phase('create')
-    old = json.loads(kube('tee-a-center', 'get', 'pods', '-n', DOMAIN, '-l', 'app=tee-a-capsule', '-o', 'json'))['items']
-    kube('tee-a-center', 'rollout', 'restart', 'deployment/tee-a-capsule', '-n', DOMAIN)
-    kube('tee-a-center', 'rollout', 'status', 'deployment/tee-a-capsule', '-n', DOMAIN, '--timeout=180s')
-    new = json.loads(kube('tee-a-center', 'get', 'pods', '-n', DOMAIN, '-l', 'app=tee-a-capsule', '-o', 'json'))['items']
+    old = json.loads(kube('center', 'get', 'pods', '-n', DOMAIN, '-l', 'app=tee-a-capsule', '-o', 'json'))['items']
+    kube('center', 'rollout', 'restart', 'deployment/tee-a-capsule', '-n', DOMAIN)
+    kube('center', 'rollout', 'status', 'deployment/tee-a-capsule', '-n', DOMAIN, '--timeout=180s')
+    new = json.loads(kube('center', 'get', 'pods', '-n', DOMAIN, '-l', 'app=tee-a-capsule', '-o', 'json'))['items']
     if not old or not new or old[0]['metadata']['uid'] == new[0]['metadata']['uid']:
         raise RuntimeError('未观察到实际 Pod 重建')
     deadline = monotonic() + 30
@@ -232,7 +232,7 @@ def verify_environment():
         # 中心端同时开放数据方与执行方，按契约必须显式选择端；单端实例可省略。
         credentials = {'name': env['SECRETPAD_USER_NAME'],
             'passwordHash': hashlib.sha256(env['SECRETPAD_PASSWORD'].encode()).hexdigest()}
-        if name == 'tee-a-center':
+        if name == 'center':
             credentials['endRole'] = 'CENTER'
         code, login = request(name, 'login', credentials)
         if code != 200 or login.get('status', {}).get('code') != 0:
@@ -245,7 +245,7 @@ def verify_environment():
         if value['keyServiceReachable'] is not True or value['checkedAt'] is None or value['hardwareDetected'] is not False or value['deviceChecks'] != {'sgx': False, 'tdx': False, 'csv': False} or value['blockers'] != ['NO_VERIFIED_HARDWARE_RUNTIME']:
             raise RuntimeError('环境正常态证据不符合当前仿真部署：' + name)
         results[name] = {'login': True, 'unauthenticatedRejected': True, 'environment': value}
-    snapshot = RUNTIME / 'tee-a-center/status/hardware.json'
+    snapshot = RUNTIME / 'center/status/hardware.json'
     saved = snapshot.read_text()
     failures = {}
     def assert_snapshot_fault(value, blocker, expected_time):
@@ -255,33 +255,33 @@ def verify_environment():
             raise RuntimeError('检测故障状态不精确，或错误影响密钥服务状态：' + blocker)
     try:
         snapshot.unlink()
-        missing = environment('tee-a-center')
+        missing = environment('center')
         assert_snapshot_fault(missing, 'HARDWARE_CHECK_UNAVAILABLE', None)
         failures['missing'] = True
         atomic(snapshot, 'malformed', 0o644)
-        assert_snapshot_fault(environment('tee-a-center'), 'HARDWARE_CHECK_UNAVAILABLE', None)
+        assert_snapshot_fault(environment('center'), 'HARDWARE_CHECK_UNAVAILABLE', None)
         failures['malformed'] = True
         stale = json.loads(saved); stale['checkedAt'] = '2000-01-01T00:00:00Z'
         atomic(snapshot, stale, 0o644)
-        assert_snapshot_fault(environment('tee-a-center'), 'HARDWARE_CHECK_STALE', stale['checkedAt'])
+        assert_snapshot_fault(environment('center'), 'HARDWARE_CHECK_STALE', stale['checkedAt'])
         failures['stale'] = True
         failed = json.loads(saved); failed['detectorOk'] = False
         atomic(snapshot, failed, 0o644)
-        assert_snapshot_fault(environment('tee-a-center'), 'HARDWARE_CHECK_FAILED', failed['checkedAt'])
+        assert_snapshot_fault(environment('center'), 'HARDWARE_CHECK_FAILED', failed['checkedAt'])
         failures['detectorFailed'] = True
     finally:
         atomic(snapshot, saved, 0o644)
     try:
-        kube('tee-a-center', 'scale', 'deployment/tee-a-capsule', '-n', DOMAIN, '--replicas=0')
-        kube('tee-a-center', 'wait', '--for=delete', 'pod', '-n', DOMAIN, '-l', 'app=tee-a-capsule', '--timeout=90s')
+        kube('center', 'scale', 'deployment/tee-a-capsule', '-n', DOMAIN, '--replicas=0')
+        kube('center', 'wait', '--for=delete', 'pod', '-n', DOMAIN, '-l', 'app=tee-a-capsule', '--timeout=90s')
         for name in INSTANCES:
             value = environment(name)
             if value['keyServiceReachable'] is not False or value['blockers'] != ['KEY_SERVICE_UNAVAILABLE', 'NO_VERIFIED_HARDWARE_RUNTIME'] or value['checkedAt'] is None or value['hardwareDetected'] is not False or value['deviceChecks'] != {'sgx': False, 'tdx': False, 'csv': False}:
                 raise RuntimeError('CM 不可用时环境接口未降级：' + name)
         failures['capsuleUnavailable'] = True
     finally:
-        kube('tee-a-center', 'scale', 'deployment/tee-a-capsule', '-n', DOMAIN, '--replicas=1')
-        kube('tee-a-center', 'rollout', 'status', 'deployment/tee-a-capsule', '-n', DOMAIN, '--timeout=180s')
+        kube('center', 'scale', 'deployment/tee-a-capsule', '-n', DOMAIN, '--replicas=1')
+        kube('center', 'rollout', 'status', 'deployment/tee-a-capsule', '-n', DOMAIN, '--timeout=180s')
     deadline = time.monotonic() + 45
     while not all(environment(name)['keyServiceReachable'] is True for name in INSTANCES):
         if time.monotonic() > deadline: raise RuntimeError('底座恢复后原生探测未恢复')
@@ -295,7 +295,7 @@ def verify_environment():
 
 
 def verify_routes():
-    expected = {(client, DOMAIN) for client in ['dev-tee-a-client-1', 'dev-tee-a-client-2']}
+    expected = {(client, DOMAIN) for client in ['dev-client-a', 'dev-client-b']}
     expected |= {(right, left) for left, right in expected.copy()}
     evidence = {}
     for name in INSTANCES:
@@ -304,7 +304,7 @@ def verify_routes():
             raise RuntimeError('Kuscia 节点未就绪：' + name)
         items = json.loads(kube(name, 'get', 'clusterdomainroutes', '-o', 'json'))['items']
         pairs = {(r['spec']['source'], r['spec']['destination']) for r in items}
-        required = expected if name == 'tee-a-center' else {pair for pair in expected if 'dev-' + name in pair}
+        required = expected if name == 'center' else {pair for pair in expected if 'dev-' + name in pair}
         if pairs != required or len(items) != len(required):
             raise RuntimeError('存在缺失、重复、客户端直连或非本次实例路由：' + name)
         for route in items:
@@ -368,8 +368,10 @@ def verify_isolation():
             value = managed(ctr)
             if not value or not value['State']['Running']: raise RuntimeError('新实例容器未运行：' + ctr)
             for mount in value['Mounts']:
-                if mount.get('RW') and mount['Type'] != 'tmpfs' and (mount['Type'] != 'bind' or not Path(mount['Source']).resolve().is_relative_to(ROOT)):
-                    raise RuntimeError('存在 A 工作树外的可写挂载：' + ctr)
+                source = Path(mount.get('Source', '')).resolve()
+                allowed = source.is_relative_to(ROOT.resolve()) or source.is_relative_to(RUNTIME.resolve())
+                if mount.get('RW') and mount['Type'] != 'tmpfs' and (mount['Type'] != 'bind' or not allowed):
+                    raise RuntimeError('存在主源码和运行目录之外的可写挂载：' + ctr)
                 if 'docker.sock' in mount.get('Source', ''): raise RuntimeError('新实例不允许挂载 Docker socket')
                 if suffix == 'secretpad' and '/tee/' in mount.get('Source', ''):
                     raise RuntimeError('普通平台不允许挂载底座私钥目录')
@@ -395,7 +397,7 @@ def verify_repeat():
     def state():
         containers = {name + '-' + suffix: managed('data-sandbox-dev-' + name + '-' + suffix)['State']['StartedAt']
             for name in INSTANCES for suffix in ['secretpad', 'kuscia', 'minio', 'tee-probe']}
-        pods = json.loads(kube('tee-a-center', 'get', 'pods', '-n', DOMAIN, '-l', 'app=tee-a-capsule', '-o', 'json'))['items']
+        pods = json.loads(kube('center', 'get', 'pods', '-n', DOMAIN, '-l', 'app=tee-a-capsule', '-o', 'json'))['items']
         containers['capsulePod'] = sorted(p['metadata']['uid'] for p in pods)
         directories = [PKI / ca for ca in ['external-ca', 'upstream-ca']]
         directories += [RUNTIME / name / 'tee' / kind for name in INSTANCES for kind in ['identity', 'probe-cert']]
@@ -427,14 +429,14 @@ def verify_release():
     cert = CENTER / 'release-cert'
     issue(PKI / 'external-ca', cert, 'p4-release-client')
     image = checked_image('probe')
-    network = 'data-sandbox-dev-tee-a-center'
+    network = 'data-sandbox-dev-center'
     managed(network, 'network') or (_ for _ in ()).throw(RuntimeError('中心网络不存在'))
     script = ROOT / 'scripts/deploy/tee/release_client.py'
 
     def phase(name):
         command = ['docker', 'run', '--rm', '--pull=never', '--network', network,
                    '--user', f'{os.getuid()}:{os.getgid()}',
-                   '--add-host', 'capsule.tee-a.test:222.20.99.38', '--read-only', '--cap-drop=ALL',
+                   '--add-host', f'capsule.tee-a.test:{CONTRACT_HOST}', '--read-only', '--cap-drop=ALL',
                    '--security-opt', 'no-new-privileges', '-e', 'TEE_CAPSULE_ENDPOINT=capsule.tee-a.test:19685',
                    '-v', str(cert) + ':/certs:ro', '-v', str(case_root) + ':/case',
                    '-v', str(script) + ':/opt/p4/release_client.py:ro']

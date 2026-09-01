@@ -9,6 +9,7 @@
 import base64
 import hashlib
 import json
+import os
 import secrets
 import subprocess
 import urllib.error
@@ -23,11 +24,18 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 CONTRACT = 'tee-contract/1.0'
-ROOT = Path('/data/collab/Projects/gpu-tee-dev-a')
-RUNTIME = ROOT / '.dev-runtime'
-CENTER = RUNTIME / 'tee-a-center'
-CLIENT = RUNTIME / 'tee-a-client-1'
-PORTS = {'tee-a-center': 19688, 'tee-a-client-1': 19788, 'tee-a-client-2': 19888}
+ROOT = Path(__file__).resolve().parents[3]
+WORKSPACE = Path(os.environ.get(
+    'DATA_SANDBOX_WORKSPACE_DIR',
+    str(Path(subprocess.run(
+        ['git', '-C', str(ROOT), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+        check=True, text=True, stdout=subprocess.PIPE).stdout.strip()).resolve().parent.parent)
+)).resolve()
+RUNTIME = Path(os.environ.get(
+    'DATA_SANDBOX_TEE_RUNTIME_ROOT', str(WORKSPACE / '.dev-runtime'))).resolve()
+CENTER = RUNTIME / 'center'
+CLIENT = RUNTIME / 'client-a'
+PORTS = {'client-a': 19488, 'client-b': 19588, 'center': 19688}
 PLATFORM_ZONE = ZoneInfo('Asia/Shanghai')
 
 SAMPLE_COLUMNS = ['age', 'income', 'city', 'id_card']
@@ -43,7 +51,7 @@ class Failure(Exception):
     pass
 
 
-def request(path, payload=None, token=None, instance='tee-a-center'):
+def request(path, payload=None, token=None, instance='center'):
     headers = {'Content-Type': 'application/json'}
     if token:
         headers['User-Token'] = token
@@ -56,7 +64,7 @@ def request(path, payload=None, token=None, instance='tee-a-center'):
         return error.code, json.load(error)
 
 
-def login(end_role=None, instance='tee-a-center'):
+def login(end_role=None, instance='center'):
     env = dict(line.split('=', 1) for line in
                (RUNTIME / instance / 'secretpad.env').read_text().splitlines() if '=' in line)
     payload = {'name': env['SECRETPAD_USER_NAME'],
@@ -69,14 +77,14 @@ def login(end_role=None, instance='tee-a-center'):
     return body['data']['token'], body['data']['ownerId']
 
 
-def expect_ok(name, path, payload, token, instance='tee-a-center'):
+def expect_ok(name, path, payload, token, instance='center'):
     code, body = request(path, payload, token, instance)
     if code != 200 or body.get('status', {}).get('code') != 0:
         raise Failure(f'{name} 应成功但被拒绝：{body.get("data", {}).get("errorCode")}')
     return body['data']
 
 
-def expect_denied(name, path, payload, token, error_code, instance='tee-a-center'):
+def expect_denied(name, path, payload, token, error_code, instance='center'):
     code, body = request(path, payload, token, instance)
     actual = body.get('data', {}).get('errorCode')
     if body.get('status', {}).get('code') == 0:
@@ -208,7 +216,7 @@ def runtime_digest():
     return digests[0]
 
 
-def sign_task(payload, kid='tee-a-center-1', alg='RS256'):
+def sign_task(payload, kid='center-1', alg='RS256'):
     header = b64url(json.dumps({'alg': alg, 'typ': 'JWS', 'kid': kid}).encode())
     body = b64url(json.dumps(payload).encode())
     signature = private_key(CENTER / 'tee/task-signer/client.key').sign(
@@ -220,7 +228,7 @@ def task_payload(asset, key, policy, columns, operator, nonce=None, sandbox_id='
                  lifetime=240, issued_offset=0, program=None, image_digest=None, plaintext_bytes=None):
     now = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=issued_offset)
     return {'contractVersion': CONTRACT, 'taskId': 'task-' + uuid4().hex[:12],
-            'requestId': uuid4().hex, 'issuer': 'tee-a-center', 'audience': 'tee-a-runtime',
+            'requestId': uuid4().hex, 'issuer': 'center', 'audience': 'tee-a-runtime',
             'sandboxId': sandbox_id, 'operatorId': operator, 'columns': columns,
             'inputs': [{'assetId': asset['assetId'], 'assetVersion': asset['assetVersion'],
                         'keyId': key['keyId'], 'keyVersion': key['keyVersion'],
@@ -339,7 +347,7 @@ def governed_encryption(instance, token, owner, checks, prefix):
     if metadata.get('sha256') == metadata.get('plaintextSha256'):
         raise Failure(f'{instance} 落盘对象与明文同摘要，未真正加密')
 
-    ledger_owner = sqlite_query('tee-a-center', 'select owner_id from tee_key where key_id='
+    ledger_owner = sqlite_query('center', 'select owner_id from tee_key where key_id='
                                 + quote(metadata['keyId']) + ';')
     if ledger_owner != owner:
         raise Failure(f'{instance} 治理产出的密钥未记入中心端台账')
@@ -397,7 +405,7 @@ def client_instance_chain(instance, checks, prefix):
     result['keyId'] = issued['keyId']
 
     # 台账唯一在中心端：中心库里必须有这条记录，且归属为客户端机构。
-    ledger_owner = sqlite_query('tee-a-center',
+    ledger_owner = sqlite_query('center',
                                 'select owner_id from tee_key where key_id='
                                 + quote(issued['keyId']) + ';')
     if ledger_owner != owner:
@@ -420,7 +428,7 @@ def client_instance_chain(instance, checks, prefix):
         token, 'ASSET_OWNER_MISMATCH', instance)
 
     # 规则由中心端按审批核验：审批写在中心库，客户端只发起登记。
-    fixture = install_approval('tee-a-center', owner, asset_id, SAMPLE_COLUMNS, [OPERATOR])
+    fixture = install_approval('center', owner, asset_id, SAMPLE_COLUMNS, [OPERATOR])
     try:
         policy = expect_ok('客户端登记授权规则', '/v1alpha1/tee/policies/register', {
             'contractVersion': CONTRACT, 'requestId': uuid4().hex,
@@ -481,7 +489,7 @@ def run():
     institution_cert = pem_of(CENTER / 'tee/identity/client.crt')
     foreign_cert = pem_of(CLIENT / 'tee/identity/client.crt')
     workload_cert = pem_of(CENTER / 'tee/workload-cert/client.crt')
-    fixture = install_approval('tee-a-center', owner, asset_id, SAMPLE_COLUMNS, [OPERATOR])
+    fixture = install_approval('center', owner, asset_id, SAMPLE_COLUMNS, [OPERATOR])
     sandbox_id = fixture['sandboxId']
 
     try:
@@ -689,7 +697,7 @@ def run():
         # 25 签名不可信：未知 kid 与非 RS256
         checks['deniedUnknownKid'] = release_denied(
             '未知 kid', task_for(), 'TASK_SIGNATURE_INVALID',
-            signer=lambda payload: sign_task(payload, kid='tee-a-center-unknown'))
+            signer=lambda payload: sign_task(payload, kid='center-unknown'))
         checks['deniedNonRs256'] = release_denied(
             '非 RS256', task_for(), 'TASK_SIGNATURE_INVALID',
             signer=lambda payload: sign_task(payload, alg='HS256'))
@@ -775,11 +783,11 @@ def run():
         remove_approval(fixture)
 
     # 36 中心实例的抽样脱敏产出加密落盘
-    governed_encryption('tee-a-center', client_token, owner, checks, 'centerGoverned')
+    governed_encryption('center', client_token, owner, checks, 'centerGoverned')
 
     # 37 两个客户端实例：向中心端申请密钥、登记规则、加密落盘，端角色与环境如实标注
-    client_instance_chain('tee-a-client-1', checks, 'clientInstance1')
-    client_instance_chain('tee-a-client-2', checks, 'clientInstance2')
+    client_instance_chain('client-a', checks, 'clientInstance1')
+    client_instance_chain('client-b', checks, 'clientInstance2')
 
     return {'assetId': asset_id, 'keyId': issued['keyId'], 'policyId': policy['policyId'],
             'objectId': asset['objectId'], 'sampleBytes': len(SAMPLE_CSV),

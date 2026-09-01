@@ -20,16 +20,34 @@ import tempfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[3]
-ORIGINAL = Path('/data/collab/Projects/gpu')
-FRONTEND = ORIGINAL / 'confidential-ai-frontend'
-TOOLKIT = ORIGINAL / 'data-sandbox-package'
+
+
+def discover_workspace(root):
+    """从 Git 公共目录定位主工作区，允许环境变量显式覆盖。"""
+    configured = os.environ.get('DATA_SANDBOX_WORKSPACE_DIR', '').strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    common = subprocess.run(
+        ['git', '-C', str(root), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+        check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+    return Path(common).resolve().parent.parent
+
+
+WORKSPACE = discover_workspace(ROOT)
+ORIGINAL = WORKSPACE
+FRONTEND = Path(os.environ.get(
+    'DATA_SANDBOX_FRONTEND_DIR', str(WORKSPACE / 'confidential-ai-frontend'))).resolve()
+TOOLKIT = Path(os.environ.get(
+    'DATA_SANDBOX_TOOLKIT_DIR', str(WORKSPACE / 'data-sandbox-package'))).resolve()
 CACHE = ROOT / '.cache/tee-p3'
-RUNTIME = ROOT / '.dev-runtime'
+RUNTIME = Path(os.environ.get(
+    'DATA_SANDBOX_TEE_RUNTIME_ROOT', str(WORKSPACE / '.dev-runtime'))).resolve()
 LABEL = 'io.hustnlp.data-sandbox.'
-INSTANCES = {'tee-a-center': 196, 'tee-a-client-1': 197, 'tee-a-client-2': 198}
+INSTANCES = {'client-a': 194, 'client-b': 195, 'center': 196}
 # 中心端平台间契约入口的对外地址；客户端实例按此申请密钥与登记规则。
 CONTRACT_PORT = 19686
-CONTRACT_CENTER_URL = f'https://222.20.99.38:{CONTRACT_PORT}'
+CONTRACT_HOST = os.environ.get('DATA_SANDBOX_TEE_ADVERTISE_HOST', '222.20.99.38')
+CONTRACT_CENTER_URL = f'https://{CONTRACT_HOST}:{CONTRACT_PORT}'
 SOURCES = {
     'trustflow': ('trustflow', '13b13e0729f42accd1c0f15bb42c5b57e09fdabe'),
     'teeapps': ('trustflow-teeapps', 'd68428fc4d9ee9ffa6d229a90f052fcfe5560587'),
@@ -50,8 +68,9 @@ def git(path, *args):
 
 def atomic(path, value, mode=0o600):
     path = Path(path)
-    if path.is_symlink() or not path.resolve().is_relative_to(ROOT.resolve()):
-        raise RuntimeError('拒绝向隔离工作树之外写文件')
+    allowed = (ROOT.resolve(), CACHE.resolve(), RUNTIME.resolve())
+    if path.is_symlink() or not any(path.resolve().is_relative_to(base) for base in allowed):
+        raise RuntimeError('拒绝向主源码、缓存或运行目录之外写文件')
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as f:
         f.write(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2) + '\n')
@@ -65,16 +84,24 @@ def utc():
 
 
 def guard():
-    if ROOT != Path('/data/collab/Projects/gpu-tee-dev-a') or ROOT.is_symlink():
-        raise RuntimeError('仅允许既有 A 工作树')
+    if ROOT.is_symlink() or not (ROOT / '.git').exists():
+        raise RuntimeError('后端根目录必须是非符号链接 Git 工作树')
     if run('id', '-un', capture=True).strip() != 'collab' or os.geteuid() == 0:
         raise RuntimeError('必须使用 collab，禁止提权')
-    for path, branch in [(ROOT, 'codex/tee-dev-a'), (FRONTEND, 'master')]:
-        if git(path, 'branch', '--show-current') != branch:
-            raise RuntimeError(f'分支不符合计划：{path}')
-    for path in [CACHE, RUNTIME, CACHE / 'toolkit', CACHE / 'sources', CACHE / 'build', CACHE / 'component-build']:
-        if not path.resolve().is_relative_to(ROOT) or path.is_symlink():
-            raise RuntimeError(f'隔离目录不可指向工作树外：{path}')
+    for path in [ROOT, FRONTEND, TOOLKIT]:
+        if not path.is_dir() or path.is_symlink():
+            raise RuntimeError(f'源码目录不存在或为符号链接：{path}')
+    expected_backend = os.environ.get('DATA_SANDBOX_BACKEND_BRANCH', '').strip()
+    if expected_backend and git(ROOT, 'branch', '--show-current') != expected_backend:
+        raise RuntimeError('后端分支不符合显式配置：' + expected_backend)
+    expected_frontend = os.environ.get('DATA_SANDBOX_FRONTEND_BRANCH', 'master').strip()
+    if expected_frontend and git(FRONTEND, 'branch', '--show-current') != expected_frontend:
+        raise RuntimeError('前端分支不符合显式配置：' + expected_frontend)
+    for path in [CACHE, CACHE / 'toolkit', CACHE / 'sources', CACHE / 'build', CACHE / 'component-build']:
+        if not path.resolve().is_relative_to(ROOT.resolve()) or path.is_symlink():
+            raise RuntimeError(f'构建缓存不可指向后端工作树外：{path}')
+    if RUNTIME.is_symlink() or not RUNTIME.resolve().is_relative_to(WORKSPACE.resolve()):
+        raise RuntimeError(f'运行目录必须位于主工作区：{RUNTIME}')
     for name in INSTANCES:
         base = RUNTIME / name
         # 仅校验部署入口的挂载根，不遍历 containerd 内部的合法绝对链接。
@@ -110,20 +137,18 @@ def platform_digest():
     return source_digest(ROOT, ('scripts/deploy/tee', 'develop.sh', 'docs/tee-dev-a'))
 
 
-# 实际复用的六个输入；并行开发的其他 runner 文件不进入本次打包。
+# 平台构建入口和 B 已恢复的运行器源码共同构成共享工具链输入。
 TOOLKIT_INPUTS = ['Dockerfile', 'build.sh', 'data-sandbox.env.example',
                   'deploy/common/log.sh', 'deploy/common/utils.sh', 'develop.sh']
+TOOLKIT_DIR_INPUTS = ['docker/data-sandbox-sampler', 'docker/data-sandbox-runner-lib',
+                      'docker/data-sandbox-python-runner', 'docker/data-sandbox-jar-runner',
+                      'docker/data-sandbox-tee-runner']
 TOOLKIT_PIN = CACHE / 'toolkit-pin'
 
 
 def toolkit_source():
-    """A 构建实际读取的工具链目录。
-
-    共享工具链是他人也在改的工作副本。A 固定使用自己钉住的副本，
-    只有显式执行 sync-toolkit 才采纳共享副本的新版本；这样 B 的并行改动
-    既不会中断 A 的构建，A 也不去改动共享目录里的任何文件。
-    """
-    return TOOLKIT_PIN if (TOOLKIT_PIN / 'develop.sh').is_file() else TOOLKIT
+    """主工作区直接读取共享工具链；构建前后用摘要阻止并发漂移。"""
+    return TOOLKIT
 
 
 def toolkit_file(name):
@@ -137,17 +162,19 @@ def toolkit_digest():
     digest = hashlib.sha256()
     for name in TOOLKIT_INPUTS:
         digest.update(name.encode() + b'\0' + toolkit_file(name).read_bytes())
+    for directory in TOOLKIT_DIR_INPUTS:
+        root = TOOLKIT / directory
+        if not root.is_dir() or root.is_symlink():
+            continue
+        for file in sorted(root.rglob('*')):
+            if file.is_file() and not file.is_symlink() and '__pycache__' not in file.parts and file.suffix != '.pyc':
+                relative = file.relative_to(TOOLKIT).as_posix()
+                digest.update(relative.encode() + b'\0' + file.read_bytes())
     return digest.hexdigest()
 
 
 def shared_toolkit_digest():
-    digest = hashlib.sha256()
-    for name in TOOLKIT_INPUTS:
-        file = TOOLKIT / name
-        if file.is_symlink() or not file.is_file():
-            raise RuntimeError('共享工具链输入不是普通文件：' + name)
-        digest.update(name.encode() + b'\0' + file.read_bytes())
-    return digest.hexdigest()
+    return toolkit_digest()
 
 
 def pin_toolkit(adopt):
@@ -178,15 +205,8 @@ def pin_toolkit(adopt):
 
 
 def sync_toolkit():
-    """显式采纳共享工具链的当前版本，作为 A 后续构建的输入。"""
-    before = toolkit_digest() if (TOOLKIT_PIN / 'develop.sh').is_file() else None
-    pin_toolkit(adopt=True)
-    after = toolkit_digest()
-    if before == after:
-        print('共享工具链与已钉住副本一致，未发生变化。')
-    else:
-        print(f'已采纳共享工具链当前版本：{after[:12]}；上一版 {(before or "无")[:12]}。')
-        print('随后需要重新构建平台镜像，本命令不触发构建。')
+    """兼容旧命令；主工作区始终读取共享工具链当前内容。"""
+    print('共享工具链已由主工作区直接管理，当前摘要：' + toolkit_digest()[:12])
 
 
 def source_snapshot(src, dest):
@@ -242,7 +262,7 @@ def managed(name, kind='container'):
 def port_check(name):
     base = INSTANCES[name] * 100
     ports = {base + n for n in [80, 81, 82, 83, 84, 88]}
-    if name == 'tee-a-center':
+    if name == 'center':
         ports.add(19685)
         ports.add(CONTRACT_PORT)
     own = {f'data-sandbox-dev-{name}-{suffix}' for suffix in ['kuscia', 'secretpad']}
@@ -323,17 +343,17 @@ def prepare():
         detect(name)
     target = CACHE / 'toolkit'
     target.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # 首次执行时把共享工具链钉成 A 自己的副本；此后只用钉住的版本。
-    pin_toolkit(adopt=False)
-    if shared_toolkit_digest() != toolkit_digest():
-        print('注意：共享工具链已被改动，本次仍使用 A 钉住的副本；'
-              '确认要采纳新版本时执行 ./develop.sh sync-toolkit --tee。')
     for name in ['deploy/common/log.sh', 'deploy/common/utils.sh', 'data-sandbox.env.example', 'Dockerfile']:
         dest = target / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(toolkit_file(name), dest)
     # 使用公开默认配置，不复制原工具链 data-sandbox.env 中的运行凭据。
     shutil.copy2(toolkit_file('data-sandbox.env.example'), target / 'data-sandbox.env')
+    for relative in TOOLKIT_DIR_INPUTS:
+        source = TOOLKIT / relative
+        if source.is_dir() and not source.is_symlink():
+            shutil.copytree(source, target / relative, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     script = toolkit_file('develop.sh').read_text()
     script = replace_once(script, 'WORKSPACE_DIR="$(cd "${PACKAGE_DIR}/.." && pwd)"', f'WORKSPACE_DIR="{ROOT}"')
     script = replace_once(script, 'BACKEND_DIR="$(realpath -m "${WORKSPACE_DIR}/confidential-ai")"', 'BACKEND_DIR="$WORKSPACE_DIR"')
@@ -360,27 +380,16 @@ def prepare():
 
 ''' + script[end:]
     start = script.index('ensure_sampler_runtime() {')
-    end = script.index('start_kuscia() {', start)
+    next_function = 'runner_source_hash() {' if 'runner_source_hash() {' in script[start:] else 'start_kuscia() {'
+    end = script.index(next_function, start)
     script = script[:start] + '''ensure_sampler_runtime() {
   import_sampler_image
   python3 "$BACKEND_DIR/scripts/deploy/tee/platform_deploy.py" register-sampler --name "$DEV_NAME" --tee
 }
 
 ''' + script[end:]
-    # 上游的模型运行器属于 P5/P6，不从复用工具链构建或注册额外业务镜像。
-    script, omitted = re.subn(r'(?m)^    ensure_model_runner_runtime[^\n]*\\\n[^\n]*\\\n[^\n]*\n',
-        '    # P3 不准备 Python/JAR 业务运行器。\n', script)
-    if omitted != 4:
-        raise RuntimeError('上游业务运行器调用结构变化，停止隔离适配')
-    # 抽样运行时到 start_kuscia 之间的定义会被上面的裁剪一并移除；上游在该区间新增的
-    # 运行时（如 Jupyter）属于并行开发内容，A 不构建也不注册，调用点必须同步去掉，
-    # 否则适配脚本会调用一个已被裁掉的函数。
-    script, dropped = re.subn(r'(?m)^    ensure_jupyter_runtime\n',
-        '    # P3 不准备 Jupyter 运行时。\n', script)
-    if dropped not in (0, 2):
-        raise RuntimeError('上游 Jupyter 运行时调用结构变化，停止隔离适配')
     for leftover in re.findall(r'(?m)^\s*(ensure_[a-z_]+_runtime)\b', script):
-        if leftover not in ('ensure_sampler_runtime',) and f'{leftover}() {{' not in script:
+        if f'{leftover}() {{' not in script:
             raise RuntimeError('适配脚本调用了已被裁剪的函数：' + leftover)
     script = replace_once(script, '      docker rm -f "$KUSCIA_CONTAINER" >/dev/null\n      kuscia_status=""',
                           '      log_error "Kuscia requires an explicitly authorized replacement."\n      exit 1')
@@ -519,23 +528,24 @@ def up(name):
     base = INSTANCES[name] * 100
     env = dict(os.environ, DATA_SANDBOX_DEV_ROOT=str(RUNTIME / name), TEE_PLATFORM_IMAGE=platform, DATA_SANDBOX_DEV_SAMPLER_IMAGE=sampler, DATA_SANDBOX_DEV_KUSCIA_IMAGE=checked_image('kuscia'),
                DATA_SANDBOX_DEV_MINIO_IMAGE=checked_image('minio'),
-               TEE_GATEWAY_PORT_ARGS='-p 19685:31888' if name == 'tee-a-center' else '',
+               TEE_GATEWAY_PORT_ARGS='-p 19685:31888' if name == 'center' else '',
                # 只有中心端直连密钥适配服务；客户端通过中心端的契约接口访问。
-               TEE_KEY_ADAPTER_URL='https://data-sandbox-dev-tee-a-center-key-adapter:8090' if name == 'tee-a-center' else '',
+               TEE_KEY_ADAPTER_URL='https://data-sandbox-dev-center-key-adapter:8090' if name == 'center' else '',
                # 中心端发布平台间契约入口；客户端实例只持有调用地址，不开放任何入口。
-               TEE_CONTRACT_PORT='8443' if name == 'tee-a-center' else '0',
-               TEE_CONTRACT_PORT_ARGS='-p 19686:8443' if name == 'tee-a-center' else '',
+               TEE_CONTRACT_PORT='8443' if name == 'center' else '0',
+               TEE_CONTRACT_PORT_ARGS='-p 19686:8443' if name == 'center' else '',
                TEE_CONTRACT_SERVER_MOUNT=(
                    f'-v {RUNTIME / name}/tee/contract-server:/app/tee-contract-server:ro'
-                   if name == 'tee-a-center' else ''),
-               TEE_CONTRACT_CENTER_URL='' if name == 'tee-a-center' else CONTRACT_CENTER_URL,
-               TEE_END_ROLES='CLIENT,CENTER' if name == 'tee-a-center' else 'CLIENT')
+                   if name == 'center' else ''),
+               TEE_CONTRACT_CENTER_URL='' if name == 'center' else CONTRACT_CENTER_URL,
+               TEE_END_ROLES='CLIENT,CENTER' if name == 'center' else 'CLIENT')
     # 独立随机口令只交给上游入口写入本实例 600 凭据文件，不输出到日志。
     password = secrets.token_urlsafe(24) if not (RUNTIME / name / 'secretpad.env').exists() else None
-    run('bash', CACHE / 'toolkit/develop.sh', 'up', '--skip-build', '--name', name, '--branch', 'codex/tee-dev-a',
+    backend_branch = git(ROOT, 'branch', '--show-current')
+    run('bash', CACHE / 'toolkit/develop.sh', 'up', '--skip-build', '--name', name, '--branch', backend_branch,
         '--port', base+88, '--gateway-port', base+80, '--internal-port', base+81,
         '--api-http-port', base+82, '--api-grpc-port', base+83, '--metrics-port', base+84,
-        '--advertise-host', '222.20.99.38', env=env, input=(password + '\n' + password + '\n') if password else None)
+        '--advertise-host', CONTRACT_HOST, env=env, input=(password + '\n' + password + '\n') if password else None)
 
 
 def down(name):
@@ -604,7 +614,7 @@ def main():
         'refresh-detection', 'detect-schedule', 'adapter-up', 'publish-identities', 'verify-p4',
         'sync-toolkit'])
     parser.add_argument('--tee', action='store_true', required=True)
-    parser.add_argument('--name', choices=list(INSTANCES), default='tee-a-center')
+    parser.add_argument('--name', choices=list(INSTANCES), default='center')
     parser.add_argument('--image-key')
     parser.add_argument('--image-ref')
     parser.add_argument('--remove-schedule', action='store_true',
