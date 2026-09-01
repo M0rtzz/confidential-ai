@@ -395,6 +395,32 @@ class IdentityPublishTests(unittest.TestCase):
                 self.assertEqual({'center': 'owner-center', 'client-a': 'owner-a',
                                   'client-b': 'owner-b'}, foundation.owner_map())
 
+    def test_legacy_owner_map_switches_clients_once_but_keeps_center(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            file = root / 'owner-map.json'
+            file.write_text(json.dumps({'tee-a-center': 'center-old',
+                                        'tee-a-client-1': 'synthetic-a',
+                                        'tee-a-client-2': 'synthetic-b'}))
+            migrated = {'center': 'center-old', 'client-a': 'real-a', 'client-b': 'real-b'}
+            with patch.object(deploy, 'ROOT', root), patch.object(foundation, 'OWNER_MAP', file):
+                self.assertEqual(migrated, foundation.save_owner_map(migrated))
+                self.assertEqual(migrated, json.loads(file.read_text()))
+                with self.assertRaises(RuntimeError):
+                    foundation.save_owner_map(dict(migrated, **{'client-a': 'changed'}))
+
+    def test_legacy_owner_map_cannot_replace_center(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            file = root / 'owner-map.json'
+            file.write_text(json.dumps({'tee-a-center': 'center-old',
+                                        'tee-a-client-1': 'synthetic-a',
+                                        'tee-a-client-2': 'synthetic-b'}))
+            with patch.object(deploy, 'ROOT', root), patch.object(foundation, 'OWNER_MAP', file):
+                with self.assertRaises(RuntimeError):
+                    foundation.save_owner_map({'center': 'center-new', 'client-a': 'real-a',
+                                               'client-b': 'real-b'})
+
     def test_runtime_image_digests_come_from_locked_manifest(self):
         with patch.object(foundation, 'manifest', lambda: {'images': {
                 'teeapps': {'id': 'sha256:aa'}, 'probe': {'id': 'sha256:bb'},

@@ -233,7 +233,16 @@ def owner_map():
 
 def save_owner_map(owners):
     """记录本次取到的机构标识；已有映射发生变化时拒绝覆盖，避免顶替既有机构身份。"""
+    raw = json.loads(OWNER_MAP.read_text()) if OWNER_MAP.exists() else {}
     stored = owner_map()
+    # 一次性合并场景：中心数据库沿用 A，两个客户端数据库沿用既有 19488/19588。
+    # 仅当文件仍完整使用旧实例键名，且中心机构保持不变时，允许客户端机构切换为
+    # 当前数据库实际返回值；写回新键名后重新执行即恢复严格不可变规则。
+    if raw and set(raw) == set(LEGACY_INSTANCE_NAMES):
+        if set(owners) != set(INSTANCES) or stored.get('center') != owners.get('center'):
+            raise RuntimeError('旧机构映射迁移条件不完整，拒绝覆盖')
+        atomic(OWNER_MAP, owners, 0o600)
+        return dict(owners)
     for name, owner in owners.items():
         if stored.get(name, owner) != owner:
             raise RuntimeError('实例机构标识与已有映射不一致，拒绝覆盖：' + name)
