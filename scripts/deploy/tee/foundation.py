@@ -13,11 +13,11 @@ import time
 import urllib.request
 
 from platform_deploy import (ROOT, CACHE, RUNTIME, INSTANCES, SOURCES, LABEL, CONTRACT_HOST, run, atomic, utc,
-                manifest, save_manifest, checked_image, image_info, managed, kube)
+                manifest, save_manifest, checked_image, image_info, managed, kube, domain_id)
 
 CENTER = RUNTIME / 'center/tee'
 PKI = CENTER / 'pki'
-DOMAIN = 'dev-center'
+DOMAIN = domain_id('center')
 GET_RA = '/secretflowapis.v2.sdc.capsule_manager.CapsuleManager/GetRaCert'
 
 
@@ -720,6 +720,7 @@ def smoke():
 
 def pair():
     """仅配对新实例，身份信息在内存传递，不保存登录 token 或节点私钥。"""
+    domains = {name: domain_id(name) for name in INSTANCES}
     def api(name, path, payload, token=None):
         port = INSTANCES[name] * 100 + 88
         headers = {'Content-Type': 'application/json'}
@@ -743,16 +744,16 @@ def pair():
         sessions[name] = login['token']
     invitations = {}
     for name in INSTANCES:
-        result = api(name, 'v1alpha1/node/get', {'nodeId': 'dev-' + name}, sessions[name])
+        result = api(name, 'v1alpha1/node/get', {'nodeId': domains[name]}, sessions[name])
         invitations[name] = json.loads(base64.b64decode(result['nodeAuthenticationCode']))
     for client in ['client-a', 'client-b']:
         for src, dst in [(client, 'center'), ('center', client)]:
             routes = json.loads(kube(src, 'get', 'clusterdomainroutes', '-o', 'json'))['items']
-            if any(x.get('spec', {}).get('source') == 'dev-' + src and x.get('spec', {}).get('destination') == 'dev-' + dst for x in routes):
+            if any(x.get('spec', {}).get('source') == domains[src] and x.get('spec', {}).get('destination') == domains[dst] for x in routes):
                 continue
             invite = invitations[dst]
             payload = {k: invite[k] for k in ['masterNodeId', 'dstNodeId', 'name', 'certText', 'dstNetAddress']}
-            payload.update(mode=1, srcNodeId='dev-' + src, dstInstId=invite['instId'], dstInstName=invite['instName'])
+            payload.update(mode=1, srcNodeId=domains[src], dstInstId=invite['instId'], dstInstName=invite['instName'])
             api(src, 'v1alpha1/p2p/node/create', payload, sessions[src])
     print('两客户端与中心双向配对请求完成；READY 状态仍须实际核验。')
 

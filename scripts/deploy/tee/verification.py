@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from datetime import datetime
 
-from platform_deploy import ROOT, ORIGINAL, RUNTIME, INSTANCES, CONTRACT_HOST, run, atomic, kube, checked_image, managed, manifest, utc
+from platform_deploy import ROOT, ORIGINAL, RUNTIME, INSTANCES, CONTRACT_HOST, run, atomic, kube, checked_image, managed, manifest, utc, domain_id
 from foundation import CENTER, PKI, DOMAIN, openssl, issue, make_ca, labels, pod_exec
 
 
@@ -295,7 +295,8 @@ def verify_environment():
 
 
 def verify_routes():
-    expected = {(client, DOMAIN) for client in ['dev-client-a', 'dev-client-b']}
+    domains = {name: domain_id(name) for name in INSTANCES}
+    expected = {(domains[client], domains['center']) for client in ['client-a', 'client-b']}
     expected |= {(right, left) for left, right in expected.copy()}
     evidence = {}
     for name in INSTANCES:
@@ -304,7 +305,7 @@ def verify_routes():
             raise RuntimeError('Kuscia 节点未就绪：' + name)
         items = json.loads(kube(name, 'get', 'clusterdomainroutes', '-o', 'json'))['items']
         pairs = {(r['spec']['source'], r['spec']['destination']) for r in items}
-        required = expected if name == 'center' else {pair for pair in expected if 'dev-' + name in pair}
+        required = expected if name == 'center' else {pair for pair in expected if domains[name] in pair}
         if pairs != required or len(items) != len(required):
             raise RuntimeError('存在缺失、重复、客户端直连或非本次实例路由：' + name)
         for route in items:
