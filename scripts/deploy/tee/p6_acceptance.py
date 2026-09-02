@@ -190,6 +190,10 @@ def build_jar():
 def install_platform_fixture(owner, asset_id, fixture):
     project_id = "project-p6-" + uuid4().hex[:10]
     now = platform_time(0)
+    platform_node = scalar("select node_id from node where inst_id=" + quote(owner)
+                           + " and is_deleted=0 limit 1;")
+    if not platform_node:
+        raise Failure("P6 验收机构没有对应的平台节点")
     metadata = json.dumps({"encrypted": True, "plaintextBytes": len(SAMPLE_CSV.encode()),
                            "contentType": "text/csv"}, separators=(",", ":"))
     columns = json.dumps([{"name": item, "type": "string"} for item in ALL_COLUMNS],
@@ -198,7 +202,7 @@ def install_platform_fixture(owner, asset_id, fixture):
         "insert into project(project_id,name,compute_mode,compute_func,owner_id) values("
         f"{quote(project_id)},{quote('P6 验收项目')},'tee','ALL',{quote(owner)});",
         "insert into project_node(project_id,node_id,is_deleted) values("
-        f"{quote(project_id)},{quote(owner)},0);",
+        f"{quote(project_id)},{quote(platform_node)},0);",
         f"update ds_sandbox set project_id={quote(project_id)} where id={quote(fixture['sandboxId'])};",
         "insert into ds_data_asset(id,name,provider_node_id,processor_node_id,ingestion_type,modality,"
         "data_stage,source_asset_id,datatable_id,storage_uri,metadata_json,created_by,created_at,updated_at,"
