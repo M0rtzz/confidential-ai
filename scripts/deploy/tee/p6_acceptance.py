@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -86,6 +87,11 @@ def receipt(task_id):
     return decode_jws(raw)
 
 
+def parse_instant(value):
+    normalized = re.sub(r"(\.\d{6})\d+(?=Z|[+-]\d\d:\d\d$)", r"\1", value)
+    return datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+
+
 def validate_task(label, row, expected_kind, expected_operator):
     if not row["jobId"] or not row["jws"]:
         raise Failure(label + " 未保存 Kuscia Job 或 JWS")
@@ -112,8 +118,8 @@ def validate_task(label, row, expected_kind, expected_operator):
     if payload.get("program", {}).get("kind") != expected_kind \
             or payload.get("operatorId") != expected_operator:
         raise Failure(label + " 程序类型或算子绑定不符")
-    issued = datetime.fromisoformat(payload["issuedAt"].replace("Z", "+00:00"))
-    expires = datetime.fromisoformat(payload["expiresAt"].replace("Z", "+00:00"))
+    issued = parse_instant(payload["issuedAt"])
+    expires = parse_instant(payload["expiresAt"])
     if not 0 < (expires - issued).total_seconds() <= 300:
         raise Failure(label + " 任务有效期超出 5 分钟")
     if payload.get("columns") != GRANTED_COLUMNS or len(payload.get("inputs", [])) != 1:
