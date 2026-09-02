@@ -518,7 +518,8 @@ class CrossInstanceChannelTests(unittest.TestCase):
     def test_isolation_allows_only_explicit_read_only_identity_mounts(self):
         source = Path(acceptance.__file__).with_name('verification.py').read_text()
         for destination in ['/app/tee-adapter-client', '/app/tee-contract-client',
-                            '/app/tee-identity-key', '/app/tee-contract-server']:
+                            '/app/tee-identity-key', '/app/tee-contract-server',
+                            '/app/tee-task-signer']:
             self.assertIn(destination, source)
         self.assertIn("if mount.get('RW') or mount.get('Destination') not in allowed_identity_mounts", source)
 

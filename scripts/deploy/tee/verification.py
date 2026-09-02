@@ -378,6 +378,7 @@ def verify_isolation():
                     allowed_identity_mounts = {
                         '/app/tee-adapter-client', '/app/tee-contract-client',
                         '/app/tee-identity-key', '/app/tee-contract-server',
+                        '/app/tee-task-signer',
                     }
                     if mount.get('RW') or mount.get('Destination') not in allowed_identity_mounts:
                         raise RuntimeError('平台挂载了契约身份范围之外的底座目录')
