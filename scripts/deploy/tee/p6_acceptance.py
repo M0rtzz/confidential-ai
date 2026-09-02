@@ -299,7 +299,8 @@ def run():
             "policy": {"contractVersion": CONTRACT, "policyId": "", "policyVersion": "",
                        "assetId": asset_id, "assetVersion": "1", "ownerId": owner,
                        "sandboxId": fixture["sandboxId"], "columns": GRANTED_COLUMNS,
-                       "operators": OPERATORS, "expiresAt": utc_time(3600), "reportKinds": []}}, token)
+                       "operators": OPERATORS, "expiresAt": utc_time(3600),
+                       "reportKinds": ["EVALUATION_METRICS"]}}, token)
         expect_ok("P6 密文资产登记", "/v1alpha1/tee/assets/register", {
             "contractVersion": CONTRACT, "requestId": uuid4().hex, "ownerId": owner,
             "schema": ALL_COLUMNS, "encryptedObject": encrypted,
