@@ -238,7 +238,7 @@ def task_payload(asset, key, policy, columns, operator, nonce=None, sandbox_id='
                         'objectId': asset['objectId'], 'ciphertextSha256': asset['ciphertextSha256'],
                         'plaintextBytes': plaintext_bytes or len(SAMPLE_CSV)}],
             'program': program or {'kind': 'BUILTIN', 'objectId': None,
-                                   'sha256': hashlib.sha256(b'builtin').hexdigest(), 'parameters': '{}'},
+                                   'sha256': hashlib.sha256(b'builtin').hexdigest(), 'parameters': {}},
             'issuedAt': now.isoformat().replace('+00:00', 'Z'),
             'expiresAt': (now + timedelta(seconds=lifetime)).isoformat().replace('+00:00', 'Z'),
             'nonce': nonce or uuid4().hex,
@@ -712,7 +712,7 @@ def run():
         checks['deniedProgramShape'] = release_denied(
             'BUILTIN 携带程序对象', task_for(program={
                 'kind': 'BUILTIN', 'objectId': 'obj-x',
-                'sha256': hashlib.sha256(b'builtin').hexdigest(), 'parameters': '{}'}),
+                'sha256': hashlib.sha256(b'builtin').hexdigest(), 'parameters': {}}),
             'CONTRACT_INVALID')
 
         # 28 仿真部署不接受硬件证明证据
