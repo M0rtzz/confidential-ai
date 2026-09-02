@@ -39,10 +39,9 @@ TERMINAL = {"SUCCEEDED", "FAILED", "CANCELLED"}
 def scalar(statement):
     result = subprocess.run(
         ["docker", "exec", "-i", SECRETPAD, "sqlite3", "/app/db/secretpad.sqlite"],
-        input=("pragma busy_timeout=8000;\n" + statement + "\n").encode(), check=True,
+        input=(".timeout 8000\n" + statement + "\n").encode(), check=True,
         stdout=subprocess.PIPE).stdout.decode().strip()
-    lines = result.splitlines()
-    return lines[-1] if lines else ""
+    return result
 
 
 def task_row(task_id):
