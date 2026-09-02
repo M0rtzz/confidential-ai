@@ -34,17 +34,20 @@ public class TeeAssetService {
     private final TeeKeyService keyService;
     private final TeePolicyService policyService;
     private final TeeIdempotency idempotency;
+    private final TeeRuntimeGrantService grants;
     private final ObjectMapper mapper;
 
     public TeeAssetService(TeeAssetRepository assets, TeeObjectRepository objects, TeeObjectStore store,
                            TeeKeyService keyService, TeePolicyService policyService,
-                           TeeIdempotency idempotency, ObjectMapper mapper) {
+                           TeeIdempotency idempotency, TeeRuntimeGrantService grants,
+                           ObjectMapper mapper) {
         this.assets = assets;
         this.objects = objects;
         this.store = store;
         this.keyService = keyService;
         this.policyService = policyService;
         this.idempotency = idempotency;
+        this.grants = grants;
         this.mapper = mapper;
     }
 
@@ -121,22 +124,37 @@ public class TeeAssetService {
         String requestId = TeeGuard.requireText(request.requestId(), "requestId");
         String taskId = TeeGuard.requireText(request.taskId(), "taskId");
         String resultId = TeeGuard.requireText(request.resultId(), "resultId");
-        String resultKind = TeeGuard.requireText(request.resultKind(), "resultKind");
-        if (!TeeContract.RESULT_KINDS.contains(resultKind) || "REPORT".equals(resultKind)) {
-            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "结果类型必须是加密出域的 DATA 或 MODEL");
-        }
-        List<String> contributors = TeeGuard.requireGrantSet(request.contributors(), "贡献方");
+        String submittedKind = request.resultKind() == null ? "" : request.resultKind();
         TeeCrypto.EncryptedObject object = requireObject(request.encryptedObject());
         String fingerprint = TeeIdempotency.fingerprint(
-                List.of(taskId, resultId, resultKind, object.ciphertextSha256()));
+                List.of(taskId, resultId, submittedKind, object.ciphertextSha256()));
         return idempotency.execute(ownerId, "objects", requestId, fingerprint, ObjectResult.class, () -> {
             requireResultBoundToTask(resultId, taskId);
+            TeeRuntimeGrantService.ResultBinding binding = grants.requireResult(ownerId, taskId, resultId);
+            if (request.resultKind() != null && !request.resultKind().isBlank()
+                    && !binding.kind().equals(request.resultKind())) {
+                throw TeeException.of(TeeContract.Error.POLICY_DENIED, "结果类型与密钥申领绑定不符");
+            }
+            List<String> contributors = grants.contributors(ownerId, taskId);
+            if (request.contributors() != null
+                    && !new java.util.LinkedHashSet<>(contributors).equals(
+                    new java.util.LinkedHashSet<>(TeeGuard.requireGrantSet(
+                            request.contributors(), "贡献方")))) {
+                throw TeeException.of(TeeContract.Error.POLICY_DENIED,
+                        "运行时提交的贡献方与服务端推导结果不符");
+            }
+            if (!resultId.equals(object.assetId()) || !"1".equals(object.assetVersion())
+                    || !binding.keyId().equals(object.keyId())
+                    || !binding.keyVersion().equals(object.keyVersion())) {
+                throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED,
+                        "密文结果未绑定任务申领的结果标识和密钥");
+            }
             verifyIntegrity(object);
             String objectId = objects.findByResultId(resultId).stream().findFirst()
                     .map(item -> item.getUpk().getObjectId()).orElseGet(TeeAssetService::newObjectId);
             store.write(objectId, object);
             objects.save(TeeObjectDO.builder()
-                    .upk(new TeeObjectDO.UPK(objectId)).kind(resultKind).ownerId(ownerId)
+                    .upk(new TeeObjectDO.UPK(objectId)).kind(binding.kind()).ownerId(ownerId)
                     .taskId(taskId).resultId(resultId)
                     .keyId(object.keyId()).keyVersion(object.keyVersion())
                     .ciphertextSha256(object.ciphertextSha256())
@@ -149,15 +167,26 @@ public class TeeAssetService {
 
     /** 按任务或资产权属鉴权，只返回密文；不做任何解密。 */
     public TeeCrypto.EncryptedObject readObject(String ownerId, String objectId) {
+        return readObject(ownerId, objectId, null);
+    }
+
+    public TeeCrypto.EncryptedObject readObject(String ownerId, String objectId, String taskId) {
         TeeObjectDO record = objects.findById(new TeeObjectDO.UPK(TeeGuard.requireText(objectId, "objectId")))
                 .orElseThrow(() -> TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "对象不存在或无权访问"));
         if (!record.getOwnerId().equals(ownerId) && !readList(record.getContributorsJson()).contains(ownerId)) {
-            throw TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "无权读取该对象");
+            grants.requireObjectRead(ownerId, TeeGuard.requireText(taskId, "X-TEE-Task-Id"), objectId);
         }
         return store.read(objectId);
     }
 
     public ProgramResult readProgram(String objectId) {
+        return readProgram(null, null, objectId);
+    }
+
+    public ProgramResult readProgram(String ownerId, String taskId, String objectId) {
+        if (ownerId != null) {
+            grants.requireProgramRead(ownerId, TeeGuard.requireText(taskId, "X-TEE-Task-Id"), objectId);
+        }
         TeeObjectDO record = objects.findById(new TeeObjectDO.UPK(TeeGuard.requireText(objectId, "objectId")))
                 .orElseThrow(() -> TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "程序对象不存在"));
         if (!TeeContract.PROGRAM_KINDS.contains(record.getKind())) {
@@ -245,9 +274,7 @@ public class TeeAssetService {
         if (!TeeCrypto.digest(nonce, aad, ciphertext, tag).equals(object.ciphertextSha256())) {
             throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "密文摘要不符");
         }
-        byte[] expected = TeeCrypto.buildAad(mapper, object.assetId(), object.assetVersion(),
-                object.keyId(), object.keyVersion());
-        if (!java.security.MessageDigest.isEqual(expected, aad)) {
+        if (!TeeCrypto.matchesAad(mapper, aad, object)) {
             throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "AAD 绑定与声明不一致");
         }
     }

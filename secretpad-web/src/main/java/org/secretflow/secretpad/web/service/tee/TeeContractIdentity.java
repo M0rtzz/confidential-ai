@@ -27,8 +27,8 @@ public class TeeContractIdentity {
         this.registry = registry;
     }
 
-    /** 取本次连接的客户端证书对应的机构标识；缺证书或未登记都视为越权。 */
-    public String requireOwner(HttpServletRequest request) {
+    /** Resolve the peer certificate to its server-registered owner and role. */
+    public TeeIdentityRegistry.ContractCaller requireCaller(HttpServletRequest request) {
         Object attribute = request.getAttribute(CERTIFICATE_ATTRIBUTE);
         if (!(attribute instanceof X509Certificate[] chain) || chain.length == 0) {
             throw TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "平台间入口缺少客户端证书");
@@ -39,6 +39,11 @@ public class TeeContractIdentity {
         } catch (Exception expired) {
             throw TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "调用方证书不在有效期内");
         }
-        return registry.ownerByContractCertificate(TeeCrypto.certificateSha256(leaf));
+        return registry.callerByContractCertificate(TeeCrypto.certificateSha256(leaf));
+    }
+
+    /** Compatibility accessor for callers that only need the institution. */
+    public String requireOwner(HttpServletRequest request) {
+        return requireCaller(request).ownerId();
     }
 }

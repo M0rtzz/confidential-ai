@@ -15,6 +15,7 @@ from unittest.mock import patch
 import platform_deploy as deploy
 import foundation
 import key_adapter
+import p5_runtime
 import contract_acceptance as acceptance
 import release_client
 
@@ -445,6 +446,19 @@ class IdentityPublishTests(unittest.TestCase):
                 'mysql': {'id': 'sha256:cc'}}}):
             self.assertEqual(['sha256:aa', 'sha256:bb'], foundation.runtime_image_digests())
 
+    def test_runtime_contract_identity_is_center_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            center = Path(directory) / 'center/tee'
+            certificate = center / 'runtime-contract-client/client.crt'
+            certificate.parent.mkdir(parents=True)
+            certificate.write_text('certificate')
+            with patch.object(foundation, 'CENTER', center), \
+                    patch.object(foundation, 'owner_map', lambda: {'center': 'inst-center'}), \
+                    patch.object(foundation.subprocess, 'check_output', return_value=b'runtime-der'):
+                entries = foundation.runtime_contract_certificates()
+            self.assertEqual({'inst-center'}, set(entries.values()))
+            self.assertEqual(64, len(next(iter(entries))))
+
 
 
 class CrossInstanceChannelTests(unittest.TestCase):
@@ -508,6 +522,19 @@ class CrossInstanceChannelTests(unittest.TestCase):
                             '/app/tee-identity-key', '/app/tee-contract-server']:
             self.assertIn(destination, source)
         self.assertIn("if mount.get('RW') or mount.get('Destination') not in allowed_identity_mounts", source)
+
+    def test_p5_identity_directory_remains_traversable(self):
+        source = Path(p5_runtime.__file__).read_text()
+        self.assertIn("runtime-contract-client/client.crt", source)
+        self.assertIn("runtime-contract-client/client.key", source)
+        self.assertIn('chmod 700 "$d" "$d/trust"', source)
+        self.assertIn('stat -f -c %T /dev/shm', source)
+        self.assertIn('chmod o+rx / /usr /usr/local /usr/lib /usr/lib64 /opt /opt/java /opt/data-sandbox; chmod -R o+rX /usr/local /usr/lib /usr/lib64 /opt/java/openjdk /opt/data-sandbox', source)
+        self.assertNotIn('chmod 600 "$d"/* "$d/trust/center-1.pem"', source)
+        # This Kuscia AppImage CRD does not expose Pod volumes. The runtime
+        # deliberately uses the OCI-provided /dev/shm tmpfs instead.
+        self.assertNotIn("'volumeMounts'", source)
+        self.assertNotIn("['spec']['volumes']", source)
 
 
 class ToolkitIntegrationTests(unittest.TestCase):

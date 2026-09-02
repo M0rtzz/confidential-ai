@@ -95,6 +95,23 @@ public final class TeeGuard {
         }
     }
 
+    /**
+     * 任务请求的报告类型可以为空，表示本次任务不申请任何明文报告权限。
+     *
+     * <p>这与 policy 中的授权集合不同：policy 空授权集合按契约禁止；outputPolicy
+     * 的空请求集合是最小权限表达。字段缺失仍是无效契约，非空项仍须落在白名单内。
+     */
+    public static void requireRequestedReportKinds(Collection<String> kinds) {
+        if (kinds == null) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "缺少必填字段 reportKinds");
+        }
+        for (String kind : kinds) {
+            if (kind == null || kind.isBlank() || !TeeContract.REPORT_KINDS.contains(kind.trim())) {
+                throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "报告类型不在契约白名单内");
+            }
+        }
+    }
+
     public static void requireSize(long bytes, long limit) {
         if (bytes > limit) {
             throw TeeException.of(TeeContract.Error.PAYLOAD_TOO_LARGE, "内容超出契约限额");

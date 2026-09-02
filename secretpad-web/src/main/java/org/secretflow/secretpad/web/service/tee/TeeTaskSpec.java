@@ -5,6 +5,7 @@
 package org.secretflow.secretpad.web.service.tee;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 契约第五节的签名任务载荷。
@@ -17,13 +18,13 @@ public record TeeTaskSpec(String contractVersion, String taskId, String requestI
                           List<Input> inputs, Program program, String issuedAt, String expiresAt,
                           String nonce, OutputPolicy outputPolicy, String runtimeImageDigest) {
 
-    public record Input(String assetId, String assetVersion, String keyId, String keyVersion,
-                        String policyId, String policyVersion, String objectId,
+    public record Input(String assetId, long assetVersion, String keyId, long keyVersion,
+                        String policyId, long policyVersion, String objectId,
                         String ciphertextSha256, long plaintextBytes) {
     }
 
     /** BUILTIN 的 objectId 为空，其摘要指镜像内算子资源；其余模式必须另取程序字节并校验摘要。 */
-    public record Program(String kind, String objectId, String sha256, String parameters) {
+    public record Program(String kind, String objectId, String sha256, Map<String, Object> parameters) {
     }
 
     public record OutputPolicy(List<String> reportKinds, boolean encryptData, boolean encryptModel,

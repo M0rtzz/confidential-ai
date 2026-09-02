@@ -47,6 +47,29 @@ class TeeContractIdentityTest {
         TeeContractIdentity identity = identity(
                 "{\"contractClientCertificates\":{\"" + fingerprint + "\":\"inst-client-1\"}}");
         assertEquals("inst-client-1", identity.requireOwner(requestWith(certificate)));
+        assertEquals("CLIENT", identity.requireCaller(requestWith(certificate)).endRole());
+    }
+
+    @Test
+    void registeredRuntimeCertificateReceivesOnlyCenterRole() throws Exception {
+        X509Certificate certificate = TeeTestMaterial.certificate();
+        String fingerprint = TeeCrypto.certificateSha256(certificate);
+        TeeContractIdentity identity = identity(
+                "{\"runtimeContractCertificates\":{\"" + fingerprint + "\":\"inst-center\"}}");
+        assertEquals("inst-center", identity.requireCaller(requestWith(certificate)).ownerId());
+        assertEquals("CENTER", identity.requireCaller(requestWith(certificate)).endRole());
+    }
+
+    @Test
+    void certificateCannotOccupyClientAndRuntimeRoles() throws Exception {
+        X509Certificate certificate = TeeTestMaterial.certificate();
+        String fingerprint = TeeCrypto.certificateSha256(certificate);
+        TeeContractIdentity identity = identity("{\"contractClientCertificates\":{\""
+                + fingerprint + "\":\"inst-center\"},\"runtimeContractCertificates\":{\""
+                + fingerprint + "\":\"inst-center\"}}");
+        TeeException failure = assertThrows(TeeException.class,
+                () -> identity.requireCaller(requestWith(certificate)));
+        assertEquals(TeeContract.Error.AUDIT_ACCESS_DENIED, failure.error());
     }
 
     @Test

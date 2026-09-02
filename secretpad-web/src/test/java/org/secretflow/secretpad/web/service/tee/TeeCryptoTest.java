@@ -40,6 +40,21 @@ class TeeCryptoTest {
         assertEquals(TeeContract.NONCE_BYTES, TeeCrypto.decode(object.nonceB64()).length);
         assertEquals(TeeContract.TAG_BYTES, TeeCrypto.decode(object.tagB64()).length);
         assertArrayEquals(plaintext, TeeCrypto.open(mapper, key, object));
+        assertEquals("{\"assetId\":\"asset-1\",\"assetVersion\":1,\"keyId\":\"kd-1\",\"keyVersion\":1}",
+                new String(TeeCrypto.decode(object.aadB64()), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void legacyP4AadRemainsReadableButUnknownFieldsAreRejected() throws Exception {
+        TeeCrypto.EncryptedObject current = seal();
+        byte[] legacyAad = ("{\"contractVersion\":\"" + TeeContract.VERSION
+                + "\",\"assetId\":\"asset-1\",\"assetVersion\":\"1\","
+                + "\"keyId\":\"kd-1\",\"keyVersion\":\"1\"}")
+                .getBytes(StandardCharsets.UTF_8);
+        assertEquals(true, TeeCrypto.matchesAad(mapper, legacyAad, current));
+        byte[] extra = "{\"assetId\":\"asset-1\",\"assetVersion\":1,\"keyId\":\"kd-1\",\"keyVersion\":1,\"extra\":true}"
+                .getBytes(StandardCharsets.UTF_8);
+        assertEquals(false, TeeCrypto.matchesAad(mapper, extra, current));
     }
 
     @Test

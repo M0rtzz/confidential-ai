@@ -26,6 +26,9 @@ import java.util.Map;
 @Component
 public class TeeIdentityRegistry {
 
+    public record ContractCaller(String ownerId, String endRole) {
+    }
+
     private final ObjectMapper mapper;
     private final Path registryPath;
     private final Path workloadCertPath;
@@ -70,6 +73,23 @@ public class TeeIdentityRegistry {
             throw TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "调用方证书未登记为平台间契约身份");
         }
         return node.asText();
+    }
+
+    /** Resolve an mTLS caller to an immutable institution and endpoint role. */
+    public ContractCaller callerByContractCertificate(String certificateSha256) {
+        String fingerprint = TeeGuard.requireText(certificateSha256, "certificateSha256");
+        JsonNode root = read();
+        JsonNode client = root.path("contractClientCertificates").path(fingerprint);
+        JsonNode runtime = root.path("runtimeContractCertificates").path(fingerprint);
+        boolean clientRegistered = client.isTextual() && !client.asText().isBlank();
+        boolean runtimeRegistered = runtime.isTextual() && !runtime.asText().isBlank();
+        if (clientRegistered == runtimeRegistered) {
+            throw TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED,
+                    "调用方证书未登记或同时占用多个契约角色");
+        }
+        return runtimeRegistered
+                ? new ContractCaller(runtime.asText(), "CENTER")
+                : new ContractCaller(client.asText(), "CLIENT");
     }
 
     /** 可信运行时的工作负载证书；SIMULATION 下预注册，HARDWARE 下另按度量值绑定。 */

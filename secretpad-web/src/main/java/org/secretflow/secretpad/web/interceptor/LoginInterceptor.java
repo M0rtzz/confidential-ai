@@ -164,7 +164,8 @@ public class LoginInterceptor implements HandlerInterceptor {
             // 平台间入口不接受会话令牌，身份一律来自本次连接的客户端证书。
             if (onContractPort) {
                 try {
-                    UserContext.setBaseUser(contractCaller(teeContractIdentity.requireOwner(request)));
+                    var identity = teeContractIdentity.requireCaller(request);
+                    UserContext.setBaseUser(contractCaller(identity.ownerId(), identity.endRole()));
                 } catch (RuntimeException denied) {
                     return rejectTee(response, HttpServletResponse.SC_FORBIDDEN, "AUDIT_ACCESS_DENIED", 49012);
                 }
@@ -249,19 +250,20 @@ public class LoginInterceptor implements HandlerInterceptor {
     /**
      * 平台间调用方的上下文。
      *
-     * <p>机构标识来自已登记的客户端证书，端角色固定为数据方：本入口只用于客户端实例
-     * 向中心端申请密钥与登记规则，运行时放行等中心端能力仍会被端角色守卫拒绝。
+     * <p>机构标识和端角色都来自服务端登记的证书映射：平台客户端证书为 CLIENT，
+     * 独立 Runner 传输证书为 CENTER。请求头不能声明或提升端角色。
      */
-    private UserContextDTO contractCaller(String ownerId) {
+    private UserContextDTO contractCaller(String ownerId, String endRole) {
         UserContextDTO caller = new UserContextDTO();
         caller.setName("tee-contract:" + ownerId);
         caller.setOwnerId(ownerId);
-        caller.setOwnerType(UserOwnerTypeEnum.EDGE);
+        caller.setOwnerType("CENTER".equals(endRole)
+                ? UserOwnerTypeEnum.CENTER : UserOwnerTypeEnum.EDGE);
         caller.setToken("tee-contract");
         caller.setPlatformType(envService.getPlatformType());
         caller.setPlatformNodeId(envService.getPlatformNodeId());
         caller.setDeployMode(deployMode);
-        caller.setEndRole("CLIENT");
+        caller.setEndRole(endRole);
         return caller;
     }
 

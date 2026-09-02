@@ -173,6 +173,9 @@ def certificates():
     (CENTER / 'contract-server/ca.crl').chmod(0o600)
     for name in INSTANCES:
         issue(PKI / 'contract-ca', RUNTIME / name / 'tee/contract-client', 'contract-' + name)
+    # Runner transport identity is distinct from both platform clients and the
+    # workload key/receipt identity. It alone receives CENTER endpoint rights.
+    issue(PKI / 'contract-ca', CENTER / 'runtime-contract-client', 'contract-runtime-center')
     issue(PKI / 'external-ca', CENTER / 'cm-master-key', 'tee-a-cm-master')
     (CENTER / 'cm-client-ca').mkdir(exist_ok=True)
     shutil.copy2(PKI / 'upstream-ca/ca.crt', CENTER / 'cm-client-ca/ca.crt')
@@ -286,10 +289,21 @@ def contract_client_certificates(owners=None):
     return entries
 
 
+def runtime_contract_certificates(owners=None):
+    """Trusted Runner mTLS certificate DER SHA-256 -> center institution."""
+    stored = owner_map()
+    owner = (owners or {}).get('center') or stored.get('center')
+    cert = CENTER / 'runtime-contract-client/client.crt'
+    if not owner or not cert.exists():
+        return {}
+    der = subprocess.check_output(['openssl', 'x509', '-in', str(cert), '-outform', 'DER'])
+    return {hashlib.sha256(der).hexdigest(): owner}
+
+
 def runtime_image_digests():
     """仿真模式允许执行的运行镜像摘要；来自已锁定的镜像清单，不接受任意取值。"""
     images = manifest().get('images', {})
-    digests = [images[key]['id'] for key in ('teeapps', 'probe') if key in images]
+    digests = [images[key]['id'] for key in ('teeapps', 'probe', 'runtime') if key in images]
     return sorted({digest for digest in digests if digest})
 
 
@@ -303,7 +317,8 @@ def publish_identities(identities, owners=None):
     published = {'taskSigningCertificates': {
         'center-1': der_base64(CENTER / 'task-signer/client.crt')},
         'runtimeImageDigests': runtime_image_digests(),
-        'contractClientCertificates': contract_client_certificates(owners)}
+        'contractClientCertificates': contract_client_certificates(owners),
+        'runtimeContractCertificates': runtime_contract_certificates(owners)}
     published.update(published_owner_entries())
     stored = owner_map()
     for name, value in identities.items():
@@ -354,7 +369,7 @@ def publish_live_identities():
 
 
 def lock_image(key, ref):
-    allowed = {'capsule-dev', 'capsule-release', 'teeapps-dev', 'ubuntu', 'python', 'mysql', 'gateway', 'maven', 'platform-base', 'kuscia', 'minio'}
+    allowed = {'capsule-dev', 'capsule-release', 'teeapps-dev', 'ubuntu', 'python', 'mysql', 'gateway', 'maven', 'platform-base', 'kuscia', 'minio', 'runtime'}
     if key not in allowed or not ref or ':latest' in ref or (':' not in ref and '@sha256:' not in ref):
         raise RuntimeError('仅允许锁定明确的基础镜像引用，禁止 latest')
     info = image_info(ref)

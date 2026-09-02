@@ -682,6 +682,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['prepare', 'status', 'build-platform', 'up', 'down', 'fetch-sources',
         'register-sampler', 'certificates', 'render', 'base-up', 'probe-up', 'register', 'smoke', 'pair',
+        'register-p5-runtime',
         'verify-tls', 'verify-native', 'verify-persistence', 'verify-environment', 'verify-isolation', 'verify-repeat', 'verify-release', 'lock-image', 'build-components',
         'refresh-detection', 'detect-schedule', 'adapter-up', 'publish-identities', 'verify-p4',
         'sync-toolkit'])
@@ -712,6 +713,9 @@ def main():
         elif args.command == 'up': up(args.name)
         elif args.command == 'down': down(args.name)
         elif args.command == 'fetch-sources': fetch_sources()
+        elif args.command == 'register-p5-runtime':
+            import p5_runtime
+            p5_runtime.register()
         else:
             import foundation
             foundation.dispatch(args)

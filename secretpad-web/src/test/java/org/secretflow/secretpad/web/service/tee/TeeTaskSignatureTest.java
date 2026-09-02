@@ -63,7 +63,7 @@ class TeeTaskSignatureTest {
                 }
             }
         };
-        service = new TeeRuntimeService(null, null, null, null, null, registry, null, mapper);
+        service = new TeeRuntimeService(null, null, null, null, null, registry, null, null, mapper);
     }
 
     private String jws(String kid, String alg, Map<String, Object> payloadOverrides) throws Exception {
@@ -78,7 +78,8 @@ class TeeTaskSignatureTest {
                 Map.entry("operatorId", "ml.xgboost"),
                 Map.entry("columns", List.of("age", "income")),
                 Map.entry("inputs", List.of()),
-                Map.entry("program", Map.of("kind", "BUILTIN", "sha256", "abc", "parameters", "{}")),
+                Map.entry("program", Map.of("kind", "BUILTIN", "sha256", "abc",
+                        "parameters", Map.of())),
                 Map.entry("issuedAt", now.toString()),
                 Map.entry("expiresAt", now.plusSeconds(120).toString()),
                 Map.entry("nonce", "nonce-1"),
@@ -153,6 +154,24 @@ class TeeTaskSignatureTest {
     }
 
     @Test
+    void taskMayRequestNoPlaintextReports() throws Exception {
+        String compact = jws(KID, "RS256", Map.of("outputPolicy",
+                Map.of("reportKinds", List.of(), "encryptData", true,
+                        "encryptModel", true, "exportRequiresAllContributors", true)));
+        TeeTaskSpec task = service.verify(compact);
+        assertEquals(List.of(), task.outputPolicy().reportKinds());
+    }
+
+    @Test
+    void taskReportKindsStillUseTheWhitelist() throws Exception {
+        String compact = jws(KID, "RS256", Map.of("outputPolicy",
+                Map.of("reportKinds", List.of("RAW_ROWS"), "encryptData", true,
+                        "encryptModel", true, "exportRequiresAllContributors", true)));
+        assertEquals(TeeContract.Error.CONTRACT_INVALID,
+                assertThrows(TeeException.class, () -> service.verify(compact)).error());
+    }
+
+    @Test
     void wildcardColumnsInTaskAreRejected() throws Exception {
         String compact = jws(KID, "RS256", Map.of("columns", List.of("*")));
         assertEquals(TeeContract.Error.POLICY_DENIED,
@@ -169,7 +188,8 @@ class TeeTaskSignatureTest {
     @Test
     void builtinProgramCarryingObjectIsRejected() throws Exception {
         String compact = jws(KID, "RS256", Map.of("program",
-                Map.of("kind", "BUILTIN", "objectId", "obj-1", "sha256", "abc", "parameters", "{}")));
+                Map.of("kind", "BUILTIN", "objectId", "obj-1", "sha256", "abc",
+                        "parameters", Map.of())));
         assertEquals(TeeContract.Error.CONTRACT_INVALID,
                 assertThrows(TeeException.class, () -> service.verify(compact)).error());
     }
@@ -177,7 +197,7 @@ class TeeTaskSignatureTest {
     @Test
     void nonBuiltinProgramWithoutObjectIsRejected() throws Exception {
         String compact = jws(KID, "RS256", Map.of("program",
-                Map.of("kind", "PYTHON", "sha256", "abc", "parameters", "{}")));
+                Map.of("kind", "PYTHON", "sha256", "abc", "parameters", Map.of())));
         assertEquals(TeeContract.Error.CONTRACT_INVALID,
                 assertThrows(TeeException.class, () -> service.verify(compact)).error());
     }
@@ -185,7 +205,8 @@ class TeeTaskSignatureTest {
     @Test
     void unknownProgramKindIsRejected() throws Exception {
         String compact = jws(KID, "RS256", Map.of("program",
-                Map.of("kind", "SHELL", "objectId", "obj-1", "sha256", "abc", "parameters", "{}")));
+                Map.of("kind", "SHELL", "objectId", "obj-1", "sha256", "abc",
+                        "parameters", Map.of())));
         assertEquals(TeeContract.Error.CONTRACT_INVALID,
                 assertThrows(TeeException.class, () -> service.verify(compact)).error());
     }

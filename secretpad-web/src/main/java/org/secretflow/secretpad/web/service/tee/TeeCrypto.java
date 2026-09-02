@@ -56,15 +56,27 @@ public final class TeeCrypto {
     public static byte[] buildAad(ObjectMapper mapper, String assetId, String assetVersion,
                                   String keyId, String keyVersion) {
         ObjectNode node = mapper.createObjectNode();
-        node.put("contractVersion", TeeContract.VERSION);
         node.put("assetId", assetId);
-        node.put("assetVersion", assetVersion);
+        node.put("assetVersion", positiveVersion(assetVersion, "assetVersion"));
         node.put("keyId", keyId);
-        node.put("keyVersion", keyVersion);
+        node.put("keyVersion", positiveVersion(keyVersion, "keyVersion"));
         try {
             return mapper.writeValueAsBytes(node);
         } catch (Exception failure) {
             throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "AAD 构造失败");
+        }
+    }
+
+    private static long positiveVersion(String value, String name) {
+        try {
+            long parsed = Long.parseLong(value);
+            if (parsed <= 0) {
+                throw new NumberFormatException(name);
+            }
+            return parsed;
+        } catch (NumberFormatException failure) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID,
+                    name + " 必须是正整数");
         }
     }
 
@@ -117,20 +129,32 @@ public final class TeeCrypto {
 
     /** AAD 以原始字节参与认证，但其取值必须与封装声明一致，避免绑定错资产或错版本。 */
     private static void verifyAad(ObjectMapper mapper, byte[] aad, EncryptedObject object) {
+        if (!matchesAad(mapper, aad, object)) {
+            throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "AAD 绑定与密文声明不一致");
+        }
+    }
+
+    /**
+     * 新对象只写冻结契约的四字段整数版本；读取时兼容已由 P4 生成的五字段字符串版本，
+     * 两种形态都要求精确字段集合，不能借兼容逻辑附加未签名语义。
+     */
+    static boolean matchesAad(ObjectMapper mapper, byte[] aad, EncryptedObject object) {
         try {
             JsonNode node = mapper.readTree(aad);
-            boolean matches = TeeContract.VERSION.equals(node.path("contractVersion").asText())
-                    && object.assetId().equals(node.path("assetId").asText())
+            java.util.Set<String> fields = new java.util.HashSet<>();
+            node.fieldNames().forEachRemaining(fields::add);
+            java.util.Set<String> current = java.util.Set.of(
+                    "assetId", "assetVersion", "keyId", "keyVersion");
+            java.util.Set<String> legacy = java.util.Set.of(
+                    "contractVersion", "assetId", "assetVersion", "keyId", "keyVersion");
+            boolean shape = fields.equals(current) || (fields.equals(legacy)
+                    && TeeContract.VERSION.equals(node.path("contractVersion").asText()));
+            return shape && object.assetId().equals(node.path("assetId").asText())
                     && object.assetVersion().equals(node.path("assetVersion").asText())
                     && object.keyId().equals(node.path("keyId").asText())
                     && object.keyVersion().equals(node.path("keyVersion").asText());
-            if (!matches) {
-                throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "AAD 绑定与密文声明不一致");
-            }
-        } catch (TeeException rejected) {
-            throw rejected;
         } catch (Exception failure) {
-            throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "AAD 无法解析");
+            return false;
         }
     }
 

@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
 /** 密文资产登记与密文对象读写；所有出参均为密文或元数据，不含数据行。 */
@@ -37,13 +38,15 @@ public class TeeAssetController implements TeeApi {
     }
 
     @GetMapping("/objects/{objectId}")
-    public SecretPadResponse<TeeCrypto.EncryptedObject> object(@PathVariable String objectId) {
-        return SecretPadResponse.success(assetService.readObject(owner(), objectId));
+    public SecretPadResponse<TeeCrypto.EncryptedObject> object(@PathVariable String objectId,
+            @RequestHeader(value = "X-TEE-Task-Id", required = false) String taskId) {
+        return SecretPadResponse.success(assetService.readObject(owner(), objectId, taskId));
     }
 
     @GetMapping("/programs/{objectId}")
-    public SecretPadResponse<TeeAssetService.ProgramResult> program(@PathVariable String objectId) {
-        return SecretPadResponse.success(assetService.readProgram(objectId));
+    public SecretPadResponse<TeeAssetService.ProgramResult> program(@PathVariable String objectId,
+            @RequestHeader("X-TEE-Task-Id") String taskId) {
+        return SecretPadResponse.success(assetService.readProgram(owner(), taskId, objectId));
     }
 
     private static String owner() {
