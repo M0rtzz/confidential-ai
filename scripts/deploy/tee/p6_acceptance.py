@@ -305,8 +305,14 @@ def canvas_task(token, fixture):
                          + urlquote(canvas["id"]) + "&nodeId=p6-node-2&runId=" + urlquote(run_id),
                          token=token)
     output = body.get("data", {})
-    if code != 200 or body.get("status", {}).get("code") != 0 \
-            or output.get("encrypted") is not True or output.get("rows"):
+    encrypted_outputs = output.get("encryptedOutputs", []) if isinstance(output, dict) else []
+    if code != 200 or body.get("status", {}).get("code") != 0 or not isinstance(output, dict) \
+            or output.get("available") is not False \
+            or output.get("runtimeMode") != "SIMULATION" \
+            or output.get("attestationVerified") is not False \
+            or output.get("exportState") != "PENDING_APPROVAL" \
+            or output.get("rows") or not encrypted_outputs \
+            or any(item.get("exportState") != "PENDING_APPROVAL" for item in encrypted_outputs):
         raise Failure("P6 画布节点输出暴露明文或缺少密文标记")
     evidence.update({"canvasId": canvas["id"], "runId": run_id,
                      "nodeId": "p6-node-2", "plaintextPreview": False})
