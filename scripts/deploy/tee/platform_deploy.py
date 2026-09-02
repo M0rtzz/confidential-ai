@@ -331,6 +331,9 @@ def port_check(name):
     mapped = set()
     if ids:
         for value in json.loads(run('docker', 'inspect', *ids, capture=True)):
+            # 已停止容器不占用宿主机端口，可保留为显式回滚点。
+            if not value['State']['Running']:
+                continue
             for binds in (value.get('HostConfig', {}).get('PortBindings') or {}).values():
                 for binding in binds or []:
                     port = int(binding['HostPort'])
@@ -339,8 +342,7 @@ def port_check(name):
                     if value['Name'].lstrip('/') not in own:
                         raise RuntimeError(f'端口 {port} 被其他容器保留')
                     managed(value['Name'].lstrip('/'))
-                    if value['State']['Running']:
-                        mapped.add(port)
+                    mapped.add(port)
     for port in ports - mapped:
         with socket.socket() as sock:
             sock.bind(('0.0.0.0', port))

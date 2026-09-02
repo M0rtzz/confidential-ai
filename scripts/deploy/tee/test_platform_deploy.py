@@ -94,12 +94,12 @@ class IsolationTests(unittest.TestCase):
         with patch.object(deploy.subprocess, 'run', return_value=result):
             with self.assertRaises(RuntimeError): deploy.managed('data-sandbox-dev-center-secretpad')
 
-    def test_stopped_foreign_container_reserves_ports(self):
+    def test_stopped_foreign_container_does_not_reserve_ports(self):
         def run(*args, **kwargs):
             if args[:3] == ('docker', 'ps', '-aq'): return 'foreign-id'
             return json.dumps([{'Name': '/foreign', 'HostConfig': {'PortBindings': {'80/tcp': [{'HostPort': '19688'}]}}, 'State': {'Running': False}}])
         with patch.object(deploy, 'run', side_effect=run):
-            with self.assertRaises(RuntimeError): deploy.port_check('center')
+            deploy.port_check('center')
 
     def test_digest_drift_blocks_image_use(self):
         with patch.object(deploy, 'manifest', return_value={'images': {'probe': {'ref': 'probe:fixed', 'id': 'sha256:old'}}}), patch.object(deploy, 'image_info', return_value={'Id': 'sha256:new'}):
@@ -498,8 +498,7 @@ class CrossInstanceChannelTests(unittest.TestCase):
             return json.dumps([{'Name': '/foreign', 'HostConfig': {'PortBindings': {
                 '8443/tcp': [{'HostPort': str(deploy.CONTRACT_PORT)}]}}, 'State': {'Running': False}}])
         with patch.object(deploy, 'run', side_effect=run):
-            with self.assertRaises(RuntimeError):
-                deploy.port_check('center')
+            deploy.port_check('center')
 
     def test_contract_server_certificate_covers_the_published_address(self):
         names = foundation.subject_alt_names(foundation.CONTRACT_SERVER_CN, True)
