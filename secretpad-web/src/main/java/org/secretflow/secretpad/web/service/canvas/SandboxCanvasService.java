@@ -248,6 +248,8 @@ public class SandboxCanvasService {
         }
         Map<String, Object> taskPreview = taskPreview(nodeRun, table, nodeId, resolvedRunId);
         if (taskPreview != null) return taskPreview;
+        Map<String, Object> teeOutput = teeTaskOutput(nodeRun, table, nodeId, resolvedRunId);
+        if (teeOutput != null) return teeOutput;
         return unavailableOutput(table, resolvedRunId, nodeId,
                 legacySharedTable ? "该历史运行的完整结果已被后续运行覆盖，且没有可恢复的任务预览"
                         : "该运行的结果表和任务预览均不可用");
@@ -304,6 +306,31 @@ public class SandboxCanvasService {
         result.put("displayName", table);
         result.put("snapshotSource", "TASK_PREVIEW");
         result.put("previewOnly", true);
+        return result;
+    }
+
+    /** TEE DATA/MODEL 只展示已验签的密文对象元数据，不读取或伪造明文预览。 */
+    private Map<String, Object> teeTaskOutput(Map<String, Object> nodeRun, String table, String nodeId, String runId) {
+        Map<String, Object> summary = parseMapOrEmpty(string(nodeRun.get("result_summary")));
+        if (!"SIMULATION".equals(string(summary.get("runtimeMode")))) {
+            return null;
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("tableName", table);
+        result.put("displayName", table);
+        result.put("available", false);
+        result.put("message", "TEE 结果为密文对象，导出审批完成前不提供明文预览");
+        result.put("schema", List.of());
+        result.put("rows", List.of());
+        result.put("totalRows", 0);
+        result.put("nodeId", nodeId);
+        result.put("runId", runId);
+        result.put("taskId", nodeRun.get("task_id"));
+        result.put("runtimeMode", "SIMULATION");
+        result.put("attestationVerified", false);
+        result.put("reports", summary.getOrDefault("reports", List.of()));
+        result.put("encryptedOutputs", summary.getOrDefault("encryptedOutputs", List.of()));
+        result.put("exportState", "PENDING_APPROVAL");
         return result;
     }
 
@@ -2210,11 +2237,14 @@ public class SandboxCanvasService {
                 dataControl.requireMountTableUsable(sandboxId, compareTable);
                 params.put("compare_table", compareTable);
             }
-            byte[] inputCsv = sandboxDb.readTableCsv(sandboxId, inputTable);
-            if (inputCsv.length > MAX_INPUT_BYTES) {
-                throw new IllegalArgumentException("输入数据超过 " + MAX_INPUT_BYTES + " 字节上限（当前 " + inputCsv.length + "），请先在数据开发中做行数裁剪");
+            String inputB64 = "";
+            if (!devJobExecutor.teeEnabled()) {
+                byte[] inputCsv = sandboxDb.readTableCsv(sandboxId, inputTable);
+                if (inputCsv.length > MAX_INPUT_BYTES) {
+                    throw new IllegalArgumentException("输入数据超过 " + MAX_INPUT_BYTES + " 字节上限（当前 " + inputCsv.length + "），请先在数据开发中做行数裁剪");
+                }
+                inputB64 = Base64.getEncoder().encodeToString(inputCsv);
             }
-            String inputB64 = Base64.getEncoder().encodeToString(inputCsv);
             String outputTable = opTableName(runId, node.id);
             String taskId = dataDevService.createCanvasTask(sandboxId, canvasId, node.id, node.componentCode,
                     CanvasOperatorRegistry.RENDER_SCRIPT, params, List.of(), outputTable);
@@ -2229,6 +2259,19 @@ public class SandboxCanvasService {
             Map<String, Object> result = devJobExecutor.runAndAwait(taskId);
             if (!"SUCCEEDED".equals(string(result.get("status")))) {
                 throw new IllegalStateException("节点执行失败: " + string(result.get("errorMessage")));
+            }
+            if ("SIMULATION".equals(string(result.get("runtimeMode")))) {
+                Map<String, Object> summary = new LinkedHashMap<>();
+                summary.put("runtimeMode", "SIMULATION");
+                summary.put("attestationVerified", false);
+                summary.put("reports", result.getOrDefault("reports", List.of()));
+                summary.put("encryptedOutputs", result.getOrDefault("encryptedOutputs", List.of()));
+                jdbc.update("update ds_compute_node_run set status='SUCCEEDED',task_id=?,input_table=?,output_table=?,"
+                                + "result_summary=?,model_b64='',fit_params='',finished_at=?,updated_at=? where id=?",
+                        taskId, inputTable, outputTable, json(summary), now(), now(), nodeRunId);
+                audit("CANVAS_NODE_TEE_SUCCEEDED", "COMPUTE_NODE_RUN", nodeRunId,
+                        "node=" + node.id + " op=" + node.componentCode + " encrypted=true", true);
+                return;
             }
             @SuppressWarnings("unchecked")
             List<String> header = (List<String>) result.get("header");

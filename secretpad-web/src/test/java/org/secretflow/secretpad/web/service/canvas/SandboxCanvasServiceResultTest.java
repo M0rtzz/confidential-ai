@@ -114,6 +114,38 @@ class SandboxCanvasServiceResultTest {
         verify(sandboxDb, never()).previewTable(anyString(), anyString(), ArgumentMatchers.anyInt());
     }
 
+    @Test
+    void shouldExposeEncryptedTeeOutputWithoutPlaintextPreview() {
+        stubCommonRows(Map.of(
+                "id", "nr-tee",
+                "run_id", "run-old",
+                "component_code", "ml.train",
+                "output_table", "op_canvas_1_node_1",
+                "task_id", "task-tee",
+                "result_summary", "{\"runtimeMode\":\"SIMULATION\",\"attestationVerified\":false,"
+                        + "\"reports\":[],\"encryptedOutputs\":[{\"kind\":\"MODEL\","
+                        + "\"resultId\":\"result-1\",\"exportState\":\"PENDING_APPROVAL\"}]}"));
+        when(jdbc.queryForList(
+                "select id from ds_compute_node_run where canvas_id=? and node_id=? "
+                        + "and status='SUCCEEDED' and deleted=0 order by finished_at desc,created_at desc limit 1",
+                "canvas-1", "node-1")).thenReturn(List.of(Map.of("id", "nr-tee")));
+        when(jdbc.queryForList(
+                "select result_preview,result_rows from ds_dev_task where id=? and status='SUCCEEDED' and deleted=0",
+                "task-tee")).thenReturn(List.of(Map.of(
+                        "result_preview", "{\"runtimeMode\":\"SIMULATION\",\"encryptedOutputs\":[]}",
+                        "result_rows", 0)));
+        when(sandboxDb.hasTable("sandbox-1", "op_canvas_1_node_1")).thenReturn(false);
+
+        Map<String, Object> result = service.nodeOutput("canvas-1", "node-1", "run-old", 50);
+
+        assertThat(result).containsEntry("available", false)
+                .containsEntry("runtimeMode", "SIMULATION")
+                .containsEntry("attestationVerified", false)
+                .containsEntry("exportState", "PENDING_APPROVAL");
+        assertThat(result.get("encryptedOutputs")).asList().hasSize(1);
+        verify(sandboxDb, never()).previewTable(anyString(), anyString(), ArgumentMatchers.anyInt());
+    }
+
     private void stubCommonRows(Map<String, Object> nodeRun) {
         when(jdbc.queryForList("select * from ds_compute_canvas where id=? and deleted=0", "canvas-1"))
                 .thenReturn(List.of(Map.of("id", "canvas-1", "sandbox_id", "sandbox-1")));

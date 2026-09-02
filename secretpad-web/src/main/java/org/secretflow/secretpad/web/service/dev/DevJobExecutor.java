@@ -408,6 +408,11 @@ public class DevJobExecutor {
         return syncResult(task, startNanos);
     }
 
+    /** 供画布执行层在 TEE 模式下避开明文读取和结果表回填。 */
+    public boolean teeEnabled() {
+        return teeDispatcher.enabled();
+    }
+
     /** 组装同步执行结果：SUCCEEDED 读结果 CSV 全量行，其余返回状态/错误/耗时。 */
     private Map<String, Object> syncResult(Map<String, Object> task, long startNanos) {
         long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
@@ -418,12 +423,13 @@ public class DevJobExecutor {
         List<String> header = new ArrayList<>();
         List<List<String>> rows = new ArrayList<>();
         if (STATUS_RUNNING.equals(string(task.get("status"))) || "SUCCEEDED".equals(string(task.get("status")))) {
+            Map<String, Object> preview = parsePreview(string(task.get("result_preview")));
+            copyTeeResultMetadata(preview, result);
             List<List<String>> parsed = readResultCsv(task);
             if (!parsed.isEmpty()) {
                 header = new ArrayList<>(parsed.get(0));
                 rows = parsed.size() > 1 ? new ArrayList<>(parsed.subList(1, parsed.size())) : new ArrayList<>();
             } else {
-                Map<String, Object> preview = parsePreview(string(task.get("result_preview")));
                 @SuppressWarnings("unchecked")
                 List<Object> previewHeader = preview.get("header") instanceof List<?> list ? (List<Object>) list : new ArrayList<>();
                 header = new ArrayList<>();
@@ -454,6 +460,16 @@ public class DevJobExecutor {
         result.put("header", header);
         result.put("rows", rows);
         return result;
+    }
+
+    static void copyTeeResultMetadata(Map<String, Object> preview, Map<String, Object> result) {
+        if (!"SIMULATION".equals(string(preview.get("runtimeMode")))) {
+            return;
+        }
+        result.put("runtimeMode", "SIMULATION");
+        result.put("attestationVerified", false);
+        result.put("reports", preview.getOrDefault("reports", List.of()));
+        result.put("encryptedOutputs", preview.getOrDefault("encryptedOutputs", List.of()));
     }
 
     /** 将已验签 REPORT 转为现有同步调用可消费的表形态，不接触 DATA/MODEL 密文。 */

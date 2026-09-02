@@ -25,6 +25,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class DevJobExecutorTest {
 
     @Test
+    void shouldExposeOnlyTeeMetadataToSynchronousCaller() {
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        DevJobExecutor.copyTeeResultMetadata(Map.of(
+                "runtimeMode", "SIMULATION",
+                "attestationVerified", false,
+                "reports", List.of(Map.of("reportKind", "FEATURE_IMPORTANCE")),
+                "encryptedOutputs", List.of(Map.of("kind", "MODEL", "exportState", "PENDING_APPROVAL"))), result);
+
+        assertEquals("SIMULATION", result.get("runtimeMode"));
+        assertEquals(false, result.get("attestationVerified"));
+        assertEquals(1, ((List<?>) result.get("encryptedOutputs")).size());
+        assertTrue(!result.containsKey("header") && !result.containsKey("rows"));
+        assertTrue(!result.containsKey("input_csv_b64") && !result.containsKey("sandbox_db_b64"));
+    }
+
+    @Test
     void teeTaskInputContainsOnlySignedTask() {
         var config = DevJobExecutor.teeTaskInputConfig("header.payload.signature");
         assertEquals(1, config.size());
