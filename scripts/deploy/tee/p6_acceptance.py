@@ -274,8 +274,9 @@ def canvas_task(token, fixture):
     job = None
     while time.monotonic() < deadline:
         if not task_id:
-            task_id = scalar("select task_id from ds_compute_node_run where run_id=" + quote(run_id)
-                             + " and component_code='preprocessing.standardize';")
+            task_id = scalar("select id from ds_dev_task where sandbox_id="
+                             + quote(fixture["sandboxId"])
+                             + " and channel='tee:canvas' and deleted=0 order by created_at desc limit 1;")
         if task_id and job is None:
             submitted = task_row(task_id)
             if submitted["jobId"]:
@@ -291,6 +292,10 @@ def canvas_task(token, fixture):
         time.sleep(2)
     else:
         raise Failure("P6 画布运行超时")
+    linked_task = scalar("select task_id from ds_compute_node_run where run_id=" + quote(run_id)
+                         + " and component_code='preprocessing.standardize';")
+    if linked_task != task_id:
+        raise Failure("P6 画布节点与捕获的 TEE 任务绑定不一致")
     row = wait_task(task_id)
     if job is None:
         raise Failure("P6 画布任务未能在删除前捕获 Kuscia Job")
