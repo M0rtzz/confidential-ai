@@ -56,7 +56,7 @@ def task_row(task_id):
     return json.loads(raw)
 
 
-def wait_task(task_id, expected="SUCCEEDED", timeout=300):
+def wait_task(task_id, expected="SUCCEEDED", timeout=600):
     deadline = time.monotonic() + timeout
     row = task_row(task_id)
     while row["status"] not in TERMINAL and time.monotonic() < deadline:

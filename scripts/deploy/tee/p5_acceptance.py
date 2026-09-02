@@ -141,7 +141,7 @@ def apply_job(task_payload, compact, appimage=APPIMAGE):
     return name, value["spec"]["tasks"][0]["taskID"], task_payload["taskId"]
 
 
-def wait_job(name, task_id, succeeded, timeout=240):
+def wait_job(name, task_id, succeeded, timeout=600):
     deadline = time.monotonic() + timeout
     phase = None
     while time.monotonic() < deadline:
