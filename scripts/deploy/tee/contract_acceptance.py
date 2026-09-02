@@ -749,8 +749,8 @@ def run():
                 'recipientCertPem': workload_cert}, center_token, 'CONTRACT_INVALID')
 
         # 32 运行时写回结果对象；存储与读回都是密文
-        result_object = encrypt(result_key, b'metric,value\nauc,0.91\n', 'result-' + result_id,
-                                result_task['taskId'], output['keyEnvelope']['keyId'],
+        result_object = encrypt(result_key, b'metric,value\nauc,0.91\n', result_id, 1,
+                                output['keyEnvelope']['keyId'],
                                 output['keyEnvelope']['keyVersion'])
         written = expect_ok('结果对象写入', '/v1alpha1/tee/objects', {
             'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskId': result_task['taskId'],
