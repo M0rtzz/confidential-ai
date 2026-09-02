@@ -731,9 +731,13 @@ def run():
 
         # 31 结果密钥：DATA 可申领，REPORT 不需要结果密钥
         result_task = task_for()
+        result_task_jws = sign_task(result_task)
+        expect_ok('结果任务放行', '/v1alpha1/tee/runtime/release', {
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskJws': result_task_jws,
+            'attestationEvidence': None, 'recipientCertPem': workload_cert}, center_token)
         result_id = 'res-' + uuid4().hex[:10]
         output = expect_ok('结果密钥申领', '/v1alpha1/tee/runtime/output-key', {
-            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskJws': sign_task(result_task),
+            'contractVersion': CONTRACT, 'requestId': uuid4().hex, 'taskJws': result_task_jws,
             'resultId': result_id, 'resultKind': 'DATA',
             'recipientCertPem': workload_cert}, center_token)
         result_key = unwrap(output['keyEnvelope'], CENTER / 'tee/workload-cert/client.key')
