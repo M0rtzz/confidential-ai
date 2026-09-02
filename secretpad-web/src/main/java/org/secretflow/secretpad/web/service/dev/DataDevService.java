@@ -548,15 +548,19 @@ public class DataDevService {
             throw new IllegalArgumentException(DevErrors.DEV_RESULT_NOT_CONSUMABLE
                     + ": 画布节点输出表（op_*）仅画布内部消费，不能作为数据开发任务源: " + sourceTable);
         }
-        Map<String, Object> src = sandboxDb.readTable(sandboxId, sourceTable);
-        List<String> header = stringList(src.get("header"));
-        List<List<String>> data = rowList(src.get("rows"));
-        if (data.size() > maxInputRows) {
-            throw new IllegalArgumentException(DevErrors.DEV_INPUT_TOO_LARGE
-                    + ": 源表行数 " + data.size() + " 超过上限 " + maxInputRows);
-        }
-        if (header.isEmpty()) {
-            throw new IllegalArgumentException(DevErrors.DEV_PARAM_INVALID + ": 源表表头为空");
+        List<String> header = List.of();
+        List<List<String>> data = List.of();
+        if (!devJobExecutor.teeEnabled()) {
+            Map<String, Object> src = sandboxDb.readTable(sandboxId, sourceTable);
+            header = stringList(src.get("header"));
+            data = rowList(src.get("rows"));
+            if (data.size() > maxInputRows) {
+                throw new IllegalArgumentException(DevErrors.DEV_INPUT_TOO_LARGE
+                        + ": 源表行数 " + data.size() + " 超过上限 " + maxInputRows);
+            }
+            if (header.isEmpty()) {
+                throw new IllegalArgumentException(DevErrors.DEV_PARAM_INVALID + ": 源表表头为空");
+            }
         }
         Map<String, Object> params = new LinkedHashMap<>();
         if (request.get("params") instanceof Map<?, ?> paramsMap) {
