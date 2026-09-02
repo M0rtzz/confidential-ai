@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 
 from platform_deploy import RUNTIME, CONTRACT_CENTER_URL, atomic, checked_image, manifest, run
 from foundation import DOMAIN, import_image, kube, kube_labels, runtime_image
@@ -86,10 +87,19 @@ def register():
                              'allowPrivilegeEscalation': False,
                              'capabilities': {'drop': ['ALL'],
                                               'add': ['CHOWN', 'SETUID', 'SETGID']}}}]}}]}}
+    try:
+        current = json.loads(kube('center', 'get', 'appimage', APPIMAGE_NAME, '-o', 'json'))
+    except subprocess.CalledProcessError:
+        current = {}
+    resource_version = current.get('metadata', {}).get('resourceVersion')
+    if resource_version:
+        appimage['metadata']['resourceVersion'] = resource_version
     kube('center', 'apply', '-f', '-', value=appimage)
+    appimage_digest = json.loads(json.dumps(appimage))
+    appimage_digest['metadata'].pop('resourceVersion', None)
     evidence = {'contractVersion': 'tee-contract/1.0', 'appImage': APPIMAGE_NAME,
                 'imageRef': image, 'imageId': image_id, 'builtinSha256': builtin_sha256,
                 'appImageSha256': hashlib.sha256(
-                    json.dumps(appimage, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+                    json.dumps(appimage_digest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
     atomic(RUNTIME / 'center/tee/p5-runtime-registration.json', evidence, 0o600)
     print(f'{APPIMAGE_NAME} 已登记，镜像摘要 {image_id}；私钥仅来自 Kuscia Secret。')
