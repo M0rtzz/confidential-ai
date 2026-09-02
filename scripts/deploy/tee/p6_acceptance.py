@@ -39,7 +39,8 @@ def scalar(statement):
         ["docker", "exec", "-i", SECRETPAD, "sqlite3", "/app/db/secretpad.sqlite"],
         input=("pragma busy_timeout=8000;\n" + statement + "\n").encode(), check=True,
         stdout=subprocess.PIPE).stdout.decode().strip()
-    return result
+    lines = result.splitlines()
+    return lines[-1] if lines else ""
 
 
 def task_row(task_id):
