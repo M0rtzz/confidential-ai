@@ -280,6 +280,11 @@ def run():
     token, owner = login("CLIENT")
     asset_id = "asset-p6-" + uuid4().hex[:12]
     fixture = install_approval("center", owner, asset_id, ALL_COLUMNS, OPERATORS)
+    env = dict(line.split("=", 1) for line in
+               (CENTER / "secretpad.env").read_text().splitlines() if "=" in line)
+    sqlite("center", ["update ds_sandbox set created_by="
+                      + quote(env["SECRETPAD_USER_NAME"])
+                      + " where id=" + quote(fixture["sandboxId"]) + ";"])
     fixture["assetId"] = asset_id
     checks = {}
     try:

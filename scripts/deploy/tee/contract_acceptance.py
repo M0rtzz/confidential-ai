@@ -80,7 +80,9 @@ def login(end_role=None, instance='center'):
 def expect_ok(name, path, payload, token, instance='center'):
     code, body = request(path, payload, token, instance)
     if code != 200 or body.get('status', {}).get('code') != 0:
-        raise Failure(f'{name} 应成功但被拒绝：{body.get("data", {}).get("errorCode")}')
+        data = body.get('data') or {}
+        detail = data.get('errorCode') or body.get('status', {}).get('msg') or f'HTTP {code}'
+        raise Failure(f'{name} 应成功但被拒绝：{detail}')
     return body['data']
 
 
