@@ -408,11 +408,6 @@ public class DevJobExecutor {
         return syncResult(task, startNanos);
     }
 
-    /** 供画布执行层在 TEE 模式下避开明文读取和结果表回填。 */
-    public boolean teeEnabled() {
-        return teeDispatcher.enabled();
-    }
-
     /** 组装同步执行结果：SUCCEEDED 读结果 CSV 全量行，其余返回状态/错误/耗时。 */
     private Map<String, Object> syncResult(Map<String, Object> task, long startNanos) {
         long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
