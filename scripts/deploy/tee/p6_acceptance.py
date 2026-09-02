@@ -68,10 +68,14 @@ def wait_task(task_id, expected="SUCCEEDED", timeout=300):
 
 def kube_job(job_id):
     output = subprocess.run(
-        ["docker", "exec", KUSCIA, "kubectl", "get", "kusciajob", job_id,
-         "-n", "cross-domain", "-o", "json"], check=True, text=True,
+        ["docker", "exec", KUSCIA, "kubectl", "get", "kusciajobs", "-A", "-o", "json"],
+        check=True, text=True,
         stdout=subprocess.PIPE).stdout
-    return json.loads(output)
+    matches = [item for item in json.loads(output).get("items", [])
+               if item.get("metadata", {}).get("name") == job_id]
+    if len(matches) != 1:
+        raise Failure("P6 Kuscia Job 不存在或不唯一：" + job_id)
+    return matches[0]
 
 
 def receipt(task_id):
@@ -85,7 +89,7 @@ def receipt(task_id):
 def validate_task(label, row, expected_kind, expected_operator):
     if not row["jobId"] or not row["jws"]:
         raise Failure(label + " 未保存 Kuscia Job 或 JWS")
-    job = kube_job(row["jobId"])
+    job = row.get("capturedJob") or kube_job(row["jobId"])
     tasks = job.get("spec", {}).get("tasks", [])
     if len(tasks) != 1:
         raise Failure(label + " 未保持一任务一 Job")
@@ -157,7 +161,11 @@ def submit_task(token, fixture, exec_type, **extra):
     payload.update(extra)
     data = expect_ok("P6 " + exec_type + " 提交", "/v1alpha1/data-dev/tasks/submit-sandbox",
                      payload, token)
-    return wait_task(data["id"])
+    submitted = task_row(data["id"])
+    job = kube_job(submitted["jobId"])
+    completed = wait_task(data["id"])
+    completed["capturedJob"] = job
+    return completed
 
 
 def build_jar():
@@ -252,7 +260,19 @@ def canvas_task(token, fixture):
                         {"canvasId": canvas["id"], "mode": "ALL"}, token)
     deadline = time.monotonic() + 360
     run_id = started["id"]
+    task_id = ""
+    job = None
     while time.monotonic() < deadline:
+        if not task_id:
+            task_id = scalar("select task_id from ds_compute_node_run where run_id=" + quote(run_id)
+                             + " and component_code='preprocessing.standardize';")
+        if task_id and job is None:
+            submitted = task_row(task_id)
+            if submitted["jobId"]:
+                try:
+                    job = kube_job(submitted["jobId"])
+                except Failure:
+                    pass
         raw = scalar("select status from ds_compute_run where id=" + quote(run_id) + ";")
         if raw in TERMINAL:
             if raw != "SUCCEEDED":
@@ -261,9 +281,10 @@ def canvas_task(token, fixture):
         time.sleep(2)
     else:
         raise Failure("P6 画布运行超时")
-    task_id = scalar("select task_id from ds_compute_node_run where run_id=" + quote(run_id)
-                     + " and component_code='preprocessing.standardize';")
     row = wait_task(task_id)
+    if job is None:
+        raise Failure("P6 画布任务未能在删除前捕获 Kuscia Job")
+    row["capturedJob"] = job
     evidence = validate_task("可视化建模", row, "BUILTIN", "preprocessing.standardize")
     code, body = request("/v1alpha1/data-compute/canvas/node/output?canvasId="
                          + urlquote(canvas["id"]) + "&nodeId=p6-node-2&runId=" + urlquote(run_id),
