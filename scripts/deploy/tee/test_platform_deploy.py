@@ -98,7 +98,7 @@ class IsolationTests(unittest.TestCase):
         def run(*args, **kwargs):
             if args[:3] == ('docker', 'ps', '-aq'): return 'foreign-id'
             return json.dumps([{'Name': '/foreign', 'HostConfig': {'PortBindings': {'80/tcp': [{'HostPort': '19688'}]}}, 'State': {'Running': False}}])
-        with patch.object(deploy, 'run', side_effect=run):
+        with patch.object(deploy, 'run', side_effect=run), patch.object(deploy.socket, 'socket'):
             deploy.port_check('center')
 
     def test_digest_drift_blocks_image_use(self):
@@ -497,7 +497,7 @@ class CrossInstanceChannelTests(unittest.TestCase):
                 return 'foreign-id'
             return json.dumps([{'Name': '/foreign', 'HostConfig': {'PortBindings': {
                 '8443/tcp': [{'HostPort': str(deploy.CONTRACT_PORT)}]}}, 'State': {'Running': False}}])
-        with patch.object(deploy, 'run', side_effect=run):
+        with patch.object(deploy, 'run', side_effect=run), patch.object(deploy.socket, 'socket'):
             deploy.port_check('center')
 
     def test_contract_server_certificate_covers_the_published_address(self):
