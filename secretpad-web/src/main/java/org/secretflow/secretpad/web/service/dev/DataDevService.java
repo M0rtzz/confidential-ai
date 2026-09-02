@@ -490,13 +490,14 @@ public class DataDevService {
         if (!notBlank(relativeUri)) {
             throw new IllegalArgumentException(DevErrors.DEV_NOT_FOUND + ": 源数据表缺少 relativeUri");
         }
-        List<List<String>> parsed = readCsv(source.getNodeId(), relativeUri);
+        List<List<String>> parsed = devJobExecutor.teeEnabled()
+                ? List.of() : readCsv(source.getNodeId(), relativeUri);
         List<String> header = parsed.isEmpty() ? new ArrayList<>() : new ArrayList<>(parsed.get(0));
         List<List<String>> data = parsed.size() > 1 ? new ArrayList<>(parsed.subList(1, parsed.size())) : new ArrayList<>();
         if (data.size() > maxInputRows) {
             throw new IllegalArgumentException(DevErrors.DEV_INPUT_TOO_LARGE + ": 源数据行数 " + data.size() + " 超过上限 " + maxInputRows);
         }
-        if (header.isEmpty()) {
+        if (!devJobExecutor.teeEnabled() && header.isEmpty()) {
             throw new IllegalArgumentException(DevErrors.DEV_PARAM_INVALID + ": 源 CSV 表头为空");
         }
         Map<String, Object> params = new LinkedHashMap<>();
@@ -1051,8 +1052,12 @@ public class DataDevService {
         String datatableId = string(task.get("source_datatable_id"));
         String relativeUri = string(task.get("source_relative_uri"));
         checkSourcePermission(currentUser(), nodeId, datatableId);
-        DatatableDTO source = resolveSource(nodeId, datatableId);
-        List<List<String>> parsed = readCsv(source.getNodeId(), relativeUri);
+        DatatableDTO source = null;
+        List<List<String>> parsed = List.of();
+        if (!devJobExecutor.teeEnabled()) {
+            source = resolveSource(nodeId, datatableId);
+            parsed = readCsv(source.getNodeId(), relativeUri);
+        }
         List<String> header = parsed.isEmpty() ? new ArrayList<>() : new ArrayList<>(parsed.get(0));
         List<List<String>> data = parsed.size() > 1 ? new ArrayList<>(parsed.subList(1, parsed.size())) : new ArrayList<>();
         if (data.size() > maxInputRows) {
@@ -1129,12 +1134,16 @@ public class DataDevService {
             throw new IllegalArgumentException(DevErrors.DEV_RESULT_NOT_CONSUMABLE
                     + ": 画布节点输出表（op_*）仅画布内部消费，不能作为数据开发任务源: " + sourceTable);
         }
-        Map<String, Object> src = sandboxDb.readTable(sandboxId, sourceTable);
-        List<String> header = stringList(src.get("header"));
-        List<List<String>> data = rowList(src.get("rows"));
-        if (data.size() > maxInputRows) {
-            throw new IllegalArgumentException(DevErrors.DEV_INPUT_TOO_LARGE
-                    + ": 源表行数 " + data.size() + " 超过上限 " + maxInputRows);
+        List<String> header = List.of();
+        List<List<String>> data = List.of();
+        if (!devJobExecutor.teeEnabled()) {
+            Map<String, Object> src = sandboxDb.readTable(sandboxId, sourceTable);
+            header = stringList(src.get("header"));
+            data = rowList(src.get("rows"));
+            if (data.size() > maxInputRows) {
+                throw new IllegalArgumentException(DevErrors.DEV_INPUT_TOO_LARGE
+                        + ": 源表行数 " + data.size() + " 超过上限 " + maxInputRows);
+            }
         }
         Map<String, Object> params = parseJsonMap(string(task.get("params")));
         String nodeId = string(task.get("source_node_id"));
@@ -1419,7 +1428,8 @@ public class DataDevService {
      * 输入表在 submit 时显式指定（挂载表或上游 op_*）；output_table 预写 op_{canvasId}_{nodeId}。
      */
     public String createCanvasTask(String sandboxId, String canvasId, String nodeId, String componentCode,
-            String script, Map<String, Object> params, List<String> dependencyNames, String outputTable) {
+            String script, Map<String, Object> params, List<String> dependencyNames,
+            String inputTable, String outputTable) {
         Map<String, Object> sandbox = requireRow("select project_id,owner_id from ds_sandbox where id=? and deleted=0", sandboxId);
         requireSandboxCreator(sandboxId, "");
         String taskId = "dt-" + shortId();
@@ -1433,7 +1443,7 @@ public class DataDevService {
                 taskId, "画布节点-" + componentCode, "画布执行节点任务", "", 0, "DEV", "PYTHON",
                 string(sandbox.get("owner_id")), "", "", json(params), script, json(dependencyNames),
                 actor(), now, now, now, string(sandbox.get("project_id")), sandboxId,
-                "", "", "", outputTable, "", 0, "", "");
+                "", "", inputTable, outputTable, "", 0, "", "");
         return taskId;
     }
 

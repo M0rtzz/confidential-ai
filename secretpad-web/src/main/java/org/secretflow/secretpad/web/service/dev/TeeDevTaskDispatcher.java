@@ -139,7 +139,6 @@ public class TeeDevTaskDispatcher {
             throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "密文资产登记绑定不一致");
         }
 
-        List<String> columns = selectedColumns(inputB64, asset.getSchemaJson());
         Map<String, Object> programParameters = new LinkedHashMap<>();
         if (params != null) {
             programParameters.putAll(params);
@@ -165,6 +164,7 @@ public class TeeDevTaskDispatcher {
                 || !sandboxId.equals(policy.getSandboxId())) {
             throw policyDenied("密文资产的授权规则未覆盖当前沙箱");
         }
+        List<String> columns = selectedColumns(inputB64, asset.getSchemaJson(), policyService.columns(policy));
         policyService.requireAllows(policy, columns, operatorId);
         List<String> reportKinds = REPORT_KINDS.containsKey(operatorId)
                 ? List.of(REPORT_KINDS.get(operatorId)) : List.of();
@@ -185,7 +185,7 @@ public class TeeDevTaskDispatcher {
                         positive(asset.getUpk().getAssetVersion(), "assetVersion"), asset.getKeyId(),
                         positive(asset.getKeyVersion(), "keyVersion"), asset.getPolicyId(),
                         positive(asset.getPolicyVersion(), "policyVersion"), asset.getObjectId(),
-                        object.getCiphertextSha256(), object.getSizeBytes())),
+                        object.getCiphertextSha256(), plaintextBytes(assetId))),
                 program, issuedAt.toString(), issuedAt.plusSeconds(lifetime).toString(), nonce,
                 new TeeTaskSpec.OutputPolicy(reportKinds, true, true, true), runtimeImageDigest);
         String compact = compactJws(mapper, spec, readPrivateKey(Path.of(signerKey)), signerKid);
@@ -305,14 +305,35 @@ public class TeeDevTaskDispatcher {
         throw contract("TEE 任务无法解析已登记密文输入资产");
     }
 
-    private List<String> selectedColumns(String inputB64, String schemaJson) {
+    /** 明文长度来自资产登记元数据；中心端无需也不得通过解密推断该字段。 */
+    private long plaintextBytes(String assetId) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "select metadata_json from ds_data_asset where id=? and deleted=0 and status='ACTIVE' limit 1",
+                assetId);
+        if (rows.size() != 1) {
+            throw contract("密文资产缺少明文长度登记");
+        }
+        try {
+            JsonNode metadata = mapper.readTree(text(rows.get(0).get("metadata_json")));
+            JsonNode value = metadata.get("plaintextBytes");
+            if (value == null || !value.canConvertToLong() || value.longValue() <= 0) {
+                throw new IllegalArgumentException("invalid plaintextBytes");
+            }
+            return value.longValue();
+        } catch (Exception failure) {
+            throw contract("密文资产明文长度登记无效");
+        }
+    }
+
+    private List<String> selectedColumns(String inputB64, String schemaJson, List<String> policyColumns) {
         List<String> registered;
         try {
             registered = mapper.readerForListOf(String.class).readValue(schemaJson);
         } catch (Exception failure) {
             throw contract("密文资产表结构损坏");
         }
-        List<String> selected = new ArrayList<>(registered);
+        // TEE 调度不依赖平台侧明文表头；默认使用审批规则中冻结的列范围。
+        List<String> selected = new ArrayList<>(policyColumns);
         if (inputB64 != null && !inputB64.isBlank()) {
             try {
                 List<List<String>> csv = CsvUtil.parse(new String(Base64.getDecoder().decode(inputB64),

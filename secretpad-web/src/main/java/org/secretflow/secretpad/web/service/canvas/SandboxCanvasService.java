@@ -911,13 +911,16 @@ public class SandboxCanvasService {
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("op", operatorCode);
         String taskId = dataDevService.createCanvasTask(sandboxId, canvasId, nodeId, operatorCode,
-                compatibleScript, params, List.of(), outputTable);
+                compatibleScript, params, List.of(), inputTable, outputTable);
         dataDevService.claimCanvasTask(taskId);
-        byte[] inputCsv = sandboxDb.readTableCsv(sandboxId, inputTable);
+        String inputB64 = "";
+        if (!devJobExecutor.teeEnabled()) {
+            inputB64 = Base64.getEncoder().encodeToString(sandboxDb.readTableCsv(sandboxId, inputTable));
+        }
         String nodeDomain = string(jdbc.queryForMap(
                 "select owner_id from ds_sandbox where id=? and deleted=0", sandboxId).get("owner_id"));
-        devJobExecutor.submitSandboxChannel(taskId, nodeDomain,
-                Base64.getEncoder().encodeToString(inputCsv), "PYTHON", compatibleScript, params, List.of(),
+        devJobExecutor.submitSandboxChannel(taskId, nodeDomain, inputB64,
+                "PYTHON", compatibleScript, params, List.of(),
                 sandboxId, inputTable, outputTable, new LinkedHashSet<>(Set.of(inputTable)), "canvas");
         Map<String, Object> execution = devJobExecutor.runAndAwait(taskId);
         if (!"SUCCEEDED".equals(string(execution.get("status")))) {
@@ -2247,7 +2250,7 @@ public class SandboxCanvasService {
             }
             String outputTable = opTableName(runId, node.id);
             String taskId = dataDevService.createCanvasTask(sandboxId, canvasId, node.id, node.componentCode,
-                    CanvasOperatorRegistry.RENDER_SCRIPT, params, List.of(), outputTable);
+                    CanvasOperatorRegistry.RENDER_SCRIPT, params, List.of(), inputTable, outputTable);
             dataDevService.claimCanvasTask(taskId);
             Set<String> allowedTables = new LinkedHashSet<>(Set.of(inputTable));
             if (CanvasOperatorRegistry.needsCompareTable(node.componentCode)) {
