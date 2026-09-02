@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote as urlquote
@@ -401,4 +402,6 @@ if __name__ == "__main__":
     except Failure as failure:
         raise SystemExit("P6 真实验收失败：" + str(failure))
     except Exception as error:
-        raise SystemExit("P6 真实验收异常：" + type(error).__name__ + ": " + str(error))
+        frame = traceback.extract_tb(error.__traceback__)[-1]
+        raise SystemExit("P6 真实验收异常：" + type(error).__name__ + ": " + str(error)
+                         + f" ({Path(frame.filename).name}:{frame.lineno})")
