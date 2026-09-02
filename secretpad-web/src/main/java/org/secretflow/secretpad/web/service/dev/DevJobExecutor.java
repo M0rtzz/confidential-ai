@@ -81,6 +81,7 @@ public class DevJobExecutor {
     private final DataSandboxMvpService mvp;
     private final SandboxDbService sandboxDb;
     private final SandboxDataControlService dataControl;
+    private final TeeDevTaskDispatcher teeDispatcher;
 
     @Value("${secretpad.data.dir-path:/app/data/}")
     private String storeDir;
@@ -124,13 +125,19 @@ public class DevJobExecutor {
             KusciaGrpcClientAdapter kuscia,
             DataSandboxMvpService mvp,
             SandboxDbService sandboxDb,
-            SandboxDataControlService dataControl) {
+            SandboxDataControlService dataControl,
+            TeeDevTaskDispatcher teeDispatcher) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.kuscia = kuscia;
         this.mvp = mvp;
         this.sandboxDb = sandboxDb;
         this.dataControl = dataControl;
+        this.teeDispatcher = teeDispatcher;
+    }
+
+    public boolean teeEnabled() {
+        return teeDispatcher.enabled();
     }
 
     /* ------------------------------- 提交 ------------------------------- */
@@ -154,6 +161,13 @@ public class DevJobExecutor {
     public void submit(String taskId, String nodeId, String inputB64, String execType,
             String jarB64OrScript, Map<String, Object> params, List<String> allowedImports, String channel) {
         doSubmit(taskId, nodeId, inputB64, execType, jarB64OrScript, params, allowedImports, channel, null);
+    }
+
+    /** SQL 的 TEE 提交入口；签名参数同时绑定可信运行时内的输入表名。 */
+    public void submitSql(String taskId, String nodeId, String inputB64, String sql,
+                          Map<String, Object> params, String inputTable, String channel) {
+        doSubmit(taskId, nodeId, inputB64, "SQL", sql, params, List.of(), channel,
+                Map.of("input_table", inputTable));
     }
 
     /**
@@ -184,6 +198,11 @@ public class DevJobExecutor {
         if (notBlank(outputTable)) {
             extra.put("output_table", outputTable);
         }
+        if (teeDispatcher.enabled()) {
+            doSubmit(taskId, nodeId, inputB64, execType, jarB64OrScript, params, allowedImports,
+                    channel, extra);
+            return;
+        }
         if (notBlank(sandboxId)) {
             byte[] db = sandboxDb.executionSnapshotBytes(sandboxId, allowedTables);
             if (db.length > maxSandboxDbBytes) {
@@ -210,6 +229,11 @@ public class DevJobExecutor {
         if (notBlank(outputTable)) {
             extra.put("output_table", outputTable);
         }
+        if (teeDispatcher.enabled()) {
+            doSubmit(taskId, nodeId, inputB64, execType, jarB64OrScript, params, allowedImports,
+                    channel, extra);
+            return;
+        }
         if (dbBytes != null && dbBytes.length > 0) {
             if (dbBytes.length > maxSandboxDbBytes) {
                 throw new IllegalStateException(DevErrors.DEV_INPUT_TOO_LARGE
@@ -225,6 +249,10 @@ public class DevJobExecutor {
             Map<String, Object> extraConfig) {
         if (!kusciaEnabled) {
             throw new IllegalStateException(DevErrors.DEV_PARAM_INVALID + ": Kuscia 运行时未启用，无法执行 " + execType + " 任务");
+        }
+        if (teeDispatcher.enabled()) {
+            submitTee(taskId, inputB64, execType, jarB64OrScript, params, allowedImports, channel, extraConfig);
+            return;
         }
         if (!notBlank(jarB64OrScript)) {
             throw new IllegalStateException(DevErrors.DEV_PARAM_INVALID + ": 缺少运行载荷（JAR 字节或脚本）");
@@ -273,10 +301,54 @@ public class DevJobExecutor {
         log.info("Dev {} task {} submitted as Kuscia job {} channel={}", execType, taskId, jobId, channel);
     }
 
+    /** P6 路径：Job 输入固定只含 tee_task_jws，任何失败都不回退旧明文执行器。 */
+    private void submitTee(String taskId, String inputB64, String execType, String content,
+                           Map<String, Object> params, List<String> allowedImports, String channel,
+                           Map<String, Object> executionParameters) {
+        TeeDevTaskDispatcher.Submission submission = teeDispatcher.prepare(taskId, inputB64, execType,
+                content, params, allowedImports, channel, executionParameters);
+        String jobId = "tee-" + taskId;
+        String kusciaTaskId = jobId + "-task";
+        Job.Party party = Job.Party.newBuilder().setDomainId(submission.nodeId()).setRole("server")
+                .setResources(Job.JobResource.newBuilder().setCpu(cpu).setMemory(memory)).build();
+        String taskInputConfig = json(teeTaskInputConfig(submission.taskJws()));
+        Job.Task task = Job.Task.newBuilder().setTaskId(kusciaTaskId).setAlias("tee-runtime")
+                .setAppImage(submission.appImage()).addParties(party)
+                .setTaskInputConfig(taskInputConfig).build();
+        try {
+            Job.CreateJobResponse response = kuscia.createJob(Job.CreateJobRequest.newBuilder()
+                    .setJobId(jobId).setInitiator(submission.nodeId()).setMaxParallelism(1).addTasks(task)
+                    .putCustomFields("task_id", taskId).putCustomFields("network_policy", NETWORK_POLICY).build());
+            if (response.getStatus().getCode() != 0) {
+                teeDispatcher.mark(taskId, "SUBMIT_FAILED");
+                throw new IllegalStateException("TEE_JOB_SUBMIT_FAILED");
+            }
+        } catch (Exception failure) {
+            teeDispatcher.mark(taskId, "SUBMIT_FAILED");
+            if (failure instanceof IllegalStateException state) {
+                throw state;
+            }
+            throw new IllegalStateException("TEE_JOB_SUBMIT_FAILED");
+        }
+        teeDispatcher.mark(taskId, "SUBMITTED");
+        jdbc.update("update ds_dev_task set kuscia_job_id=?,channel=?,updated_at=? where id=? and status=?",
+                jobId, "tee:" + (channel == null ? "dev" : channel), now(), taskId, STATUS_RUNNING);
+        log.info("TEE task {} submitted as Kuscia job {} type={} channel={}", taskId, jobId, execType, channel);
+    }
+
+    static Map<String, String> teeTaskInputConfig(String taskJws) {
+        return Map.of("tee_task_jws", taskJws);
+    }
+
     /** 停止计算 Job（幂等，jobId 为空返回 ""）。取消/超时终止复用。 */
     public String stop(String jobId, String reason) {
         if (!notBlank(jobId) || !kusciaEnabled) {
             return "";
+        }
+        if (teeDispatcher.enabled() && jobId.startsWith("tee-") && jobId.length() > 4) {
+            teeDispatcher.mark(jobId.substring(4),
+                    reason != null && reason.toLowerCase(Locale.ROOT).contains("timeout")
+                            ? "TIMEOUT" : "CANCELLED");
         }
         try {
             Job.StopJobResponse response = kuscia.stopJob(Job.StopJobRequest.newBuilder().setJobId(jobId).setReason(reason).build());
@@ -369,11 +441,56 @@ public class DevJobExecutor {
                     }
                     rows.add(rowValues);
                 }
+                if (header.isEmpty() && rows.isEmpty()) {
+                    List<List<String>> reportTable = teeReportTable(preview);
+                    if (!reportTable.isEmpty()) {
+                        header = new ArrayList<>(reportTable.get(0));
+                        rows = reportTable.size() > 1
+                                ? new ArrayList<>(reportTable.subList(1, reportTable.size())) : new ArrayList<>();
+                    }
+                }
             }
         }
         result.put("header", header);
         result.put("rows", rows);
         return result;
+    }
+
+    /** 将已验签 REPORT 转为现有同步调用可消费的表形态，不接触 DATA/MODEL 密文。 */
+    static List<List<String>> teeReportTable(Map<String, Object> preview) {
+        if (!(preview.get("reports") instanceof List<?> reports) || reports.isEmpty()
+                || !(reports.get(0) instanceof Map<?, ?> report)) {
+            return List.of();
+        }
+        String kind = string(report.get("reportKind"));
+        if (!(report.get("content") instanceof Map<?, ?> content)) {
+            return List.of();
+        }
+        List<List<String>> table = new ArrayList<>();
+        if ("EVALUATION_METRICS".equals(kind) && content.get("metrics") instanceof Map<?, ?> metrics) {
+            table.add(List.of("metric", "value"));
+            metrics.forEach((name, value) -> table.add(List.of(string(name), string(value))));
+        } else if ("FEATURE_IMPORTANCE".equals(kind)
+                && content.get("features") instanceof List<?> features) {
+            table.add(List.of("feature", "importance"));
+            for (Object value : features) {
+                if (value instanceof Map<?, ?> feature) {
+                    table.add(List.of(string(feature.get("feature")), string(feature.get("importance"))));
+                }
+            }
+        } else if ("TREE_STRUCTURE".equals(kind)) {
+            table.add(List.of("report_kind", "content"));
+            table.add(List.of(kind, jsonStatic(content)));
+        }
+        return table;
+    }
+
+    private static String jsonStatic(Object value) {
+        try {
+            return new ObjectMapper().writeValueAsString(value);
+        } catch (Exception failure) {
+            throw new IllegalStateException("CONTRACT_INVALID");
+        }
     }
 
     /** 读结果 CSV 全量（canonical 路径安全；无 result_uri/不可读返回空列表）。 */
@@ -438,7 +555,8 @@ public class DevJobExecutor {
         // Z-06：channel='api' 的 invoke 任务由 runAndAwait 同步收官，调度器绝不轮询（避免双收官）。
         // canvas 节点任务由 SandboxCanvasService runAndAwait 收官，调度器兜底轮询（后台线程异常退出时防止悬挂）。
         List<Map<String, Object>> tasks = jdbc.queryForList(
-                "select * from ds_dev_task where deleted=0 and status=? and kuscia_job_id<>'' and channel in ('dev','model','canvas')",
+                "select * from ds_dev_task where deleted=0 and status=? and kuscia_job_id<>'' "
+                        + "and (channel in ('dev','model','canvas') or channel like 'tee:%')",
                 STATUS_RUNNING);
         for (Map<String, Object> task : tasks) {
             try {
@@ -466,6 +584,10 @@ public class DevJobExecutor {
             return;
         }
         String state = effectiveKusciaState(response);
+        if (string(task.get("channel")).startsWith("tee:")) {
+            pollTeeTask(task, jobId, state);
+            return;
+        }
         if (state.contains("SUCCEED")) {
             finalizeSuccess(task, jobId, response);
         } else if (state.contains("FAIL") || state.contains("REJECTED")) {
@@ -488,6 +610,80 @@ public class DevJobExecutor {
                 jdbc.update("update ds_dev_task set updated_at=? where id=?", now(), taskId);
             }
         }
+    }
+
+    /** TEE 任务只接受 P5 已验签回执；不读取旧 runner 端点、日志或明文结果。 */
+    private void pollTeeTask(Map<String, Object> task, String jobId, String state) {
+        String taskId = string(task.get("id"));
+        TeeDevTaskDispatcher.Receipt receipt = teeDispatcher.receipt(taskId);
+        boolean terminal = state.contains("SUCCEED") || state.contains("FAIL") || state.contains("REJECTED")
+                || state.contains("CANCEL");
+        if (receipt != null) {
+            if ("SUCCEEDED".equals(receipt.status())) {
+                completeTeeSuccess(task, jobId, receipt);
+            } else {
+                String code = notBlank(receipt.errorCode()) ? receipt.errorCode() : "CONTRACT_INVALID";
+                teeDispatcher.mark(taskId, receipt.status());
+                appendRunLog(taskId, retryCount(task), "TEE " + receipt.status() + " errorCode=" + code);
+                fail(taskId, "可信运行任务失败: " + code, "tee:" + taskId + ":" + code);
+                delete(jobId);
+            }
+            return;
+        }
+        if (terminal && !state.contains("SUCCEED")) {
+            teeDispatcher.mark(taskId, "FAILED");
+            fail(taskId, "可信运行任务失败: CONTRACT_INVALID", "tee:" + taskId + ":CONTRACT_INVALID");
+            delete(jobId);
+            return;
+        }
+        String startedAt = string(task.get("started_at"));
+        if (notBlank(startedAt) && isTimeout(startedAt)) {
+            stop(jobId, "TEE task timeout");
+            teeDispatcher.mark(taskId, "TIMEOUT");
+            fail(taskId, "可信运行任务失败: TASK_EXPIRED", "tee:" + taskId + ":TASK_EXPIRED");
+            delete(jobId);
+        } else {
+            jdbc.update("update ds_dev_task set updated_at=? where id=?", now(), taskId);
+        }
+    }
+
+    private void completeTeeSuccess(Map<String, Object> task, String jobId,
+                                    TeeDevTaskDispatcher.Receipt receipt) {
+        String taskId = string(task.get("id"));
+        List<Map<String, Object>> encrypted = new ArrayList<>();
+        List<Map<String, Object>> reports = new ArrayList<>();
+        String resultAssetId = "";
+        for (com.fasterxml.jackson.databind.JsonNode output : receipt.outputs()) {
+            String kind = output.path("kind").asText();
+            if ("REPORT".equals(kind)) {
+                Map<String, Object> report = new LinkedHashMap<>();
+                report.put("reportKind", output.path("reportKind").asText());
+                report.put("content", objectMapper.convertValue(output.path("content"), Object.class));
+                reports.add(report);
+            } else if ("DATA".equals(kind) || "MODEL".equals(kind)) {
+                Map<String, Object> metadata = new LinkedHashMap<>();
+                for (String field : List.of("kind", "resultId", "objectId", "keyId", "keyVersion",
+                        "ciphertextSha256", "contributors", "exportState")) {
+                    metadata.put(field, objectMapper.convertValue(output.path(field), Object.class));
+                }
+                encrypted.add(metadata);
+                if (resultAssetId.isBlank()) {
+                    resultAssetId = output.path("resultId").asText();
+                }
+            }
+        }
+        String preview = json(Map.of("runtimeMode", "SIMULATION", "attestationVerified", false,
+                "reports", reports, "encryptedOutputs", encrypted));
+        jdbc.update("update ds_dev_task set status='SUCCEEDED',result_preview=?,result_asset_id=?,"
+                        + "result_rows=0,finished_at=?,updated_at=? where id=? and status=?",
+                preview, resultAssetId, now(), now(), taskId, STATUS_RUNNING);
+        teeDispatcher.mark(taskId, "SUCCEEDED");
+        appendRunLog(taskId, retryCount(task), "TEE SUCCEEDED outputs=" + receipt.outputs().size());
+        audit("DEV_TASK_TEE_SUCCEEDED", "DEV_TASK", taskId,
+                "reports=" + reports.size() + " encryptedOutputs=" + encrypted.size(), true);
+        dispatch("dev.task.succeeded", Map.of("id", taskId, "encryptedOutputs", encrypted.size(),
+                "reports", reports.size(), "channel", string(task.get("channel"))));
+        delete(jobId);
     }
 
     /** 任务仍 Running 但结果已可取（endpoint 存在且 /result 是有效 CSV）→ 提前完成。 */

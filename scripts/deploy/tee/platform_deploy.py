@@ -477,11 +477,16 @@ def prepare():
                           '    -e "TEE_END_ROLES=${TEE_END_ROLES:-CLIENT,CENTER}" \\\n'
                           '    -e "TEE_CONTRACT_PORT=${TEE_CONTRACT_PORT:-0}" \\\n'
                           '    -e "TEE_CONTRACT_CENTER_URL=${TEE_CONTRACT_CENTER_URL:-}" \\\n'
+                          '    -e "SECRETPAD_DATA_SANDBOX_TEE_DISPATCH_ENABLED=${TEE_DISPATCH_ENABLED:-false}" \\\n'
+                          '    -e "SECRETPAD_DATA_SANDBOX_TEE_RUNTIME_APP_IMAGE=${TEE_RUNTIME_APP_IMAGE:-}" \\\n'
+                          '    -e "SECRETPAD_DATA_SANDBOX_TEE_RUNTIME_IMAGE_DIGEST=${TEE_RUNTIME_IMAGE_DIGEST:-}" \\\n'
+                          '    -e "SECRETPAD_DATA_SANDBOX_TEE_BUILTIN_SHA256=${TEE_BUILTIN_SHA256:-}" \\\n'
                           '    -v "${DEV_ROOT}/status:/app/tee-status:ro" \\\n'
                           '    -v "${DEV_ROOT}/identity-pub:/app/tee-identity:ro" \\\n'
                           '    -v "${DEV_ROOT}/tee/adapter-client:/app/tee-adapter-client:ro" \\\n'
                           '    -v "${DEV_ROOT}/tee/contract-client:/app/tee-contract-client:ro" \\\n'
                           '    -v "${DEV_ROOT}/tee/identity:/app/tee-identity-key:ro" \\\n'
+                          '    ${TEE_TASK_SIGNER_MOUNT:-} \\\n'
                           '    ${TEE_CONTRACT_SERVER_MOUNT:-} \\\n')
     script = script.replace('docker run ', 'docker run --pull=never ').replace('docker create ', 'docker create --pull=never ')
     atomic(target / 'develop.sh', script, 0o700)
@@ -597,6 +602,17 @@ def up(name):
     base = INSTANCES[name] * 100
     domain = domain_id(name)
     refresh_runtime_credentials(name, domain)
+    runtime_registration = {}
+    if name == 'center':
+        registration_path = RUNTIME / 'center/tee/p5-runtime-registration.json'
+        if not registration_path.is_file() or registration_path.is_symlink():
+            raise RuntimeError('P6 启动要求 P5 运行时登记清单已就绪')
+        runtime_registration = json.loads(registration_path.read_text())
+        runtime_image = data.get('images', {}).get('runtime', {})
+        if (runtime_registration.get('imageId') != runtime_image.get('id')
+                or not runtime_registration.get('appImage')
+                or not re.fullmatch(r'[0-9a-f]{64}', runtime_registration.get('builtinSha256', ''))):
+            raise RuntimeError('P5 AppImage、运行镜像或内置算子摘要登记不完整')
     env = dict(os.environ, DATA_SANDBOX_DEV_ROOT=str(RUNTIME / name), DATA_SANDBOX_DOMAIN_ID=domain,
                TEE_PLATFORM_IMAGE=platform, DATA_SANDBOX_DEV_SAMPLER_IMAGE=sampler, DATA_SANDBOX_DEV_KUSCIA_IMAGE=checked_image('kuscia'),
                DATA_SANDBOX_DEV_MINIO_IMAGE=checked_image('minio'),
@@ -609,6 +625,13 @@ def up(name):
                TEE_CONTRACT_SERVER_MOUNT=(
                    f'-v {RUNTIME / name}/tee/contract-server:/app/tee-contract-server:ro'
                    if name == 'center' else ''),
+               TEE_TASK_SIGNER_MOUNT=(
+                   f'-v {RUNTIME / name}/tee/task-signer:/app/tee-task-signer:ro'
+                   if name == 'center' else ''),
+               TEE_DISPATCH_ENABLED='true' if name == 'center' else 'false',
+               TEE_RUNTIME_APP_IMAGE=runtime_registration.get('appImage', ''),
+               TEE_RUNTIME_IMAGE_DIGEST=runtime_registration.get('imageId', ''),
+               TEE_BUILTIN_SHA256=runtime_registration.get('builtinSha256', ''),
                TEE_CONTRACT_CENTER_URL='' if name == 'center' else CONTRACT_CENTER_URL,
                TEE_END_ROLES='CLIENT,CENTER' if name == 'center' else 'CLIENT')
     # 独立随机口令只交给上游入口写入本实例 600 凭据文件，不输出到日志。

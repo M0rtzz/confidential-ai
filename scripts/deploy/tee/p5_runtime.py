@@ -29,6 +29,8 @@ def register():
     import_image('center', 'runtime')
     image = runtime_image('runtime')
     image_id = manifest()['images']['runtime']['id']
+    builtin_sha256 = run('docker', 'run', '--pull=never', '--rm', '--entrypoint', 'sha256sum',
+                         image, '/opt/data-sandbox/modeling_ops.py', capture=True).split()[0]
     center = RUNTIME / 'center/tee'
     signer_public = run('openssl', 'x509', '-in', center / 'task-signer/client.crt',
                         '-pubkey', '-noout', capture=True)
@@ -86,7 +88,7 @@ def register():
                                               'add': ['CHOWN', 'SETUID', 'SETGID']}}}]}}]}}
     kube('center', 'apply', '-f', '-', value=appimage)
     evidence = {'contractVersion': 'tee-contract/1.0', 'appImage': APPIMAGE_NAME,
-                'imageRef': image, 'imageId': image_id,
+                'imageRef': image, 'imageId': image_id, 'builtinSha256': builtin_sha256,
                 'appImageSha256': hashlib.sha256(
                     json.dumps(appimage, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
     atomic(RUNTIME / 'center/tee/p5-runtime-registration.json', evidence, 0o600)

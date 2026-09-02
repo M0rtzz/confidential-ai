@@ -70,6 +70,42 @@ public class TeeAssetService {
     public record ProgramResult(String contractVersion, String kind, String sha256, String contentB64) {
     }
 
+    /** 不可变程序对象引用；程序字节与密文对象共用受控对象目录，但不携带数据密钥。 */
+    public record ProgramReference(String objectId, String sha256) {
+    }
+
+    /**
+     * 登记 SQL、Python 或 JAR 程序。对象标识由类型和内容摘要确定，同内容重试复用原对象，
+     * 同标识出现不同类型或摘要时直接拒绝。
+     */
+    @Transactional
+    public ProgramReference registerProgram(String ownerId, String kind, byte[] content) {
+        String normalizedOwner = TeeGuard.requireText(ownerId, "ownerId");
+        String normalizedKind = TeeGuard.requireText(kind, "program.kind");
+        if (!TeeContract.PROGRAM_KINDS.contains(normalizedKind) || "BUILTIN".equals(normalizedKind)) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "程序对象类型不受支持");
+        }
+        if (content == null || content.length == 0) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "程序对象内容为空");
+        }
+        TeeGuard.requireSize(content.length, TeeContract.MAX_OBJECT_PLAINTEXT_BYTES);
+        String digest = TeeCrypto.sha256Hex(content);
+        String objectId = TeeCrypto.sha256Hex((normalizedKind + "\0" + digest)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8)).substring(0, 32);
+        TeeObjectDO existing = objects.findById(new TeeObjectDO.UPK(objectId)).orElse(null);
+        if (existing != null && (!normalizedKind.equals(existing.getKind())
+                || !digest.equals(existing.getCiphertextSha256()))) {
+            throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "程序对象标识已绑定其他内容");
+        }
+        store.writeProgram(objectId, content);
+        objects.save(TeeObjectDO.builder().upk(new TeeObjectDO.UPK(objectId))
+                .kind(normalizedKind).ownerId(normalizedOwner).keyId("").keyVersion("")
+                .ciphertextSha256(digest).sizeBytes((long) content.length)
+                .contributorsJson(write(List.of(normalizedOwner)))
+                .exportState(TeeContract.EXPORT_PENDING).build());
+        return new ProgramReference(objectId, digest);
+    }
+
     @Transactional
     public RegisterResult register(String ownerId, RegisterRequest request) {
         TeeGuard.requireVersion(request.contractVersion());

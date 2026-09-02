@@ -12,6 +12,9 @@ package org.secretflow.secretpad.web.service.dev;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -20,6 +23,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 纯静态方法，无 Spring 依赖。
  */
 public class DevJobExecutorTest {
+
+    @Test
+    void teeTaskInputContainsOnlySignedTask() {
+        var config = DevJobExecutor.teeTaskInputConfig("header.payload.signature");
+        assertEquals(1, config.size());
+        assertEquals("header.payload.signature", config.get("tee_task_jws"));
+        assertTrue(!config.containsKey("input_csv_b64"));
+        assertTrue(!config.containsKey("sandbox_db_b64"));
+        assertTrue(!config.containsKey("jar_b64"));
+        assertTrue(!config.containsKey("script"));
+    }
+
+    @Test
+    void teeEvaluationReportMapsToExistingMetricTable() {
+        var table = DevJobExecutor.teeReportTable(Map.of("reports", List.of(Map.of(
+                "reportKind", "EVALUATION_METRICS",
+                "content", Map.of("metrics", Map.of("accuracy", 0.9, "n", 10))))));
+        assertEquals(List.of("metric", "value"), table.get(0));
+        assertTrue(table.stream().anyMatch(row -> row.equals(List.of("accuracy", "0.9"))));
+        assertTrue(table.stream().anyMatch(row -> row.equals(List.of("n", "10"))));
+    }
 
     @Test
     void extractsExecutionFailedLineAndStripsPythonPrefix() {

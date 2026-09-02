@@ -592,7 +592,14 @@ public class DataDevService {
         dispatch("dev.task.submitted", Map.of("id", taskId, "type", "SQL", "mode", runMode));
         try {
             claimTask(taskId);
-            runSandboxSqlFlow(taskId, runMode, sandboxId, nodeId, header, data, params, sql);
+            if (devJobExecutor.teeEnabled()) {
+                String inputB64 = Base64.getEncoder().encodeToString(
+                        CsvUtil.toCsv(header, data).getBytes(StandardCharsets.UTF_8));
+                devJobExecutor.submitSql(taskId, nodeId, inputB64,
+                        DevSqlEngine.renderBounded(sql, params, sqlLimit), params, sourceTable, "dev");
+            } else {
+                runSandboxSqlFlow(taskId, runMode, sandboxId, nodeId, header, data, params, sql);
+            }
         } catch (Exception e) {
             log.warn("Dev sandbox SQL task {} failed: {}", taskId, e.getMessage(), e);
             failTask(taskId, e);
@@ -834,7 +841,15 @@ public class DataDevService {
         dispatch("dev.task.submitted", Map.of("id", taskId, "type", "SQL", "mode", runMode));
         try {
             claimTask(taskId);
-            runSqlFlow(taskId, runMode, nodeId, datatableId, header, data, params, sql, source);
+            if (devJobExecutor.teeEnabled()) {
+                String inputB64 = Base64.getEncoder().encodeToString(
+                        CsvUtil.toCsv(header, data).getBytes(StandardCharsets.UTF_8));
+                devJobExecutor.submitSql(taskId, nodeId, inputB64,
+                        DevSqlEngine.renderBounded(sql, params, sqlLimit), params,
+                        DevSqlEngine.detectTableName(sql), "dev");
+            } else {
+                runSqlFlow(taskId, runMode, nodeId, datatableId, header, data, params, sql, source);
+            }
         } catch (Exception e) {
             log.warn("Dev SQL task {} failed: {}", taskId, e.getMessage(), e);
             failTask(taskId, e);
@@ -1048,8 +1063,17 @@ public class DataDevService {
         try {
             switch (execType) {
                 case "SQL":
-                    runSqlFlow(id, runMode, nodeId, datatableId, header, data, params,
-                            string(task.get("content_snapshot")), source);
+                    String sql = string(task.get("content_snapshot"));
+                    if (devJobExecutor.teeEnabled()) {
+                        String inputB64 = Base64.getEncoder().encodeToString(
+                                CsvUtil.toCsv(header, data).getBytes(StandardCharsets.UTF_8));
+                        devJobExecutor.submitSql(id, nodeId, inputB64,
+                                DevSqlEngine.renderBounded(sql, params, sqlLimit), params,
+                                DevSqlEngine.detectTableName(sql), "dev");
+                    } else {
+                        runSqlFlow(id, runMode, nodeId, datatableId, header, data, params,
+                                string(task.get("content_snapshot")), source);
+                    }
                     break;
                 case "JAR": {
                     Map<String, Object> versionRow = requireVersion(string(task.get("artifact_id")), intValue(task.get("version"), 0));
@@ -1120,10 +1144,18 @@ public class DataDevService {
         dispatch("dev.task.retried", Map.of("id", id, "retry", retries + 1));
         try {
             switch (execType) {
-                case "SQL":
-                    runSandboxSqlFlow(id, runMode, sandboxId, nodeId, header, data, params,
-                            string(task.get("content_snapshot")));
+                case "SQL": {
+                    String sql = string(task.get("content_snapshot"));
+                    if (devJobExecutor.teeEnabled()) {
+                        String inputB64 = Base64.getEncoder().encodeToString(
+                                CsvUtil.toCsv(header, data).getBytes(StandardCharsets.UTF_8));
+                        devJobExecutor.submitSql(id, nodeId, inputB64,
+                                DevSqlEngine.renderBounded(sql, params, sqlLimit), params, sourceTable, "dev");
+                    } else {
+                        runSandboxSqlFlow(id, runMode, sandboxId, nodeId, header, data, params, sql);
+                    }
                     break;
+                }
                 case "JAR": {
                     Map<String, Object> versionRow = requireVersion(string(task.get("artifact_id")), intValue(task.get("version"), 0));
                     byte[] jarBytes = Files.readAllBytes(resolveStorePath(string(versionRow.get("file_path"))));
