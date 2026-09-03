@@ -17,6 +17,7 @@ import foundation
 import key_adapter
 import p5_runtime
 import contract_acceptance as acceptance
+import p7_acceptance
 import release_client
 
 
@@ -583,6 +584,32 @@ class ToolkitIntegrationTests(unittest.TestCase):
             generated = runner / '__pycache__'; generated.mkdir()
             (generated / 'start.cpython-310.pyc').write_bytes(b'generated')
             self.assertEqual(before, deploy.toolkit_digest())
+
+
+class P7AcceptanceCleanupTests(unittest.TestCase):
+    def test_cleanup_removes_exports_created_outside_fixture_tracking(self):
+        fixture = {
+            'assetIds': ['asset-a'],
+            'sandboxId': 'sandbox-a',
+            'approvalId': 'approval-a',
+            'taskIds': ['task-a'],
+            'exportIds': [],
+            'resultIds': ['result-a'],
+            'reportObjectIds': [],
+        }
+        captured = []
+
+        with patch.object(p7_acceptance, 'sqlite',
+                          side_effect=lambda instance, statements: captured.extend(statements)):
+            p7_acceptance._remove_common_approval(fixture)
+
+        sql = '\n'.join(captured)
+        self.assertIn('delete from tee_export_vote where export_id in (select export_id', sql)
+        self.assertIn("where result_id in ('result-a')", sql)
+        self.assertIn("delete from tee_export_request where result_id in ('result-a')", sql)
+        self.assertLess(sql.index('delete from tee_export_vote'),
+                        sql.index('delete from tee_export_request'))
+
 
 if __name__ == '__main__':
     os.umask(0o077)

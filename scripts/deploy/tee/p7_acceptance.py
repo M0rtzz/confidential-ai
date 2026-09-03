@@ -162,7 +162,12 @@ def _remove_common_approval(fixture):
         ])
     if fixture["resultIds"]:
         result_ids = ",".join(quote(item) for item in fixture["resultIds"])
-        statements.append(f"delete from tee_key where asset_id in ({result_ids});")
+        statements.extend([
+            "delete from tee_export_vote where export_id in (select export_id from tee_export_request "
+            f"where result_id in ({result_ids}));",
+            f"delete from tee_export_request where result_id in ({result_ids});",
+            f"delete from tee_key where asset_id in ({result_ids});",
+        ])
     statements.extend([
         f"delete from tee_object where asset_id in ({asset_ids});",
         f"delete from tee_key where asset_id in ({asset_ids});",
