@@ -184,11 +184,15 @@ def _register_asset(instance, token, owner, asset_id, plaintext, sandbox_id, ope
                     "sandboxId": sandbox_id, "columns": GRANTED_COLUMNS,
                     "operators": operators, "expiresAt": utc_time(3600),
                     "reportKinds": REPORT_KINDS}}, token, instance)
-    registered = expect_ok("P7 密文资产登记 " + instance, "/v1alpha1/tee/assets/register", {
+    register_request = {
         "contractVersion": CONTRACT, "requestId": uuid4().hex, "ownerId": owner,
         "schema": ALL_COLUMNS, "encryptedObject": encrypted,
-        "policyId": policy["policyId"], "policyVersion": policy["policyVersion"]},
-        token, instance)
+        "policyId": policy["policyId"], "policyVersion": policy["policyVersion"]}
+    code, body = _contract_request("/v1alpha1/tee/assets/register", register_request, instance)
+    if code != 200 or body.get("status", {}).get("code") != 0:
+        error_code = (body.get("data") or {}).get("errorCode", "HTTP_" + str(code))
+        raise Failure("P7 密文资产登记 " + instance + " 应成功但被拒绝：" + error_code)
+    registered = body["data"]
     return {"instance": instance, "ownerId": owner, "assetId": asset_id,
             "assetVersion": 1, "objectId": registered["objectId"],
             "keyId": issued["keyId"], "keyVersion": int(issued["keyVersion"]),
