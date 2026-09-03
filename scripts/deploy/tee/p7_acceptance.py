@@ -413,7 +413,11 @@ def run():
                 "resultId": model_output["resultId"],
                 "recipientCertPem": auth[CLIENT_A]["cert"]},
             auth[CLIENT_A]["token"], "REQUEST_ID_CONFLICT", CLIENT_A)
-        pending = expect_ok("P7 B 待办列表", "/v1alpha1/tee/exports/pending", {}, auth[CLIENT_B]["token"], CLIENT_B)
+        pending_code, pending_body = request(
+            "/v1alpha1/tee/exports/pending", token=auth[CLIENT_B]["token"], instance=CLIENT_B)
+        if pending_code != 200 or pending_body.get("status", {}).get("code") != 0:
+            raise Failure("P7 B 待办列表 GET 调用失败")
+        pending = pending_body["data"]
         if view["exportId"] not in {item["exportId"] for item in pending["items"]}:
             raise Failure("P7 client-b 未通过薄委派看到待投票工单")
         _approve_both(view, auth)
