@@ -16,6 +16,7 @@ import org.secretflow.secretpad.web.service.DataSandboxMvpService;
 import org.secretflow.secretpad.web.service.SandboxDataControlService;
 import org.secretflow.secretpad.web.service.dev.DataDevService;
 import org.secretflow.secretpad.web.service.dev.DevJobExecutor;
+import org.secretflow.secretpad.web.service.tee.TeeContract;
 import org.secretflow.secretpad.web.service.dev.ModelMetricsEvaluator;
 import org.secretflow.secretpad.web.service.model.ModelApprovalService;
 import org.secretflow.secretpad.web.service.storage.SandboxDbService;
@@ -330,9 +331,44 @@ public class SandboxCanvasService {
         result.put("runtimeMode", "SIMULATION");
         result.put("attestationVerified", false);
         result.put("reports", summary.getOrDefault("reports", List.of()));
-        result.put("encryptedOutputs", summary.getOrDefault("encryptedOutputs", List.of()));
-        result.put("exportState", "PENDING_APPROVAL");
+        List<Map<String, Object>> encrypted = refreshExportState(summary.get("encryptedOutputs"));
+        result.put("encryptedOutputs", encrypted);
+        result.put("exportState", encrypted.stream()
+                .allMatch(item -> TeeContract.EXPORT_APPROVED.equals(item.get("exportState")))
+                && !encrypted.isEmpty() ? TeeContract.EXPORT_APPROVED : TeeContract.EXPORT_PENDING);
         return result;
+    }
+
+    /**
+     * 用 tee_object 的当前导出状态覆盖回执里冻结的快照。
+     *
+     * <p>回执写入时结果必然是待审批，直接回显会让结果卡永远停在待审批；
+     * 权威状态在 tee_object.export_state 上，按对象标识逐条回查。
+     */
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> refreshExportState(Object outputs) {
+        List<Map<String, Object>> refreshed = new ArrayList<>();
+        if (!(outputs instanceof List<?> items)) {
+            return refreshed;
+        }
+        for (Object item : items) {
+            if (!(item instanceof Map<?, ?> source)) {
+                continue;
+            }
+            Map<String, Object> copy = new LinkedHashMap<>((Map<String, Object>) source);
+            String objectId = string(copy.get("objectId"));
+            if (!objectId.isBlank()) {
+                List<String> states = jdbc.queryForList(
+                        "select export_state from tee_object where object_id=? and is_deleted=0",
+                        String.class, objectId);
+                if (!states.isEmpty()) {
+                    copy.put("exportState", states.get(0));
+                }
+            }
+            copy.putIfAbsent("exportState", TeeContract.EXPORT_PENDING);
+            refreshed.add(copy);
+        }
+        return refreshed;
     }
 
     private boolean isMarkerRow(Object row) {

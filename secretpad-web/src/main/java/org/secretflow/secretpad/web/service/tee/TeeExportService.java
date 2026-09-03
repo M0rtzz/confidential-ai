@@ -22,6 +22,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.security.cert.X509Certificate;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -36,6 +37,7 @@ public class TeeExportService {
     private static final String REJECTED = "REJECTED";
     private static final String CANCELLED = "CANCELLED";
     private static final String VOTE_PENDING = "PENDING";
+    private static final List<String> EXPORTABLE_KINDS = List.of("DATA", "MODEL");
 
     public record CreateRequest(String contractVersion, String requestId, String resultId,
                                 String recipientCertPem) {
@@ -65,6 +67,15 @@ public class TeeExportService {
 
     public record ExportResult(String contractVersion, String objectId,
                                TeeKeyService.KeyEnvelope keyEnvelope, String expiresAt) {
+    }
+
+    public record ExportableView(String resultId, String objectId, String kind, String taskId,
+                                 String ciphertextSha256, String keyId, String keyVersion,
+                                 Long sizeBytes, List<String> contributors, String exportState,
+                                 String latestExportId, String latestStatus) {
+    }
+
+    public record ExportableResult(String contractVersion, List<ExportableView> items) {
     }
 
     private final TeeExportRequestRepository requests;
@@ -141,6 +152,39 @@ public class TeeExportService {
         }
         event(actor, "TEE_EXPORT_SUBMIT", created, "contributors=" + contributors.size());
         return view(created, ownerId);
+    }
+
+    /**
+     * 本机构可发起导出的密文结果。
+     *
+     * <p>只列出本机构在贡献方集合内、且原任务已成功并核实回执的 DATA / MODEL 对象；
+     * REPORT 按授权规则明文出域，不进这条流水线。
+     */
+    public ExportableResult exportable(String ownerId) {
+        TeeGuard.requireText(ownerId, "ownerId");
+        List<ExportableView> items = new ArrayList<>();
+        for (TeeObjectDO object : objects.findTop200ByKindInOrderByGmtCreateDesc(EXPORTABLE_KINDS)) {
+            List<String> contributors;
+            try {
+                contributors = contributors(object);
+            } catch (TeeException damaged) {
+                // 单条记录损坏不应让整张列表不可用；该结果建单时仍会被拒绝。
+                continue;
+            }
+            if (!contributors.contains(ownerId) || !succeededResult(object)) {
+                continue;
+            }
+            List<TeeExportRequestDO> owned = requests
+                    .findByResultIdAndRequesterOwnerIdOrderByGmtCreateDesc(object.getResultId(), ownerId);
+            TeeExportRequestDO latest = owned.isEmpty() ? null : owned.get(0);
+            items.add(new ExportableView(object.getResultId(), object.getUpk().getObjectId(),
+                    object.getKind(), object.getTaskId(), object.getCiphertextSha256(),
+                    object.getKeyId(), object.getKeyVersion(), object.getSizeBytes(), contributors,
+                    object.getExportState(),
+                    latest == null ? "" : latest.getUpk().getExportId(),
+                    latest == null ? "" : latest.getStatus()));
+        }
+        return new ExportableResult(TeeContract.VERSION, items);
     }
 
     public ListResult mine(String ownerId) {
@@ -243,7 +287,8 @@ public class TeeExportService {
         String fingerprint = TeeIdempotency.fingerprint(List.of(request.getUpk().getExportId(),
                 request.getCiphertextSha256(), recipientSha256));
         return idempotency.execute(ownerId, "results/export", requestId, fingerprint,
-                ExportResult.class, () -> issueEnvelope(ownerId, actor, request, recipient));
+                ExportResult.class, () -> issueEnvelope(ownerId, actor, request, recipient),
+                issued -> issued == null ? null : issued.expiresAt());
     }
 
     private ExportResult issueEnvelope(String ownerId, String actor, TeeExportRequestDO request,
@@ -320,6 +365,18 @@ public class TeeExportService {
         }
     }
 
+    /** 列表用的成功判定；与 requireSucceededResult 同一口径，只是不抛异常。 */
+    private boolean succeededResult(TeeObjectDO object) {
+        if (object.getResultId() == null || object.getResultId().isBlank()
+                || object.getTaskId() == null || object.getTaskId().isBlank()) {
+            return false;
+        }
+        return tasks.findById(new TeeRuntimeTaskDO.UPK(object.getTaskId()))
+                .filter(task -> Boolean.TRUE.equals(task.getReceiptVerified())
+                        && "SUCCEEDED".equals(task.getStatus()))
+                .isPresent();
+    }
+
     private void requireSucceededResult(TeeObjectDO object) {
         TeeRuntimeTaskDO task = tasks.findById(new TeeRuntimeTaskDO.UPK(
                         TeeGuard.requireText(object.getTaskId(), "taskId")))
@@ -353,7 +410,7 @@ public class TeeExportService {
         if ("REPORT".equals(kind)) {
             throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "REPORT 按授权规则明文出域，不创建导出工单");
         }
-        if (!List.of("DATA", "MODEL").contains(kind)) {
+        if (!EXPORTABLE_KINDS.contains(kind)) {
             throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "该对象类型不支持导出");
         }
     }

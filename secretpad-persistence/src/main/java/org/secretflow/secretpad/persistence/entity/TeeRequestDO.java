@@ -49,6 +49,10 @@ public class TeeRequestDO extends BaseAggregationRoot<TeeRequestDO> {
     @Column(name = "owner_id", nullable = false, length = 128)
     private String ownerId;
 
+    /** 提前失效时刻；出域信封按 expiresAt 写入，到期即清理，不随通用保留期驻留。 */
+    @Column(name = "retain_until", nullable = true, length = 64)
+    private String retainUntil;
+
     @Getter
     @Setter
     @ToString

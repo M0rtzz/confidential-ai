@@ -7,6 +7,7 @@
 """
 import json
 import hashlib
+import re
 import ssl
 import subprocess
 import time
@@ -17,7 +18,7 @@ from uuid import uuid4
 import urllib.error
 import urllib.request
 
-from contract_acceptance import (CONTRACT, CENTER, RUNTIME, Failure, decrypt, encrypt,
+from contract_acceptance import (CONTRACT, CENTER, PORTS, RUNTIME, Failure, decrypt, encrypt,
                                  expect_denied, expect_ok, login, pem_of, platform_time,
                                  quote, request, sign_task, sqlite, sqlite_query, unwrap,
                                  utc_time)
@@ -327,9 +328,62 @@ def _approve_both(view, auth):
 
 
 def _export(instance, token, result_id, cert):
+    return _export_with_request_id(instance, token, result_id, cert, uuid4().hex)
+
+
+def _export_with_request_id(instance, token, result_id, cert, request_id):
+    """指定 requestId 取回；相同标识重放必须返回同一张信封，包括原到期时刻。"""
     return expect_ok("P7 取回导出信封", "/v1alpha1/tee/results/" + result_id + "/export", {
-        "contractVersion": CONTRACT, "requestId": uuid4().hex,
+        "contractVersion": CONTRACT, "requestId": request_id,
         "recipientCertPem": cert}, token, instance)
+
+
+def _download(instance, token, export_id):
+    """调用生产下载接口：中心端签发信封，本机构平台实例本地解封解密后回传明文。
+
+    这条路径与官方客户端 TeeInstitutionKey.decryptExport 是同一段代码，因此
+    到期拒绝、接收者绑定和密钥清零都由生产实现负责，脚本不做等价重实现。
+    """
+    req = urllib.request.Request(
+        "http://127.0.0.1:" + str(PORTS[instance]) + "/api/v1alpha1/tee/exports/"
+        + export_id + "/download", method="POST", headers={"User-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as response:
+            disposition = response.headers.get("Content-Disposition", "")
+            body = response.read()
+    except urllib.error.HTTPError as error:
+        body = error.read()
+        try:
+            detail = json.loads(body).get("data", {}).get("errorCode", "")
+        except ValueError:
+            detail = "HTTP " + str(error.code)
+        raise Failure("P7 下载被拒绝：" + detail)
+    if body.startswith(b"{") and b'"errorCode"' in body:
+        raise Failure("P7 下载被拒绝：" + json.loads(body).get("data", {}).get("errorCode", ""))
+    name = re.search(r'filename="([^"]+)"', disposition)
+    return body, (name.group(1) if name else "")
+
+
+def _expect_download_denied(name, instance, token, export_id, error_code):
+    """下载入口的拒绝仍走契约错误包装；这里断言错误码而不是仅断言失败。"""
+    req = urllib.request.Request(
+        "http://127.0.0.1:" + str(PORTS[instance]) + "/api/v1alpha1/tee/exports/"
+        + export_id + "/download", method="POST", headers={"User-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as response:
+            status, body = response.status, response.read()
+    except urllib.error.HTTPError as error:
+        status, body = error.code, error.read()
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        raise Failure(name + " 应被拒绝但返回了结果明文")
+    if parsed.get("status", {}).get("code") == 0:
+        raise Failure(name + " 应被拒绝但成功了")
+    actual = (parsed.get("data") or {}).get("errorCode")
+    if actual != error_code:
+        raise Failure(name + " 拒绝原因不符：期望 " + error_code + "，实际 " + str(actual))
+    return {"errorCode": actual, "httpStatus": status}
 
 
 def _decrypt_export(exported, object_id, contributor):
@@ -436,17 +490,29 @@ def run():
         if view["exportId"] not in {item["exportId"] for item in pending["items"]}:
             raise Failure("P7 client-b 未通过薄委派看到待投票工单")
         _approve_both(view, auth)
-        exported = _export(CLIENT_A, auth[CLIENT_A]["token"], data_output["resultId"], auth[CLIENT_A]["cert"])
+        export_request_id = uuid4().hex
+        exported = _export_with_request_id(CLIENT_A, auth[CLIENT_A]["token"],
+                                          data_output["resultId"], auth[CLIENT_A]["cert"],
+                                          export_request_id)
         if exported.get("objectId") != data_output["objectId"]:
             raise Failure("P7 DATA 导出对象标识变化")
         data_plaintext = _decrypt_export(exported, data_output["objectId"], auth[CLIENT_A])
         if data_plaintext != EXPECTED_DATA:
             raise Failure("P7 DATA 解密结果与锁定 TEE 算子的逐字节预期不符")
+        # 生产闭环：由本机构平台实例取回信封、本地解封并回传明文，与脚本侧解封逐字节对照。
+        downloaded, download_name = _download(CLIENT_A, auth[CLIENT_A]["token"], view["exportId"])
+        if downloaded != EXPECTED_DATA or downloaded != data_plaintext:
+            raise Failure("P7 生产下载接口返回的 DATA 明文与 TEE 算子结果不符")
+        if download_name != data_output["resultId"] + ".csv":
+            raise Failure("P7 DATA 下载文件名不符：" + download_name)
         checks["approvedData"] = {"exportId": view["exportId"], "objectId": data_output["objectId"],
                                    "contributors": contributors, "decrypted": True,
                                    "ciphertextSha256": data_output["ciphertextSha256"],
                                    "plaintextSha256": hashlib.sha256(data_plaintext).hexdigest(),
-                                   "fullPlaintextByteMatch": True}
+                                   "fullPlaintextByteMatch": True,
+                                   "downloadedViaOfficialClient": True,
+                                   "downloadFileName": download_name,
+                                   "downloadMatchesScriptUnseal": True}
 
         model_view = _create_export(CLIENT_A, auth[CLIENT_A]["token"], model_output["resultId"],
                                     auth[CLIENT_A]["cert"], fixture)
@@ -458,9 +524,17 @@ def run():
         model = json.loads(model_plaintext)
         if model.get("op") != "standardize" or model.get("method") != "zscore":
             raise Failure("P7 MODEL 解密结果与 TEE 算子不符")
+        model_downloaded, model_name = _download(CLIENT_A, auth[CLIENT_A]["token"],
+                                                 model_view["exportId"])
+        if model_downloaded != EXPECTED_MODEL:
+            raise Failure("P7 生产下载接口返回的 MODEL 明文与 TEE 算子结果不符")
+        if model_name != model_output["resultId"] + ".json":
+            raise Failure("P7 MODEL 下载文件名不符：" + model_name)
         checks["approvedModel"] = {"exportId": model_view["exportId"], "objectId": model_output["objectId"],
                                     "decrypted": True, "modelOperation": model.get("op"),
-                                    "fullPlaintextByteMatch": True}
+                                    "fullPlaintextByteMatch": True,
+                                    "downloadedViaOfficialClient": True,
+                                    "downloadFileName": model_name}
 
         # 场景 2：仅发起方投票，真实取回必须拒绝。
         partial_run = _run_task(assets, fixture["sandboxId"], fixture=fixture)
@@ -631,14 +705,67 @@ def run():
         except Failure as failure:
             if "EXPORT_NOT_APPROVED" not in str(failure):
                 raise
-        refreshed = _export(CLIENT_A, auth[CLIENT_A]["token"], data_output["resultId"],
-                            auth[CLIENT_A]["cert"])
-        refreshed_plaintext = _decrypt_export(refreshed, data_output["objectId"], auth[CLIENT_A])
+        # 幂等重放取回的是同一张已过期信封，官方客户端必须在 RSA 解封前拒绝。
+        replayed = _export_with_request_id(CLIENT_A, auth[CLIENT_A]["token"],
+                                           data_output["resultId"], auth[CLIENT_A]["cert"],
+                                           export_request_id)
+        if replayed.get("expiresAt") != expires_at:
+            raise Failure("P7 幂等重放没有返回原信封的到期时刻")
+        try:
+            _decrypt_export(replayed, data_output["objectId"], auth[CLIENT_A])
+            raise Failure("P7 幂等重放的过期信封仍可使用")
+        except Failure as failure:
+            if "EXPORT_NOT_APPROVED" not in str(failure):
+                raise
+        # 生产下载每次重新取回信封，因此仍应成功并还原同一份明文。
+        refreshed_plaintext, _ = _download(CLIENT_A, auth[CLIENT_A]["token"], view["exportId"])
         if hashlib.sha256(refreshed_plaintext).hexdigest() != hashlib.sha256(data_plaintext).hexdigest():
             raise Failure("P7 重新取回信封后的结果明文发生变化")
+        retained = sqlite_query("center", "select count(*) from tee_request where retain_until="
+                                + quote(expires_at) + ";")
+        if retained in ("", "0"):
+            raise Failure("P7 出域幂等记录没有登记信封到期时刻")
         checks["envelopeExpiry"] = {"expiresAt": expires_at, "ttlSecondsAtCheck": round(ttl, 3),
                                      "expiredEnvelopeDenied": True,
-                                     "refreshedEnvelopeUsable": True}
+                                     "replayedEnvelopeDenied": True,
+                                     "refreshedEnvelopeUsable": True,
+                                     "idempotencyRetainUntilPinned": True}
+
+        # 场景 16：可导出结果列表只含本机构贡献的 DATA / MODEL 结果。
+        exportable_code, exportable_body = request(
+            "/v1alpha1/tee/exports/exportable", token=auth[CLIENT_A]["token"], instance=CLIENT_A)
+        if exportable_code != 200 or exportable_body.get("status", {}).get("code") != 0:
+            raise Failure("P7 可导出结果列表调用失败")
+        exportable_items = exportable_body["data"]["items"]
+        result_ids = {item["resultId"] for item in exportable_items}
+        if data_output["resultId"] not in result_ids or model_output["resultId"] not in result_ids:
+            raise Failure("P7 可导出结果列表缺少本机构贡献的结果")
+        if any(item["kind"] not in ("DATA", "MODEL") for item in exportable_items):
+            raise Failure("P7 可导出结果列表混入了非导出类型")
+        if any(auth[CLIENT_A]["ownerId"] not in item["contributors"] for item in exportable_items):
+            raise Failure("P7 可导出结果列表混入了非本机构贡献的结果")
+        foreign_code, foreign_body = request(
+            "/v1alpha1/tee/exports/exportable", token=auth[CLIENT_B]["token"], instance=CLIENT_B)
+        foreign_ids = {item["resultId"] for item in foreign_body["data"]["items"]}
+        checks["exportableListing"] = {
+            "items": len(exportable_items), "kindsLimited": True,
+            "contributorScoped": True,
+            "visibleToPeerContributor": data_output["resultId"] in foreign_ids}
+
+        # 场景 17：中心裁决实例不解密导出结果。
+        checks["centerDownloadDenied"] = _expect_download_denied(
+            "P7 中心裁决实例下载", "center", auth["center"]["token"], view["exportId"],
+            "END_ROLE_DENIED")
+
+        # 场景 18：非发起机构不得下载他人工单的结果明文。
+        checks["foreignDownloadDenied"] = _expect_download_denied(
+            "P7 非发起机构下载", CLIENT_B, auth[CLIENT_B]["token"], view["exportId"],
+            "AUDIT_ACCESS_DENIED")
+
+        # 场景 19：未全票通过的工单不得下载。
+        checks["unapprovedDownloadDenied"] = _expect_download_denied(
+            "P7 未通过工单下载", CLIENT_A, auth[CLIENT_A]["token"], partial_view["exportId"],
+            "EXPORT_NOT_APPROVED")
 
         evidence = {"status": "P7_INCOMPLETE" if gaps else "P7_ACCEPTED",
                     "contractVersion": CONTRACT,

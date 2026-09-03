@@ -22,5 +22,8 @@ public interface TeeExportRequestRepository
     List<TeeExportRequestDO> findByResultIdAndRequesterOwnerIdAndStatusOrderByGmtCreateDesc(
             String resultId, String requesterOwnerId, String status);
 
+    List<TeeExportRequestDO> findByResultIdAndRequesterOwnerIdOrderByGmtCreateDesc(
+            String resultId, String requesterOwnerId);
+
     List<TeeExportRequestDO> findByObjectIdAndStatus(String objectId, String status);
 }

@@ -52,7 +52,7 @@ public class TeeRetention {
             nonces.delete(nonce);
             removed++;
         }
-        for (var request : requests.findCreatedBefore(requestDeadline)) {
+        for (var request : requests.findRetentionExpired(requestDeadline, now.toString())) {
             requests.delete(request);
             removed++;
         }

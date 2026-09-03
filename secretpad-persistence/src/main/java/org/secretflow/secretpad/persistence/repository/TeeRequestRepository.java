@@ -15,7 +15,14 @@ import java.util.List;
 @Repository
 public interface TeeRequestRepository extends BaseRepository<TeeRequestDO, TeeRequestDO.UPK> {
 
-    /** 超过契约最短保留期的记录；清理只针对已过保留期的部分。 */
-    @Query("select r from TeeRequestDO r where r.createdAt < :deadline")
-    List<TeeRequestDO> findCreatedBefore(@Param("deadline") String deadline);
+    /**
+     * 可清理的记录。
+     *
+     * <p>两类：超过契约最短保留期的，以及登记了提前失效时刻且已到期的。
+     * 出域信封属于后者——它的可用窗口只有五分钟，没有理由按通用保留期驻留。
+     */
+    @Query("select r from TeeRequestDO r where r.createdAt < :deadline"
+            + " or (r.retainUntil is not null and r.retainUntil < :now)")
+    List<TeeRequestDO> findRetentionExpired(@Param("deadline") String deadline,
+                                            @Param("now") String now);
 }

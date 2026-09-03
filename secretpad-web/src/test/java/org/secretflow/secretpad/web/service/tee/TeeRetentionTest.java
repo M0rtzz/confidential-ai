@@ -35,7 +35,7 @@ class TeeRetentionTest {
         TeeNonceDO nonce = TeeNonceDO.builder().upk(new TeeNonceDO.UPK("issuer", "n-1")).build();
         TeeRequestDO request = TeeRequestDO.builder().upk(new TeeRequestDO.UPK("k-1")).build();
         when(nonces.findRetentionExpired(anyString())).thenReturn(List.of(nonce));
-        when(requests.findCreatedBefore(anyString())).thenReturn(List.of(request));
+        when(requests.findRetentionExpired(anyString(), anyString())).thenReturn(List.of(request));
 
         assertEquals(2, new TeeRetention(nonces, requests).purgeOnce(Instant.parse("2026-09-01T00:00:00Z")));
         verify(nonces).delete(nonce);
@@ -47,13 +47,14 @@ class TeeRetentionTest {
         TeeNonceRepository nonces = mock(TeeNonceRepository.class);
         TeeRequestRepository requests = mock(TeeRequestRepository.class);
         when(nonces.findRetentionExpired(anyString())).thenReturn(List.of());
-        when(requests.findCreatedBefore(anyString())).thenReturn(List.of());
+        when(requests.findRetentionExpired(anyString(), anyString())).thenReturn(List.of());
         Instant now = Instant.parse("2026-09-01T00:00:00Z");
 
         assertEquals(0, new TeeRetention(nonces, requests).purgeOnce(now));
         // nonce 记录本身存的就是过期加保留期之后的时刻，按当前时刻比较即可。
         verify(nonces).findRetentionExpired(now.toString());
-        verify(requests).findCreatedBefore(now.minusSeconds(TeeContract.RETENTION_SECONDS).toString());
+        verify(requests).findRetentionExpired(
+                now.minusSeconds(TeeContract.RETENTION_SECONDS).toString(), now.toString());
     }
 
     @Test
@@ -61,10 +62,25 @@ class TeeRetentionTest {
         TeeNonceRepository nonces = mock(TeeNonceRepository.class);
         TeeRequestRepository requests = mock(TeeRequestRepository.class);
         when(nonces.findRetentionExpired(anyString())).thenReturn(List.of());
-        when(requests.findCreatedBefore(anyString())).thenReturn(List.of());
+        when(requests.findRetentionExpired(anyString(), anyString())).thenReturn(List.of());
 
         assertEquals(0, new TeeRetention(nonces, requests).purgeOnce(Instant.now()));
         verify(nonces, never()).delete(org.mockito.ArgumentMatchers.any(TeeNonceDO.class));
         verify(requests, never()).delete(org.mockito.ArgumentMatchers.any(TeeRequestDO.class));
+    }
+
+    @Test
+    void envelopeRecordsExpireWithTheirOwnDeadline() {
+        TeeNonceRepository nonces = mock(TeeNonceRepository.class);
+        TeeRequestRepository requests = mock(TeeRequestRepository.class);
+        TeeRequestDO envelope = TeeRequestDO.builder().upk(new TeeRequestDO.UPK("k-envelope"))
+                .retainUntil("2026-08-31T23:55:00Z").build();
+        Instant now = Instant.parse("2026-09-01T00:00:00Z");
+        when(nonces.findRetentionExpired(anyString())).thenReturn(List.of());
+        when(requests.findRetentionExpired(anyString(), anyString())).thenReturn(List.of(envelope));
+
+        assertEquals(1, new TeeRetention(nonces, requests).purgeOnce(now));
+        // 出域信封只有五分钟可用窗口，不按 24 小时通用保留期驻留。
+        verify(requests).delete(envelope);
     }
 }
