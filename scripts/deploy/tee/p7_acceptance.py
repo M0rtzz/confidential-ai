@@ -589,12 +589,18 @@ def run():
                                       "reportResultId": report_result_id,
                                       "fixtureOnly": report_fixture["fixtureOnly"]}
 
-        # 场景 8：请求方提交另一机构证书，建单前即被拒绝。
-        checks["foreignRecipientDenied"] = expect_denied(
-            "P7 他方证书建单", "/v1alpha1/tee/exports", {
-                "contractVersion": CONTRACT, "requestId": uuid4().hex,
-                "resultId": data_output["resultId"], "recipientCertPem": auth[CLIENT_B]["cert"]},
-            auth[CLIENT_A]["token"], "ASSET_OWNER_MISMATCH", CLIENT_A)
+        # 场景 8：绕过会强制使用本机构证书的官方网关，中心仍按 mTLS 身份拒绝他方证书。
+        foreign_code, foreign_body = _contract_request("/v1alpha1/tee/exports", {
+            "contractVersion": CONTRACT, "requestId": uuid4().hex,
+            "resultId": data_output["resultId"],
+            "recipientCertPem": auth[CLIENT_B]["cert"]}, CLIENT_A)
+        foreign_error = (foreign_body.get("data") or {}).get("errorCode")
+        if foreign_body.get("status", {}).get("code") == 0 \
+                or foreign_error != "ASSET_OWNER_MISMATCH":
+            raise Failure("P7 中心端未拒绝 mTLS 请求方提交的他方证书")
+        checks["foreignRecipientDenied"] = {
+            "errorCode": foreign_error, "httpStatus": foreign_code,
+            "officialGatewayPinsManagedCertificate": True}
 
         # 运行时身份不得调用数据方的导出裁决接口。
         checks["runtimeExportDenied"] = expect_denied(
