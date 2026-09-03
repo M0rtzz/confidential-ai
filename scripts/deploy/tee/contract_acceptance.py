@@ -259,6 +259,25 @@ def sqlite_query(instance, statement):
     return result.stdout.decode().strip()
 
 
+def cleanup_run_assets(asset_ids, instance='center'):
+    """删除本次验收自己登记的资产，连同它的密文对象、授权规则与密钥。
+
+    只按精确的 asset_id 匹配。验收脚本每跑一次就登记一批新资产并各签发一把密钥，
+    密钥台账从设计上只增不减，不清理会持续累积并淹没链路看板。
+    """
+    ids = [asset_id for asset_id in asset_ids if asset_id]
+    if not ids:
+        return 0
+    condition = 'asset_id in (' + ', '.join(quote(asset_id) for asset_id in ids) + ')'
+    removed = int(sqlite_query(instance, 'select count(*) from tee_key where '
+                               + condition + ' and is_deleted=0;') or 0)
+    sqlite(instance, ['update tee_object set is_deleted=1 where ' + condition + ';',
+                      'update tee_asset set is_deleted=1 where ' + condition + ';',
+                      'update tee_policy set is_deleted=1 where ' + condition + ';',
+                      'update tee_key set is_deleted=1 where ' + condition + ';'])
+    return removed
+
+
 def cleanup_run_objects(task_ids, instance='center'):
     """删除本次验收自己产生的结果对象。
 

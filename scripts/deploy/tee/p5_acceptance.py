@@ -18,7 +18,8 @@ from uuid import uuid4
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from contract_acceptance import (CONTRACT, CENTER, RUNTIME, Failure, cleanup_run_objects,
+from contract_acceptance import (CONTRACT, CENTER, RUNTIME, Failure, cleanup_run_assets,
+                                 cleanup_run_objects,
                                  decrypt, expect_ok, install_approval, login, pem_of,
                                  private_key, remove_approval, request, sign_task,
                                  unwrap, utc_time)
@@ -365,8 +366,9 @@ def run():
     finally:
         try:
             removed = cleanup_run_objects([checks.get("success", {}).get("taskId")])
-            if removed:
-                print(f"P5 已清理本次运行产生的 {removed} 个结果对象", file=sys.stderr)
+            keys = cleanup_run_assets([asset_id])
+            if removed or keys:
+                print(f"P5 已清理本次运行产生的 {removed} 个结果对象与 {keys} 把密钥", file=sys.stderr)
         except (subprocess.CalledProcessError, OSError, ValueError) as error:
             print(f"P5 结果对象清理失败，需人工处理：{type(error).__name__}: {error}", file=sys.stderr)
         remove_approval(fixture)

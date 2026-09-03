@@ -63,6 +63,8 @@ public class TrustChainService {
     private static final int DEFAULT_TASK_LIMIT = 50;
     private static final int RECENT_LOG_LIMIT = 20;
     private static final int PREVIEW_BYTES = 256;
+    /** 数据类对象：密文资产与结果。程序对象另有存放路径，不进「数据加密」这一段。 */
+    private static final Set<String> DATA_KINDS = Set.of("ASSET", "DATA", "MODEL");
 
     public record InstanceView(String endRole, String instanceName, String contractVersion) {
     }
@@ -258,10 +260,18 @@ public class TrustChainService {
         return new ObjectsView(objectItems(ownerId, isCenterInstance()));
     }
 
-    /** 只返回密文前 256 字节的十六进制；调用方必须是贡献机构，或本端为中心端。 */
+    /**
+     * 只返回密文前 256 字节的十六进制；调用方必须是贡献机构，或本端为中心端。
+     *
+     * <p>只受理密文资产与结果对象。程序对象走的是另一套存放路径，且它是算子代码不是数据，
+     * 「中心端看不到明文」这件事也不靠它来证明。
+     */
     public PreviewView preview(String ownerId, String objectId) {
         TeeObjectDO record = objectRepository.findById(new TeeObjectDO.UPK(objectId))
                 .orElseThrow(() -> TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "对象不存在"));
+        if (!DATA_KINDS.contains(record.getKind())) {
+            throw TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "该对象不支持密文预览");
+        }
         List<String> contributors = readStrings(record.getContributorsJson());
         if (!isCenterInstance() && !contributors.contains(ownerId)) {
             throw TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "无权预览该密文对象");
@@ -470,11 +480,13 @@ public class TrustChainService {
     private List<ObjectItem> objectItems(String ownerId, boolean isCenter) {
         if (isCenter) {
             return objectRepository.findTop200ByOrderByGmtCreateDesc().stream()
+                    .filter(object -> DATA_KINDS.contains(object.getKind()))
                     .map(this::toObjectItem).toList();
         }
         List<ObjectItem> items = new ArrayList<>();
-        objectRepository.findTop200ByOwnerIdOrderByGmtCreateDesc(ownerId).forEach(
-                object -> items.add(toObjectItem(object)));
+        objectRepository.findTop200ByOwnerIdOrderByGmtCreateDesc(ownerId).stream()
+                .filter(object -> DATA_KINDS.contains(object.getKind()))
+                .forEach(object -> items.add(toObjectItem(object)));
         for (TeeExportService.ExportableView view : exportGateway.exportable(ownerId).items()) {
             items.add(new ObjectItem(view.objectId(), view.kind(), ownerId, "", emptyIfNull(view.taskId()),
                     view.resultId(), view.keyId(), view.keyVersion(), view.ciphertextSha256(),

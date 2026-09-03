@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import quote as urlquote
 from uuid import uuid4
 
-from contract_acceptance import (CONTRACT, CENTER, Failure, cleanup_run_objects,
+from contract_acceptance import (CONTRACT, CENTER, Failure, cleanup_run_assets, cleanup_run_objects,
                                  expect_ok, install_approval,
                                  login, pem_of, platform_time, quote, remove_approval,
                                  request, sqlite, unwrap, utc_time)
@@ -404,8 +404,9 @@ def run():
         try:
             removed = cleanup_run_objects([checks.get(name, {}).get("taskId")
                                            for name in ("sql", "python", "jar", "canvas")])
-            if removed:
-                print(f"P6 已清理本次运行产生的 {removed} 个结果对象", file=sys.stderr)
+            keys = cleanup_run_assets([fixture.get("assetId")])
+            if removed or keys:
+                print(f"P6 已清理本次运行产生的 {removed} 个结果对象与 {keys} 把密钥", file=sys.stderr)
         except (subprocess.CalledProcessError, OSError, ValueError) as error:
             print(f"P6 结果对象清理失败，需人工处理：{type(error).__name__}: {error}", file=sys.stderr)
         if fixture.get("projectId"):
