@@ -61,10 +61,8 @@ public class LoggingAspect {
         if (result instanceof ResponseEntity) {
             log.info("Returning from: {}", joinPoint.getSignature() + ", Response: " + result);
         }
-        if (shouldCreateUnifiedLog(joinPoint)) {
-            dataSandboxMvpService.audit("OPERATION", "API_CALL", "API",
-                    joinPoint.getSignature().toShortString(), "", true);
-        }
+        // 成功的接口调用不再写入统一日志：每个业务动作都由对应服务单独记账，
+        // 逐调用留痕只会用无检索价值的条目淹没审计视图。失败调用仍然保留。
     }
 
     @AfterThrowing(pointcut = "execution(* org.secretflow.secretpad.web.controller..*.*(..))", throwing = "error")
@@ -75,6 +73,7 @@ public class LoggingAspect {
         }
     }
 
+    /** 只有失败调用会进入统一日志；此处仍排除承载凭据的控制器。 */
     private boolean shouldCreateUnifiedLog(JoinPoint joinPoint) {
         String controller = joinPoint.getSignature().getDeclaringTypeName();
         return !controller.endsWith("AuthController") && !controller.endsWith("DataSandboxController");
