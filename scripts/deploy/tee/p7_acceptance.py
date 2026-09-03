@@ -25,7 +25,6 @@ from p5_acceptance import APPIMAGE, apply_job, builtin_digest, receipt, wait_job
 from platform_deploy import atomic, manifest
 
 
-COMMON_SANDBOX_OWNER = "kuscia-system"
 CONTRACT_PORT = 19686
 CLIENT_A = "client-a"
 CLIENT_B = "client-b"
@@ -57,7 +56,7 @@ EXPECTED_MODEL = json.dumps({
 }).encode()
 
 
-def _common_approval(asset_ids, provider_nodes, operators, hours=2):
+def _common_approval(asset_ids, provider_nodes, operators, sandbox_owner, hours=2):
     """安装一份覆盖两个机构资产的合成审批，两个资产共用同一沙箱。"""
     sandbox_id = "sbx-p7-" + uuid4().hex[:10]
     approval_id = "apr-p7-" + uuid4().hex[:10]
@@ -71,11 +70,11 @@ def _common_approval(asset_ids, provider_nodes, operators, hours=2):
         "insert into ds_sandbox(id,name,owner_id,project_id,image_id,status,expires_at,network_policy,"
         "cpu_cores,memory_gb,gpu_count,storage_gb,kuscia_job_id,endpoint,last_error,created_by,"
         f"created_at,updated_at,deleted) values({quote(sandbox_id)},{quote('P7 合成双机构沙箱')},"
-        f"{quote(COMMON_SANDBOX_OWNER)},'','','STOPPED',{quote(until)},'NO_NETWORK',0,0,0,0,'','','',"
+        f"{quote(sandbox_owner)},'','','STOPPED',{quote(until)},'NO_NETWORK',0,0,0,0,'','','',"
         f"'p7-acceptance',{quote(now)},{quote(now)},0);",
         "insert into ds_sandbox_approval(id,approval_type,sandbox_id,owner_id,submitter,payload_json,"
         "status,current_stage,version,submitted_at,approved_at,completed_at,created_at,updated_at,deleted) "
-        f"values({quote(approval_id)},'DATA_CHANGE',{quote(sandbox_id)},{quote(COMMON_SANDBOX_OWNER)},"
+        f"values({quote(approval_id)},'DATA_CHANGE',{quote(sandbox_id)},{quote(sandbox_owner)},"
         f"'p7-acceptance',{quote(payload)},'COMPLETED','COMPLETED',1,{quote(now)},{quote(now)},"
         f"{quote(now)},{quote(now)},{quote(now)},0);"
     ]
@@ -380,7 +379,12 @@ def run():
     contributor_owners = [auth[CLIENT_A]["ownerId"], auth[CLIENT_B]["ownerId"]]
     operators = [STANDARDIZE_OPERATOR, REPORT_OPERATOR]
     provider_nodes = _provider_nodes(contributor_owners)
-    fixture = _common_approval(asset_ids, provider_nodes, operators)
+    center_node = sqlite_query(
+        "center", "select node_id from node where inst_id=" + quote(center_owner)
+        + " and is_deleted=0 order by node_id limit 1;")
+    if not center_node:
+        raise Failure("P7 无法解析中心实例 nodeId")
+    fixture = _common_approval(asset_ids, provider_nodes, operators, center_node)
     assets = []
     gaps = []
     checks = {}
