@@ -307,7 +307,9 @@ public class LoginInterceptor implements HandlerInterceptor {
         String uri = request.getRequestURI();
         String required = null;
         if (uri.startsWith("/api/v1alpha1/tee/keys/") || uri.startsWith("/api/v1alpha1/tee/policies/")
-                || uri.startsWith("/api/v1alpha1/tee/assets/")) {
+                || uri.startsWith("/api/v1alpha1/tee/assets/")
+                || uri.startsWith("/api/v1alpha1/tee/exports")
+                || uri.startsWith("/api/v1alpha1/tee/results/")) {
             required = "CLIENT";
         } else if (uri.startsWith("/api/v1alpha1/tee/runtime/")) {
             required = "CENTER";

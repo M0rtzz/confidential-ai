@@ -20,7 +20,7 @@ import java.util.UUID;
  * 错误 data 固定四个字段，不含密钥、数据行或内部堆栈。
  */
 @RestControllerAdvice(assignableTypes = {TeeKeyController.class, TeeAssetController.class,
-        TeeRuntimeController.class, TeeEnvironmentController.class})
+        TeeRuntimeController.class, TeeEnvironmentController.class, TeeExportController.class})
 public class TeeExceptionHandler {
 
     @ExceptionHandler(TeeException.class)

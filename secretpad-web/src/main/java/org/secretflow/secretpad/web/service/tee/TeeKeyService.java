@@ -182,6 +182,12 @@ public class TeeKeyService {
         keys.save(key);
     }
 
+    /** 结果出域信封按一次密钥申领记账，不把它混入可信运行时放行计数。 */
+    void countClaim(TeeKeyDO key) {
+        key.setClaimCount(key.getClaimCount() + 1);
+        keys.save(key);
+    }
+
     Optional<TeeKeyDO> active(String assetId, String assetVersion) {
         return keys.findByAssetIdAndAssetVersion(assetId, assetVersion).stream()
                 .filter(key -> TeeContract.STATE_ACTIVE.equals(key.getState())).findFirst();

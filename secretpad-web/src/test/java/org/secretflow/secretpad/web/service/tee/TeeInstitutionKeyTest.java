@@ -4,6 +4,7 @@
  */
 package org.secretflow.secretpad.web.service.tee;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import javax.crypto.Cipher;
@@ -12,6 +13,7 @@ import javax.crypto.spec.PSource;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.spec.MGF1ParameterSpec;
+import java.time.Instant;
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -77,5 +79,38 @@ class TeeInstitutionKeyTest {
     void missingIdentityIsNotAvailable() throws Exception {
         Path empty = Files.createTempDirectory("tee-institution-empty");
         assertFalse(new TeeInstitutionKey(empty.toString()).available());
+    }
+
+    @Test
+    void exportEnvelopeExpiresAtTheRecipient() throws Exception {
+        TeeKeyService.KeyEnvelope envelope = new TeeKeyService.KeyEnvelope("kd-1", "1",
+                TeeContract.ENVELOPE_ALGORITHM,
+                TeeCrypto.certificateSha256(TeeTestMaterial.certificate()), "AAAA");
+        TeeExportService.ExportResult expired = new TeeExportService.ExportResult(
+                TeeContract.VERSION, "object-1", envelope, Instant.now().minusSeconds(1).toString());
+
+        TeeException failure = assertThrows(TeeException.class,
+                () -> new TeeInstitutionKey(identityDir().toString())
+                        .decryptExport(expired, null, new ObjectMapper()));
+
+        assertEquals(TeeContract.Error.EXPORT_NOT_APPROVED, failure.error());
+    }
+
+    @Test
+    void activeExportEnvelopeCanBeUnwrapped() throws Exception {
+        byte[] dataKey = new byte[TeeContract.DATA_KEY_BYTES];
+        Arrays.fill(dataKey, (byte) 9);
+        ObjectMapper mapper = new ObjectMapper();
+        TeeKeyService.KeyEnvelope envelope = new TeeKeyService.KeyEnvelope("kd-1", "1",
+                TeeContract.ENVELOPE_ALGORITHM,
+                TeeCrypto.certificateSha256(TeeTestMaterial.certificate()), seal(dataKey));
+        TeeExportService.ExportResult active = new TeeExportService.ExportResult(
+                TeeContract.VERSION, "object-1", envelope, Instant.now().plusSeconds(60).toString());
+        byte[] plaintext = "approved-result".getBytes();
+        TeeCrypto.EncryptedObject object = TeeCrypto.seal(
+                mapper, dataKey, plaintext, "result-1", "1", "kd-1", "1");
+
+        assertArrayEquals(plaintext, new TeeInstitutionKey(identityDir().toString())
+                .decryptExport(active, object, mapper));
     }
 }

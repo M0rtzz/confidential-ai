@@ -231,6 +231,9 @@ public class SandboxCanvasService {
         }
         String resolvedRunId = string(nodeRun.get("run_id"));
         String table = string(nodeRun.get("output_table"));
+        // TEE 运行必须先于物理表和历史任务预览判定，禁止遗留表形成明文旁路。
+        Map<String, Object> teeOutput = teeTaskOutput(nodeRun, table, nodeId, resolvedRunId);
+        if (teeOutput != null) return teeOutput;
         boolean virtual = CanvasOperatorRegistry.isVirtual(string(nodeRun.get("component_code")));
         boolean legacySharedTable = table.equals(legacyOpTableName(canvasId, nodeId));
         boolean safeTableSnapshot = virtual || !legacySharedTable || isLatestSuccessfulNodeRun(canvasId, nodeId, nodeRun);
@@ -248,8 +251,6 @@ public class SandboxCanvasService {
         }
         Map<String, Object> taskPreview = taskPreview(nodeRun, table, nodeId, resolvedRunId);
         if (taskPreview != null) return taskPreview;
-        Map<String, Object> teeOutput = teeTaskOutput(nodeRun, table, nodeId, resolvedRunId);
-        if (teeOutput != null) return teeOutput;
         return unavailableOutput(table, resolvedRunId, nodeId,
                 legacySharedTable ? "该历史运行的完整结果已被后续运行覆盖，且没有可恢复的任务预览"
                         : "该运行的结果表和任务预览均不可用");

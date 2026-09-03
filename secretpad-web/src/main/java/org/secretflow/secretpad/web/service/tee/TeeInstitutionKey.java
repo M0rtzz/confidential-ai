@@ -4,6 +4,7 @@
  */
 package org.secretflow.secretpad.web.service.tee;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -13,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.PrivateKey;
 import java.security.spec.MGF1ParameterSpec;
+import java.time.Instant;
 import java.util.Arrays;
 
 import javax.crypto.spec.OAEPParameterSpec;
@@ -66,5 +68,51 @@ public class TeeInstitutionKey {
             throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "数据密钥长度不符");
         }
         return key;
+    }
+
+    /**
+     * 使用 P7 导出信封；到期时在持有私钥的接收机构本地拒绝解封。
+     *
+     * <p>中心端只签发密封数据密钥和到期时刻，不接触接收机构私钥。该方法是客户端使用
+     * 导出信封的统一入口，同时核对本机构证书指纹，防止绕过接收者绑定。
+     */
+    private byte[] unwrapExport(TeeExportService.ExportResult exported) {
+        if (exported == null || exported.keyEnvelope() == null) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "导出信封不能为空");
+        }
+        Instant expiresAt = TeeGuard.requireInstant(exported.expiresAt(), "expiresAt");
+        if (!Instant.now().isBefore(expiresAt)) {
+            throw TeeException.of(TeeContract.Error.EXPORT_NOT_APPROVED, "导出信封已过期，请重新取回");
+        }
+        try {
+            String localFingerprint = TeeCrypto.certificateSha256(
+                    TeeMutualTls.certificate(certDir.resolve("client.crt")));
+            if (!localFingerprint.equals(exported.keyEnvelope().recipientCertSha256())) {
+                throw TeeException.of(TeeContract.Error.ASSET_OWNER_MISMATCH,
+                        "导出信封未密封给本机构证书");
+            }
+        } catch (TeeException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw TeeException.of(TeeContract.Error.KEY_SERVICE_UNAVAILABLE, "本机构证书无法读取");
+        }
+        return unwrap(exported.keyEnvelope());
+    }
+
+    /** 解封并认证解密一份 P7 导出结果；数据密钥不会返回给调用方。 */
+    public byte[] decryptExport(TeeExportService.ExportResult exported,
+                                TeeCrypto.EncryptedObject object, ObjectMapper mapper) {
+        byte[] dataKey = unwrapExport(exported);
+        try {
+            if (object == null
+                    || !exported.keyEnvelope().keyId().equals(object.keyId())
+                    || !exported.keyEnvelope().keyVersion().equals(object.keyVersion())) {
+                throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED,
+                        "导出信封与密文对象绑定不符");
+            }
+            return TeeCrypto.open(mapper, dataKey, object);
+        } finally {
+            Arrays.fill(dataKey, (byte) 0);
+        }
     }
 }
