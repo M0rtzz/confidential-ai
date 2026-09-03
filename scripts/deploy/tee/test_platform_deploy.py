@@ -529,7 +529,7 @@ class CrossInstanceChannelTests(unittest.TestCase):
         self.assertIn("runtime-contract-client/client.key", source)
         self.assertIn('chmod 700 "$d" "$d/trust"', source)
         self.assertIn('stat -f -c %T /dev/shm', source)
-        self.assertIn('chmod o+rx / /usr /usr/local /usr/lib /usr/lib64 /opt /opt/java /opt/data-sandbox; chmod -R o+rX /usr/local /usr/lib /usr/lib64 /opt/java/openjdk /opt/data-sandbox', source)
+        self.assertIn('chmod o+rx / /usr /usr/local /usr/lib /usr/lib64 /opt /opt/java /opt/data-sandbox; find /usr/local /usr/lib /usr/lib64 /opt/java/openjdk /opt/data-sandbox \\\\( \\\\( -type d ! -perm -o=rx \\\\) -o \\\\( -type f ! -perm -o=r \\\\) -o \\\\( -type f -perm /u=x,g=x,o=x ! -perm -o=x \\\\) \\\\) -exec chmod o+rX {} +', source)
         self.assertNotIn('chmod 600 "$d"/* "$d/trust/center-1.pem"', source)
         # This Kuscia AppImage CRD does not expose Pod volumes. The runtime
         # deliberately uses the OCI-provided /dev/shm tmpfs instead.

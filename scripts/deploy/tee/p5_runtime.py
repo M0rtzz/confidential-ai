@@ -49,7 +49,7 @@ def register():
     kube('center', 'apply', '-f', '-', value=secret)
 
     command = ['/bin/sh', '-ec',
-        'umask 077; chmod o+rx / /usr /usr/local /usr/lib /usr/lib64 /opt /opt/java /opt/data-sandbox; chmod -R o+rX /usr/local /usr/lib /usr/lib64 /opt/java/openjdk /opt/data-sandbox; d=$(mktemp -d /dev/shm/tee-p5.XXXXXX); trap \'rm -rf "$d"\' EXIT; '
+        'umask 077; chmod o+rx / /usr /usr/local /usr/lib /usr/lib64 /opt /opt/java /opt/data-sandbox; find /usr/local /usr/lib /usr/lib64 /opt/java/openjdk /opt/data-sandbox \\( \\( -type d ! -perm -o=rx \\) -o \\( -type f ! -perm -o=r \\) -o \\( -type f -perm /u=x,g=x,o=x ! -perm -o=x \\) \\) -exec chmod o+rX {} +; d=$(mktemp -d /dev/shm/tee-p5.XXXXXX); trap \'rm -rf "$d"\' EXIT; '
         'test "$(stat -f -c %T /dev/shm)" = tmpfs; '
         'printf "%s" "$TEE_API_CA_PEM" > "$d/api-ca.crt"; '
         'printf "%s" "$TEE_API_CLIENT_CERT_PEM" > "$d/api-client.crt"; '
