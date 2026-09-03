@@ -56,6 +56,16 @@ EXPECTED_MODEL = json.dumps({
 }).encode()
 
 
+def _parse_instant(value):
+    """兼容 Java Instant 输出的纳秒精度，比较时保留 Python 支持的微秒。"""
+    normalized = value.replace("Z", "+00:00")
+    if normalized.endswith("+00:00") and "." in normalized:
+        timestamp = normalized[:-6]
+        second, fraction = timestamp.split(".", 1)
+        normalized = second + "." + fraction[:6] + "+00:00"
+    return datetime.fromisoformat(normalized)
+
+
 def _common_approval(asset_ids, provider_nodes, operators, sandbox_owner, hours=2):
     """安装一份覆盖两个机构资产的合成审批，两个资产共用同一沙箱。"""
     sandbox_id = "sbx-p7-" + uuid4().hex[:10]
@@ -319,7 +329,7 @@ def _export(instance, token, result_id, cert):
 
 def _decrypt_export(exported, object_id, contributor):
     try:
-        expires_at = datetime.fromisoformat(exported["expiresAt"].replace("Z", "+00:00"))
+        expires_at = _parse_instant(exported["expiresAt"])
     except (KeyError, TypeError, ValueError) as failure:
         raise Failure("P7 导出信封缺少有效到期时刻") from failure
     if datetime.now(timezone.utc) >= expires_at:
@@ -597,7 +607,7 @@ def run():
         # 场景 9：接收机构统一解封入口按中心端 expiresAt 拒绝旧信封；工单可重新取回。
         expires_at = exported.get("expiresAt", "")
         try:
-            expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            expiry = _parse_instant(expires_at)
             ttl = (expiry - datetime.now(timezone.utc)).total_seconds()
         except (TypeError, ValueError):
             ttl = -1
