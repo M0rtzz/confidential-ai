@@ -300,14 +300,19 @@ public class TrustChainService {
         boolean isCenter = isCenterInstance();
         String selfNodeId = selfNodeId(ownerId);
         Set<NodeRouteDO> routes = nodeRouteRepository.findBySrcNodeIdOrDstNodeId(selfNodeId);
-        Map<String, List<RouteItem>> byPeer = new LinkedHashMap<>();
+        Set<String> peerNodeIds = new LinkedHashSet<>();
         for (NodeRouteDO route : routes) {
-            boolean outbound = selfNodeId.equals(route.getSrcNodeId());
-            String peerNodeId = outbound ? route.getDstNodeId() : route.getSrcNodeId();
-            byPeer.computeIfAbsent(peerNodeId, key -> new ArrayList<>())
-                    .add(new RouteItem(outbound ? "OUTBOUND" : "INBOUND",
-                            route.getSrcNodeId(), route.getDstNodeId(),
-                            routeStatus(route.getSrcNodeId(), route.getDstNodeId())));
+            peerNodeIds.add(selfNodeId.equals(route.getSrcNodeId())
+                    ? route.getDstNodeId() : route.getSrcNodeId());
+        }
+        Map<String, List<RouteItem>> byPeer = new LinkedHashMap<>();
+        for (String peerNodeId : peerNodeIds) {
+            // 两个方向都向 Kuscia 查一次：本端只登记自己创建的那一条，另一条在对端库里。
+            byPeer.put(peerNodeId, List.of(
+                    new RouteItem("OUTBOUND", selfNodeId, peerNodeId,
+                            routeStatus(selfNodeId, peerNodeId)),
+                    new RouteItem("INBOUND", peerNodeId, selfNodeId,
+                            routeStatus(peerNodeId, selfNodeId))));
         }
         List<PeerItem> peers = new ArrayList<>();
         for (Map.Entry<String, List<RouteItem>> entry : byPeer.entrySet()) {
@@ -333,19 +338,18 @@ public class TrustChainService {
     }
 
     /**
-     * 路由状态取 Kuscia 的实际判定，不用"本端有没有这条记录"代替。
+     * 查询「from → to」这条路由在 Kuscia 中的实际状态。
      *
-     * <p>每个平台的 node_route 只登记自己创建的那一条，两端各存一半；用记录是否存在
-     * 推断双向就绪会把对端创建的那一半误报为未就绪。AUTONOMY 下的方向换算与
-     * {@code NodeRouterServiceImpl.queryPage} 保持一致。
+     * <p>不能用"本端 node_route 有没有这条记录"代替：每个平台只登记自己创建的那一条，
+     * 两端各存一半，用记录是否存在推断会把对端创建的那一半误报为未就绪。
+     * AUTONOMY 下按对端视角登记路由，查询时把 channel 固定为发起方，与
+     * {@code NodeRouterServiceImpl.queryPage} 的换算保持一致。
      */
-    private String routeStatus(String srcNodeId, String dstNodeId) {
+    private String routeStatus(String fromNodeId, String toNodeId) {
         try {
             boolean autonomy = PlatformTypeEnum.AUTONOMY.equals(envService.getPlatformType());
-            String from = autonomy ? dstNodeId : srcNodeId;
-            String to = autonomy ? srcNodeId : dstNodeId;
             DomainRoute.RouteStatus status = nodeRouteManager.getRouteStatus(
-                    from, to, autonomy ? from : null);
+                    fromNodeId, toNodeId, autonomy ? fromNodeId : null);
             return status == null || status.getStatus() == null ? "Unknown" : status.getStatus();
         } catch (RuntimeException ignored) {
             return "Unknown";
