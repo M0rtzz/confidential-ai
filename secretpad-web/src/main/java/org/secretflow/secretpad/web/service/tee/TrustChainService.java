@@ -310,9 +310,9 @@ public class TrustChainService {
             // 两个方向都向 Kuscia 查一次：本端只登记自己创建的那一条，另一条在对端库里。
             byPeer.put(peerNodeId, List.of(
                     new RouteItem("OUTBOUND", selfNodeId, peerNodeId,
-                            routeStatus(selfNodeId, peerNodeId)),
+                            routeStatus(selfNodeId, peerNodeId, selfNodeId)),
                     new RouteItem("INBOUND", peerNodeId, selfNodeId,
-                            routeStatus(peerNodeId, selfNodeId))));
+                            routeStatus(peerNodeId, selfNodeId, selfNodeId))));
         }
         List<PeerItem> peers = new ArrayList<>();
         for (Map.Entry<String, List<RouteItem>> entry : byPeer.entrySet()) {
@@ -342,14 +342,14 @@ public class TrustChainService {
      *
      * <p>不能用"本端 node_route 有没有这条记录"代替：每个平台只登记自己创建的那一条，
      * 两端各存一半，用记录是否存在推断会把对端创建的那一半误报为未就绪。
-     * AUTONOMY 下按对端视角登记路由，查询时把 channel 固定为发起方，与
-     * {@code NodeRouterServiceImpl.queryPage} 的换算保持一致。
+     * {@code channelNodeId} 选的是走哪个节点的 Kuscia 通道，只能是本端节点；
+     * 非 AUTONOMY 部署没有按节点分通道，传空即可。
      */
-    private String routeStatus(String fromNodeId, String toNodeId) {
+    private String routeStatus(String fromNodeId, String toNodeId, String channelNodeId) {
         try {
             boolean autonomy = PlatformTypeEnum.AUTONOMY.equals(envService.getPlatformType());
             DomainRoute.RouteStatus status = nodeRouteManager.getRouteStatus(
-                    fromNodeId, toNodeId, autonomy ? fromNodeId : null);
+                    fromNodeId, toNodeId, autonomy ? channelNodeId : null);
             return status == null || status.getStatus() == null ? "Unknown" : status.getStatus();
         } catch (RuntimeException ignored) {
             return "Unknown";
