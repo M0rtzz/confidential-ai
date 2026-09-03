@@ -15,4 +15,7 @@ public interface TeePolicyRepository extends BaseRepository<TeePolicyDO, TeePoli
 
     /** 取资产版本上已登记的授权规则。 */
     List<TeePolicyDO> findByAssetIdAndAssetVersion(String assetId, String assetVersion);
+
+    /** 中心端信任链看板的全量视图，按创建时间倒序，上限 200 条。 */
+    List<TeePolicyDO> findTop200ByOrderByGmtCreateDesc();
 }

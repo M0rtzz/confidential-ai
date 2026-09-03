@@ -35,6 +35,7 @@ import org.secretflow.secretpad.persistence.repository.*;
 import org.secretflow.secretpad.service.EnvService;
 import org.secretflow.secretpad.service.InstService;
 import org.secretflow.secretpad.service.NodeRouterService;
+import org.secretflow.secretpad.service.TeeUnbindCheckGuard;
 import org.secretflow.secretpad.service.enums.VoteSyncTypeEnum;
 import org.secretflow.secretpad.service.model.common.SecretPadPageResponse;
 import org.secretflow.secretpad.service.model.datasync.vote.DbSyncRequest;
@@ -48,6 +49,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.secretflow.v1alpha1.kusciaapi.DomainRoute;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -81,6 +83,9 @@ public class NodeRouterServiceImpl implements NodeRouterService {
     private final EnvService envService;
 
     private final InstService instService;
+
+    /** TEE 未清理项校验；非 TEE 部署或 web 模块未装配实现 bean 时为空，按既有行为跳过。 */
+    private final ObjectProvider<TeeUnbindCheckGuard> teeUnbindCheckGuard;
 
     @Value("${secretpad.gateway}")
     private String kusciaLiteGateway;
@@ -271,7 +276,17 @@ public class NodeRouterServiceImpl implements NodeRouterService {
         NodeDO srcNode = nodeRepository.findByNodeId(nodeRouteDO.getSrcNodeId());
         NodeDO dstNode = nodeRepository.findByNodeId(nodeRouteDO.getDstNodeId());
         validateNoRunningJobs(srcNode, dstNode);
+        teeUnbindCheckGuard.ifAvailable(guard -> guard.check(ownerOf(srcNode), ownerOf(dstNode)));
         nodeRouteManager.deleteNodeRoute(routerId);
+    }
+
+    /** TEE 台账按机构记账，P2P 部署下机构标识是 instId，不是 nodeId。 */
+    private String ownerOf(NodeDO node) {
+        if (node == null) {
+            return null;
+        }
+        return envService.isAutonomy() && StringUtils.isNotBlank(node.getInstId())
+                ? node.getInstId() : node.getNodeId();
     }
 
     private void checkDataPermissions(String nodeId) {

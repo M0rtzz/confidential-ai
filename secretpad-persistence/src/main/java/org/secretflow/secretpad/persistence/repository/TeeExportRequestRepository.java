@@ -26,4 +26,7 @@ public interface TeeExportRequestRepository
             String resultId, String requesterOwnerId);
 
     List<TeeExportRequestDO> findByObjectIdAndStatus(String objectId, String status);
+
+    /** 信任链看板的全量视图，按创建时间倒序，上限 200 条。 */
+    List<TeeExportRequestDO> findTop200ByOrderByGmtCreateDesc();
 }

@@ -182,6 +182,10 @@ public class LoginInterceptor implements HandlerInterceptor {
         if (onContractPort) {
             return rejectTee(response, HttpServletResponse.SC_FORBIDDEN, "AUDIT_ACCESS_DENIED", 49012);
         }
+        // 端身份探测免登录，但不能在平台间 mTLS 端口上可达（上面已经拒绝）。
+        if ("/api/v1alpha1/data-sandbox/instance".equals(request.getRequestURI())) {
+            return true;
+        }
         // 开发端点跳板：安全关键路径，独立于 auth.enabled 强制校验一次性 token
         if (request.getRequestURI().startsWith("/api/v1alpha1/data-sandbox/proxy/")) {
             processByDevEndpointToken(request, response);

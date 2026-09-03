@@ -476,7 +476,7 @@ def prepare():
                           '    --env-file "$CREDENTIAL_FILE" \\\n'
                           '    -e "TEE_FOUNDATION_PROBE_URL=http://${DEV_PREFIX}-tee-probe:8089/health" \\\n'
                           '    -e "TEE_KEY_ADAPTER_URL=${TEE_KEY_ADAPTER_URL:-}" \\\n'
-                          '    -e "TEE_END_ROLES=${TEE_END_ROLES:-CLIENT,CENTER}" \\\n'
+                          '    -e "TEE_END_ROLES=${TEE_END_ROLES:-CENTER,CLIENT}" \\\n'
                           '    -e "TEE_CONTRACT_PORT=${TEE_CONTRACT_PORT:-0}" \\\n'
                           '    -e "TEE_CONTRACT_CENTER_URL=${TEE_CONTRACT_CENTER_URL:-}" \\\n'
                           '    -e "SECRETPAD_DATA_SANDBOX_TEE_DISPATCH_ENABLED=${TEE_DISPATCH_ENABLED:-false}" \\\n'
@@ -635,7 +635,7 @@ def up(name):
                TEE_RUNTIME_IMAGE_DIGEST=runtime_registration.get('imageId', ''),
                TEE_BUILTIN_SHA256=runtime_registration.get('builtinSha256', ''),
                TEE_CONTRACT_CENTER_URL='' if name == 'center' else CONTRACT_CENTER_URL,
-               TEE_END_ROLES='CLIENT,CENTER' if name == 'center' else 'CLIENT')
+               TEE_END_ROLES='CENTER,CLIENT' if name == 'center' else 'CLIENT')
     # 独立随机口令只交给上游入口写入本实例 600 凭据文件，不输出到日志。
     password = secrets.token_urlsafe(24) if not (RUNTIME / name / 'secretpad.env').exists() else None
     backend_branch = git(ROOT, 'branch', '--show-current')

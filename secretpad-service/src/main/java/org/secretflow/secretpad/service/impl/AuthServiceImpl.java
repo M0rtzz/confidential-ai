@@ -102,8 +102,9 @@ public class AuthServiceImpl implements AuthService {
      * 解析本次会话的端角色。
      *
      * <p>实例通过 {@code secretpad.tee-end-roles} 声明自己支持哪些端：
-     * 生产按端部署为单端，开发机允许两端都开。单端实例可省略选择，双端实例必须显式选择。
-     * 端角色由服务端决定，不接受请求头自报，也不因端角色额外授予机构或项目权限。
+     * 生产按端部署为单端，开发机允许两端都开。声明列表首项即本实例的端身份，
+     * 登录不带参数按它解析，单端与多端实例都如此；仍允许显式指定列表内的其他端，
+     * 供验收脚本使用。端角色由服务端决定，不接受请求头自报，也不因端角色额外授予机构或项目权限。
      */
     private String resolveEndRole(String requested) {
         java.util.List<String> allowed = java.util.Arrays.stream(allowedEndRoles.split(","))
@@ -112,10 +113,7 @@ public class AuthServiceImpl implements AuthService {
             throw SecretpadException.of(AuthErrorCode.AUTH_FAILED, "instance declares no end role");
         }
         if (requested == null || requested.isBlank()) {
-            if (allowed.size() == 1) {
-                return allowed.get(0);
-            }
-            throw SecretpadException.of(AuthErrorCode.AUTH_FAILED, "END_ROLE_REQUIRED");
+            return allowed.get(0);
         }
         String value = requested.trim();
         if (!allowed.contains(value)) {

@@ -21,4 +21,7 @@ public interface TeeKeyRepository extends BaseRepository<TeeKeyDO, TeeKeyDO.UPK>
 
     /** 台账查询按机构过滤。 */
     List<TeeKeyDO> findByOwnerId(String ownerId);
+
+    /** 中心端信任链看板的全量视图，按创建时间倒序，上限 200 条。 */
+    List<TeeKeyDO> findTop200ByOrderByGmtCreateDesc();
 }
