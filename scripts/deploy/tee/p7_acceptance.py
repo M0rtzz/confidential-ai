@@ -28,11 +28,11 @@ from platform_deploy import atomic, manifest
 CONTRACT_PORT = 19686
 CLIENT_A = "client-a"
 CLIENT_B = "client-b"
-REPORT_OPERATOR = "report.feature_importance"
+REPORT_OPERATOR = "ml.binary_classification"
 STANDARDIZE_OPERATOR = "preprocessing.standardize"
 GRANTED_COLUMNS = ["age", "income", "label"]
 ALL_COLUMNS = GRANTED_COLUMNS + ["city", "private_note"]
-REPORT_KINDS = ["FEATURE_IMPORTANCE"]
+REPORT_KINDS = ["EVALUATION_METRICS"]
 SAMPLE_A = """age,income,label,city,private_note
 31,42000,0,hangzhou,private-a
 45,88000,1,shanghai,private-b
@@ -569,7 +569,7 @@ def run():
 
         # 场景 7、11：报告由真实 TEE 回执返回明文，导出工单入口显式拒绝。
         report_run = _run_task([assets[0]], fixture["sandboxId"], REPORT_OPERATOR,
-                               {"op": REPORT_OPERATOR, "columns": ["age", "income"]}, REPORT_KINDS,
+                               {"op": REPORT_OPERATOR, "label": "label", "pred": "label"}, REPORT_KINDS,
                                fixture)
         reports = [item for item in report_run["receipt"].get("outputs", []) if item.get("kind") == "REPORT"]
         if not reports or any(item.get("encrypted") is not False or not item.get("content") for item in reports):
