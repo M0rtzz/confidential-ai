@@ -10,6 +10,7 @@ import hashlib
 import json
 import secrets
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,8 +18,8 @@ from uuid import uuid4
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from contract_acceptance import (CONTRACT, CENTER, RUNTIME, Failure, decrypt,
-                                 expect_ok, install_approval, login, pem_of,
+from contract_acceptance import (CONTRACT, CENTER, RUNTIME, Failure, cleanup_run_objects,
+                                 decrypt, expect_ok, install_approval, login, pem_of,
                                  private_key, remove_approval, request, sign_task,
                                  unwrap, utc_time)
 from foundation import DOMAIN, kube_labels
@@ -362,6 +363,12 @@ def run():
         atomic(CENTER / "tee/p5-acceptance.json", evidence, 0o600)
         return evidence
     finally:
+        try:
+            removed = cleanup_run_objects([checks.get("success", {}).get("taskId")])
+            if removed:
+                print(f"P5 已清理本次运行产生的 {removed} 个结果对象", file=sys.stderr)
+        except (subprocess.CalledProcessError, OSError, ValueError) as error:
+            print(f"P5 结果对象清理失败，需人工处理：{type(error).__name__}: {error}", file=sys.stderr)
         remove_approval(fixture)
 
 

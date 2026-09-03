@@ -7,6 +7,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import traceback
@@ -15,7 +16,8 @@ from pathlib import Path
 from urllib.parse import quote as urlquote
 from uuid import uuid4
 
-from contract_acceptance import (CONTRACT, CENTER, Failure, expect_ok, install_approval,
+from contract_acceptance import (CONTRACT, CENTER, Failure, cleanup_run_objects,
+                                 expect_ok, install_approval,
                                  login, pem_of, platform_time, quote, remove_approval,
                                  request, sqlite, unwrap, utc_time)
 from p5_acceptance import (ALL_COLUMNS, GRANTED_COLUMNS, current_encrypt,
@@ -399,6 +401,13 @@ def run():
         atomic(CENTER / "tee/p6-acceptance.json", evidence, 0o600)
         return evidence
     finally:
+        try:
+            removed = cleanup_run_objects([checks.get(name, {}).get("taskId")
+                                           for name in ("sql", "python", "jar", "canvas")])
+            if removed:
+                print(f"P6 已清理本次运行产生的 {removed} 个结果对象", file=sys.stderr)
+        except (subprocess.CalledProcessError, OSError, ValueError) as error:
+            print(f"P6 结果对象清理失败，需人工处理：{type(error).__name__}: {error}", file=sys.stderr)
         if fixture.get("projectId"):
             cleanup_platform_fixture(fixture)
         remove_approval(fixture)

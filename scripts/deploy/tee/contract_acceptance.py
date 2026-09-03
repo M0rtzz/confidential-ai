@@ -259,6 +259,22 @@ def sqlite_query(instance, statement):
     return result.stdout.decode().strip()
 
 
+def cleanup_run_objects(task_ids, instance='center'):
+    """删除本次验收自己产生的结果对象。
+
+    只按精确的 task_id 匹配，不按时间或类型批量删除；验收脚本历次运行留下的结果
+    对象会淹没链路看板，但清理失败不应让已经通过的验收变成失败，调用方需自行兜住异常。
+    """
+    ids = [task_id for task_id in task_ids if task_id]
+    if not ids:
+        return 0
+    condition = 'task_id in (' + ', '.join(quote(task_id) for task_id in ids) + ')'
+    removed = int(sqlite_query(instance, 'select count(*) from tee_object where '
+                               + condition + ' and is_deleted=0;') or 0)
+    sqlite(instance, ['update tee_object set is_deleted=1 where ' + condition + ';'])
+    return removed
+
+
 def multipart(field, filename, content, content_type):
     boundary = '----p4' + uuid4().hex
     body = (f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; '

@@ -7,12 +7,16 @@ package org.secretflow.secretpad.web.service.tee;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.secretflow.secretpad.persistence.entity.InstDO;
+import org.secretflow.secretpad.common.enums.PlatformTypeEnum;
 import org.secretflow.secretpad.common.dto.UserContextDTO;
 import org.secretflow.secretpad.common.util.UserContext;
+import org.secretflow.secretpad.manager.integration.noderoute.AbstractNodeRouteManager;
 import org.secretflow.secretpad.persistence.entity.NodeDO;
 import org.secretflow.secretpad.persistence.entity.NodeRouteDO;
 import org.secretflow.secretpad.persistence.entity.ProjectJobDO;
 import org.secretflow.secretpad.persistence.entity.ProjectNodeDO;
+import org.secretflow.secretpad.service.EnvService;
+import org.secretflow.v1alpha1.kusciaapi.DomainRoute;
 import org.secretflow.secretpad.persistence.entity.TeeExportRequestDO;
 import org.secretflow.secretpad.persistence.entity.TeeKeyDO;
 import org.secretflow.secretpad.persistence.entity.TeeObjectDO;
@@ -37,7 +41,9 @@ import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.List;
 import java.util.Set;
 
@@ -117,8 +123,12 @@ public class TrustChainService {
     public record ExportsView(List<ExportItem> items) {
     }
 
+    /** 本端登记的一条节点路由及其在 Kuscia 中的实际状态。 */
+    public record RouteItem(String direction, String srcNodeId, String dstNodeId, String status) {
+    }
+
     public record PeerItem(String ownerId, String ownerName, String nodeId, String address, String certSha256,
-                           boolean routeOutboundReady, boolean routeInboundReady,
+                           List<RouteItem> routes,
                            Boolean contractChannelReachable, String contractCheckedAt) {
     }
 
@@ -148,6 +158,8 @@ public class TrustChainService {
     private final ProjectNodeRepository projectNodeRepository;
     private final ProjectJobRepository projectJobRepository;
     private final TeeIdentityRegistry identityRegistry;
+    private final AbstractNodeRouteManager nodeRouteManager;
+    private final EnvService envService;
     private final DataSandboxMvpService mvp;
     private final ObjectMapper mapper;
 
@@ -166,7 +178,8 @@ public class TrustChainService {
                              TeeRuntimeTaskRepository taskRepository, NodeRepository nodeRepository,
                              NodeRouteRepository nodeRouteRepository, InstRepository instRepository,
                              ProjectNodeRepository projectNodeRepository, ProjectJobRepository projectJobRepository,
-                             TeeIdentityRegistry identityRegistry, DataSandboxMvpService mvp, ObjectMapper mapper) {
+                             TeeIdentityRegistry identityRegistry, AbstractNodeRouteManager nodeRouteManager,
+                             EnvService envService, DataSandboxMvpService mvp, ObjectMapper mapper) {
         this.center = center;
         this.environmentService = environmentService;
         this.keyRepository = keyRepository;
@@ -184,6 +197,8 @@ public class TrustChainService {
         this.projectNodeRepository = projectNodeRepository;
         this.projectJobRepository = projectJobRepository;
         this.identityRegistry = identityRegistry;
+        this.nodeRouteManager = nodeRouteManager;
+        this.envService = envService;
         this.mvp = mvp;
         this.mapper = mapper;
     }
@@ -285,25 +300,21 @@ public class TrustChainService {
         boolean isCenter = isCenterInstance();
         String selfNodeId = selfNodeId(ownerId);
         Set<NodeRouteDO> routes = nodeRouteRepository.findBySrcNodeIdOrDstNodeId(selfNodeId);
-        Set<String> peerNodeIds = new LinkedHashSet<>();
+        Map<String, List<RouteItem>> byPeer = new LinkedHashMap<>();
         for (NodeRouteDO route : routes) {
-            if (selfNodeId.equals(route.getSrcNodeId())) {
-                peerNodeIds.add(route.getDstNodeId());
-            }
-            if (selfNodeId.equals(route.getDstNodeId())) {
-                peerNodeIds.add(route.getSrcNodeId());
-            }
+            boolean outbound = selfNodeId.equals(route.getSrcNodeId());
+            String peerNodeId = outbound ? route.getDstNodeId() : route.getSrcNodeId();
+            byPeer.computeIfAbsent(peerNodeId, key -> new ArrayList<>())
+                    .add(new RouteItem(outbound ? "OUTBOUND" : "INBOUND",
+                            route.getSrcNodeId(), route.getDstNodeId(),
+                            routeStatus(route.getSrcNodeId(), route.getDstNodeId())));
         }
         List<PeerItem> peers = new ArrayList<>();
-        for (String peerNodeId : peerNodeIds) {
-            NodeDO peerNode = nodeRepository.findByNodeId(peerNodeId);
+        for (Map.Entry<String, List<RouteItem>> entry : byPeer.entrySet()) {
+            NodeDO peerNode = nodeRepository.findByNodeId(entry.getKey());
             if (peerNode == null) {
                 continue;
             }
-            boolean outboundReady = nodeRouteRepository
-                    .findBySrcNodeIdAndDstNodeId(selfNodeId, peerNodeId).isPresent();
-            boolean inboundReady = nodeRouteRepository
-                    .findBySrcNodeIdAndDstNodeId(peerNodeId, selfNodeId).isPresent();
             String peerOwnerId = notBlank(peerNode.getInstId()) ? peerNode.getInstId() : peerNode.getNodeId();
             InstDO inst = instRepository.findByInstId(peerOwnerId);
             String peerOwnerName = inst != null ? inst.getName() : peerNode.getName();
@@ -311,7 +322,7 @@ public class TrustChainService {
             String checkedAt = isCenter ? null : Instant.now().toString();
             peers.add(new PeerItem(peerOwnerId, peerOwnerName, peerNode.getNodeId(),
                     emptyIfNull(peerNode.getNetAddress()), safeFingerprint(peerOwnerId),
-                    outboundReady, inboundReady, reachable, checkedAt));
+                    List.copyOf(entry.getValue()), reachable, checkedAt));
         }
         if (!isCenter && peers.size() > 1) {
             // 客户端至多一条：中心端。
@@ -319,6 +330,26 @@ public class TrustChainService {
         }
         boolean bound = isCenter ? !peers.isEmpty() : center.configured();
         return new PeerView(endRole(), bound, peers);
+    }
+
+    /**
+     * 路由状态取 Kuscia 的实际判定，不用"本端有没有这条记录"代替。
+     *
+     * <p>每个平台的 node_route 只登记自己创建的那一条，两端各存一半；用记录是否存在
+     * 推断双向就绪会把对端创建的那一半误报为未就绪。AUTONOMY 下的方向换算与
+     * {@code NodeRouterServiceImpl.queryPage} 保持一致。
+     */
+    private String routeStatus(String srcNodeId, String dstNodeId) {
+        try {
+            boolean autonomy = PlatformTypeEnum.AUTONOMY.equals(envService.getPlatformType());
+            String from = autonomy ? dstNodeId : srcNodeId;
+            String to = autonomy ? srcNodeId : dstNodeId;
+            DomainRoute.RouteStatus status = nodeRouteManager.getRouteStatus(
+                    from, to, autonomy ? from : null);
+            return status == null || status.getStatus() == null ? "Unknown" : status.getStatus();
+        } catch (RuntimeException ignored) {
+            return "Unknown";
+        }
     }
 
     /**

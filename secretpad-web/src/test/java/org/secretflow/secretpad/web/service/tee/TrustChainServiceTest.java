@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.secretflow.secretpad.persistence.entity.TeeObjectDO;
 import org.secretflow.secretpad.persistence.repository.InstRepository;
 import org.secretflow.secretpad.persistence.repository.NodeRepository;
+import org.secretflow.secretpad.manager.integration.noderoute.AbstractNodeRouteManager;
 import org.secretflow.secretpad.persistence.repository.NodeRouteRepository;
 import org.secretflow.secretpad.persistence.repository.ProjectJobRepository;
 import org.secretflow.secretpad.persistence.repository.ProjectNodeRepository;
@@ -18,6 +19,7 @@ import org.secretflow.secretpad.persistence.repository.TeeKeyRepository;
 import org.secretflow.secretpad.persistence.repository.TeeObjectRepository;
 import org.secretflow.secretpad.persistence.repository.TeePolicyRepository;
 import org.secretflow.secretpad.persistence.repository.TeeRuntimeTaskRepository;
+import org.secretflow.secretpad.service.EnvService;
 import org.secretflow.secretpad.web.service.DataSandboxMvpService;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -58,11 +60,14 @@ class TrustChainServiceTest {
         ProjectJobRepository projectJobRepository = mock(ProjectJobRepository.class);
         TeeIdentityRegistry identityRegistry = mock(TeeIdentityRegistry.class);
         DataSandboxMvpService mvp = mock(DataSandboxMvpService.class);
+        AbstractNodeRouteManager nodeRouteManager = mock(AbstractNodeRouteManager.class);
+        EnvService envService = mock(EnvService.class);
         when(projectNodeRepository.findByNodeId(anyString())).thenReturn(List.of());
         TrustChainService service = new TrustChainService(center, environmentService, keyRepository, keyGateway,
                 policyRepository, objectRepository, objectStore, exportRequestRepository, exportVoteRepository,
                 exportGateway, taskRepository, nodeRepository, nodeRouteRepository, instRepository,
-                projectNodeRepository, projectJobRepository, identityRegistry, mvp, new ObjectMapper());
+                projectNodeRepository, projectJobRepository, identityRegistry, nodeRouteManager,
+                envService, mvp, new ObjectMapper());
         ReflectionTestUtils.setField(service, "allowedEndRoles", "CENTER,CLIENT");
         ReflectionTestUtils.setField(service, "runtimeImageId", "");
         return service;
