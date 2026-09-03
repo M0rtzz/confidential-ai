@@ -85,7 +85,7 @@ def _common_approval(asset_ids, provider_nodes, operators, hours=2):
         statements.extend([
             "insert into ds_sandbox_dataset_mount(id,sandbox_id,asset_id,asset_version,provider_node_id,"
             f"staging_uri,mount_path,checksum,status,expires_at,created_at,updated_at,deleted) values("
-            f"{quote(mount_id)},{quote(sandbox_id)},{quote(asset_id)},1,{quote(provider_node)},'','','READY',"
+            f"{quote(mount_id)},{quote(sandbox_id)},{quote(asset_id)},1,{quote(provider_node)},'','','','READY',"
             f"{quote(until)},{quote(now)},{quote(now)},0);",
             "insert into ds_sandbox_mount_control(id,sandbox_id,asset_id,allow_use,use_until,version,"
             f"updated_by,updated_at) values({quote(control_id)},{quote(sandbox_id)},{quote(asset_id)},1,"
