@@ -113,4 +113,35 @@ class TeeExportGatewayTest {
         when(center.get(eq("/exports/exp-1"), eq(TeeExportService.RequestView.class))).thenReturn(view);
         return new TeeExportGateway(service, center, key, mvp, new ObjectMapper());
     }
+
+    @Test
+    void delegatedActionsAreAuditedLocally() {
+        TeeExportService service = mock(TeeExportService.class);
+        TeeCenterClient center = mock(TeeCenterClient.class);
+        TeeInstitutionKey key = mock(TeeInstitutionKey.class);
+        DataSandboxMvpService mvp = mock(DataSandboxMvpService.class);
+        when(center.configured()).thenReturn(true);
+        when(key.certificatePem()).thenReturn("managed-pem");
+        TeeExportService.RequestView view = new TeeExportService.RequestView(
+                TeeContract.VERSION, "exp-1", "result-1", "object-1", "DATA", "task-1",
+                "0", "kd-1", "1", "inst-a", "cert", "PENDING_APPROVAL", "", true, true,
+                java.util.List.of());
+        when(center.post(eq("/exports"), any(), eq(TeeExportService.RequestView.class))).thenReturn(view);
+        when(center.post(eq("/exports/exp-1/action"), any(), eq(TeeExportService.RequestView.class)))
+                .thenReturn(view);
+        TeeExportGateway gateway = new TeeExportGateway(service, center, key, mvp, new ObjectMapper());
+
+        gateway.create("inst-a", "alice", new TeeExportService.CreateRequest(
+                TeeContract.VERSION, "req-1", "result-1", ""));
+        gateway.action("inst-a", "alice", "exp-1",
+                new TeeExportService.ActionRequest(TeeContract.VERSION, "REJECT", "不同意"));
+
+        // 权威台账在中心端，但本机构的统一日志必须能看到本方操作员做过什么。
+        verify(mvp).auditAs(eq("TEE"), eq("INFO"), eq("alice"), eq("TEE_EXPORT_SUBMIT"),
+                eq("TEE_EXPORT"), eq("exp-1"), org.mockito.ArgumentMatchers.contains("delegated=true"),
+                eq(true));
+        verify(mvp).auditAs(eq("TEE"), eq("INFO"), eq("alice"), eq("TEE_EXPORT_REJECT"),
+                eq("TEE_EXPORT"), eq("exp-1"), org.mockito.ArgumentMatchers.contains("delegated=true"),
+                eq(true));
+    }
 }

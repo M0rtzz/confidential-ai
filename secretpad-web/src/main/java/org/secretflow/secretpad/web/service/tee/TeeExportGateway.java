@@ -49,9 +49,14 @@ public class TeeExportGateway {
         TeeExportService.CreateRequest secured = new TeeExportService.CreateRequest(
                 request.contractVersion(), request.requestId(), request.resultId(),
                 center.configured() ? institutionKey.certificatePem() : request.recipientCertPem());
-        return center.configured()
-                ? center.post("/exports", secured, TeeExportService.RequestView.class)
-                : service.create(ownerId, actor, secured);
+        if (!center.configured()) {
+            return service.create(ownerId, actor, secured);
+        }
+        TeeExportService.RequestView view = center.post("/exports", secured,
+                TeeExportService.RequestView.class);
+        delegated(actor, "TEE_EXPORT_SUBMIT", view, "resultId=" + view.resultId()
+                + " kind=" + view.kind());
+        return view;
     }
 
     public TeeExportService.ListResult mine(String ownerId) {
@@ -70,18 +75,26 @@ public class TeeExportGateway {
 
     public TeeExportService.RequestView action(String ownerId, String actor, String exportId,
                                                TeeExportService.ActionRequest request) {
-        return center.configured()
-                ? center.post("/exports/" + path(exportId) + "/action", request,
-                        TeeExportService.RequestView.class)
-                : service.action(ownerId, actor, exportId, request);
+        if (!center.configured()) {
+            return service.action(ownerId, actor, exportId, request);
+        }
+        TeeExportService.RequestView view = center.post("/exports/" + path(exportId) + "/action",
+                request, TeeExportService.RequestView.class);
+        String normalized = request.action() == null ? "" : request.action().trim().toUpperCase();
+        delegated(actor, "TEE_EXPORT_" + ("REJECT".equals(normalized) ? "REJECT" : "APPROVE"),
+                view, "ownerId=" + ownerId + " status=" + view.status());
+        return view;
     }
 
     public TeeExportService.RequestView cancel(String ownerId, String actor, String exportId,
                                                TeeExportService.CancelRequest request) {
-        return center.configured()
-                ? center.post("/exports/" + path(exportId) + "/cancel", request,
-                        TeeExportService.RequestView.class)
-                : service.cancel(ownerId, actor, exportId, request);
+        if (!center.configured()) {
+            return service.cancel(ownerId, actor, exportId, request);
+        }
+        TeeExportService.RequestView view = center.post("/exports/" + path(exportId) + "/cancel",
+                request, TeeExportService.RequestView.class);
+        delegated(actor, "TEE_EXPORT_CANCEL", view, "resultId=" + view.resultId());
+        return view;
     }
 
     public TeeExportService.ExportResult export(String ownerId, String actor, String resultId,
@@ -128,6 +141,19 @@ public class TeeExportGateway {
         mvp.dispatchWebhooks("tee.export.download", Map.of("exportId", view.exportId(),
                 "resultId", view.resultId(), "status", view.status(), "stage", "EGRESS"));
         return new Download(fileName(view), contentType(view.kind()), plaintext);
+    }
+
+    /**
+     * 委派成功后在本机构补记一条审计。
+     *
+     * <p>权威台账在中心端，客户端只做薄委派。但本机构的统一日志必须能看到本方操作员
+     * 做过什么，否则申请与投票在数据方一侧完全无迹可查。事件名与中心端一致，
+     * detail 中标注 delegated 以区分裁决记录与本方操作记录。
+     */
+    private void delegated(String actor, String action, TeeExportService.RequestView view,
+                           String detail) {
+        mvp.auditAs("TEE", "INFO", actor, action, "TEE_EXPORT", view.exportId(),
+                "stage=EGRESS delegated=true " + detail, true);
     }
 
     /** 密文对象没有格式列，文件名按结果类型推定：DATA 为 CSV，MODEL 为 JSON。 */
