@@ -9,7 +9,6 @@
  */
 package org.secretflow.secretpad.web.service.tee;
 
-import org.secretflow.secretpad.common.util.UserContext;
 import org.secretflow.secretpad.web.service.MinioAssetStorage;
 import org.secretflow.secretpad.web.service.sandbox.TeeAssetRegistrar;
 
@@ -107,7 +106,11 @@ public class TeeAssetRegistrarImpl implements TeeAssetRegistrar {
         if (granted.isEmpty()) {
             granted = schema;
         }
-        String owner = UserContext.getUser().getOwnerId();
+        String owner = ownerOf(text(asset.get("provider_node_id")));
+        if (owner.isBlank()) {
+            log.info("资产 {} 的供数节点没有对应机构，跳过密文资产登记", assetId);
+            return;
+        }
         // 标识按资产与沙箱推导，重复登记复用同一条策略与同一次幂等请求，不会越登越多
         String digest = digest(assetId + "|" + sandboxId);
         TeePolicyService.RegisterResult policy = keyGateway.registerPolicy(owner,
@@ -166,6 +169,18 @@ public class TeeAssetRegistrarImpl implements TeeAssetRegistrar {
             }
         }
         return values(metadata.path("columns"));
+    }
+
+    /**
+     * 供数节点所属机构。登记多在后台线程触发（申请单完成、快照合并），
+     * 此时没有登录态，机构标识只能由资产自身的归属推导。
+     */
+    private String ownerOf(String providerNodeId) {
+        if (providerNodeId.isBlank()) {
+            return "";
+        }
+        Map<String, Object> node = single("select inst_id from node where node_id=? and is_deleted=0", providerNodeId);
+        return node == null ? "" : text(node.get("inst_id"));
     }
 
     private static String digest(String value) {
