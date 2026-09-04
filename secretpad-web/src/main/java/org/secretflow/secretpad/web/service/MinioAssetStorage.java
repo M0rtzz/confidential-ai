@@ -48,6 +48,18 @@ public class MinioAssetStorage {
         return "s3://" + bucket + "/" + key;
     }
 
+    /** Stores an already encrypted stream without materializing it on the control-plane disk. */
+    public String put(String key, InputStream input, long length, String contentType, String checksum) {
+        if (!client.doesBucketExistV2(bucket)) client.createBucket(bucket);
+        ObjectMetadata metadata = new ObjectMetadata();
+        metadata.setContentLength(length);
+        metadata.setContentType(contentType);
+        metadata.addUserMetadata("sha256", checksum);
+        metadata.addUserMetadata("client-encrypted", "true");
+        client.putObject(bucket, key, input, metadata);
+        return "s3://" + bucket + "/" + key;
+    }
+
     public InputStream open(String uri) {
         String prefix = "s3://" + bucket + "/";
         if (uri == null || !uri.startsWith(prefix)) throw new IllegalArgumentException("不支持的资产存储地址");

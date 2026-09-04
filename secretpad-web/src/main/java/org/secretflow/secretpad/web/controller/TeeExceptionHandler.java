@@ -19,8 +19,7 @@ import java.util.UUID;
  * <p>沿用冻结的响应包装：业务拒绝为 HTTP 200 且 status.code 非零，其余按契约映射状态码。
  * 错误 data 固定四个字段，不含密钥、数据行或内部堆栈。
  */
-@RestControllerAdvice(assignableTypes = {TeeKeyController.class, TeeAssetController.class,
-        TeeRuntimeController.class, TeeEnvironmentController.class})
+@RestControllerAdvice(assignableTypes = TeeApi.class)
 public class TeeExceptionHandler {
 
     @ExceptionHandler(TeeException.class)

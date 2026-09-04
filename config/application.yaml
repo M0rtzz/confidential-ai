@@ -262,6 +262,12 @@ sfclusterDesc:
 tee:
   capsule-manager: capsule-manager.#.svc
 
+# ds-confidential/v1 uses a separate data plane. A100 simulation is explicit and
+# never satisfies an asset whose runtime security requirement is gpu-cc.
+confidential-compute:
+  security-profile: ${CONFIDENTIAL_COMPUTE_SECURITY_PROFILE:a100-sim}
+  simulation-warning: ${CONFIDENTIAL_COMPUTE_SIMULATION_WARNING:A100 simulation has no GPU CC runtime isolation}
+
 data:
   sync:
     - org.secretflow.secretpad.persistence.entity.ProjectDO
