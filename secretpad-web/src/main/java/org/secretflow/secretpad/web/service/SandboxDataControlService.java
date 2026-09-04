@@ -307,6 +307,8 @@ public class SandboxDataControlService {
         }
         policy.put("canUse", canUse);
         policy.put("canPreview", canPreview);
+        String accessEnd = string(control.get("access_end"));
+        policy.put("view_until", accessEnd);
     }
 
     /**
