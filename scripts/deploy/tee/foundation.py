@@ -327,6 +327,12 @@ def publish_identities(identities, owners=None):
         owner = (owners or {}).get(name) or stored.get(name)
         if owner:
             published[owner] = dict(value, instance=name)
+        try:
+            domain = domain_id(name)
+            if domain:
+                published[domain] = dict(value, instance=name)
+        except Exception:
+            pass
     workload = (CENTER / 'workload-cert/client.crt').read_text()
     for name in INSTANCES:
         target = RUNTIME / name / 'identity-pub'
