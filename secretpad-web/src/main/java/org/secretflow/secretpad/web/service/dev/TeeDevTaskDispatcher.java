@@ -305,16 +305,22 @@ public class TeeDevTaskDispatcher {
         throw contract("TEE 任务无法解析已登记密文输入资产");
     }
 
-    /** 明文长度来自资产登记元数据；中心端无需也不得通过解密推断该字段。 */
+    /**
+     * 明文长度来自资产登记元数据；中心端无需也不得通过解密推断该字段。
+     *
+     * <p>供数方的资产行只存在于对方本地，中心端改读挂载时留存的项目侧资产快照，
+     * 该快照与资产登记同源，同样不涉及解密。</p>
+     */
     private long plaintextBytes(String assetId) {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "select metadata_json from ds_data_asset where id=? and deleted=0 and status='ACTIVE' limit 1",
                 assetId);
-        if (rows.size() != 1) {
+        String metadataJson = rows.size() == 1 ? text(rows.get(0).get("metadata_json")) : snapshotMetadata(assetId);
+        if (metadataJson.isBlank()) {
             throw contract("密文资产缺少明文长度登记");
         }
         try {
-            JsonNode metadata = mapper.readTree(text(rows.get(0).get("metadata_json")));
+            JsonNode metadata = mapper.readTree(metadataJson);
             JsonNode value = metadata.get("plaintextBytes");
             if (value == null || !value.canConvertToLong() || value.longValue() <= 0) {
                 throw new IllegalArgumentException("invalid plaintextBytes");
@@ -322,6 +328,21 @@ public class TeeDevTaskDispatcher {
             return value.longValue();
         } catch (Exception failure) {
             throw contract("密文资产明文长度登记无效");
+        }
+    }
+
+    /** 项目侧留存的资产快照里的元数据，挂载时随授权一并写入。 */
+    private String snapshotMetadata(String assetId) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "select asset_json from ds_project_asset where asset_id=? and deleted=0 limit 1", assetId);
+        if (rows.size() != 1) {
+            return "";
+        }
+        try {
+            JsonNode snapshot = mapper.readTree(text(rows.get(0).get("asset_json")));
+            return snapshot.path("metadata_json").asText("");
+        } catch (Exception failure) {
+            return "";
         }
     }
 
