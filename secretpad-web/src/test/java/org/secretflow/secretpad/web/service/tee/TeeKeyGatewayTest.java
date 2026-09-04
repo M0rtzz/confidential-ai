@@ -48,7 +48,8 @@ class TeeKeyGatewayTest {
         TeeKeyRepository keyRepository = mock(TeeKeyRepository.class);
         TeePolicyRepository policyRepository = mock(TeePolicyRepository.class);
         when(center.configured()).thenReturn(delegated);
-        return new Fixture(new TeeKeyGateway(keys, policies, center, keyRepository, policyRepository, mapper),
+        return new Fixture(new TeeKeyGateway(keys, policies, mock(TeeAssetService.class), center,
+                keyRepository, policyRepository, mapper),
                 keys, policies, center, keyRepository, policyRepository);
     }
 
