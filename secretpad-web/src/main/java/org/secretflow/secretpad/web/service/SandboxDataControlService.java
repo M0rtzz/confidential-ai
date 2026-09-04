@@ -3,6 +3,9 @@ package org.secretflow.secretpad.web.service;
 
 import org.secretflow.secretpad.common.dto.UserContextDTO;
 import org.secretflow.secretpad.common.util.UserContext;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -24,9 +27,11 @@ import java.util.UUID;
 public class SandboxDataControlService {
     private static final ZoneId DISPLAY_ZONE = ZoneId.of("Asia/Shanghai");
     private final JdbcTemplate jdbc;
+    private final ObjectMapper mapper;
 
-    public SandboxDataControlService(@Qualifier("jdbcTemplate") JdbcTemplate jdbc) {
+    public SandboxDataControlService(@Qualifier("jdbcTemplate") JdbcTemplate jdbc, ObjectMapper mapper) {
         this.jdbc = jdbc;
+        this.mapper = mapper;
     }
 
     /** Lists mounted data that is physically available on the current node. */
@@ -290,7 +295,7 @@ public class SandboxDataControlService {
     private void applyAssetTimeWindow(Map<String, Object> policy, String assetId) {
         List<Map<String, Object>> rows = jdbc.queryForList("select access_start,access_end,valid_from,valid_until "
                 + "from ds_asset_usage_control where asset_id=?", assetId);
-        Map<String, Object> control = rows.isEmpty() ? new LinkedHashMap<>() : rows.get(0);
+        Map<String, Object> control = rows.isEmpty() ? syncedTimeWindow(assetId) : rows.get(0);
         boolean canUse = bool(policy.get("canUse"), false);
         if (canUse && !AssetTimeWindow.within(control.get("valid_from"), control.get("valid_until"))) {
             canUse = false;
@@ -302,6 +307,41 @@ public class SandboxDataControlService {
         }
         policy.put("canUse", canUse);
         policy.put("canPreview", canPreview);
+    }
+
+    /**
+     * 供数方设置的时间窗只写在对方本地的 {@code ds_asset_usage_control}，本端读项目快照。
+     *
+     * <p>快照在挂载时留存、在供数方改动控制后刷新并随 P2P 同步下发，因此与供数方的设置一致。
+     * 拿不到快照时返回空窗口，即不额外限制，由挂载开关与审批期限继续把关。</p>
+     */
+    private Map<String, Object> syncedTimeWindow(String assetId) {
+        List<Map<String, Object>> attachments = jdbc.queryForList(
+                "select asset_json from ds_project_asset where asset_id=? and deleted=0 limit 1", assetId);
+        if (attachments.isEmpty()) {
+            return new LinkedHashMap<>();
+        }
+        try {
+            JsonNode snapshot = mapper.readTree(string(attachments.get(0).get("asset_json")));
+            Map<String, Object> control = new LinkedHashMap<>();
+            control.put("access_start", text(snapshot, "access_start"));
+            control.put("access_end", text(snapshot, "access_end"));
+            control.put("valid_from", text(snapshot, "control_valid_from", "valid_from"));
+            control.put("valid_until", text(snapshot, "control_valid_until", "valid_until"));
+            return control;
+        } catch (Exception malformed) {
+            return new LinkedHashMap<>();
+        }
+    }
+
+    private static String text(JsonNode node, String... fields) {
+        for (String field : fields) {
+            String value = node.path(field).asText("");
+            if (!value.isBlank() && !"null".equals(value)) {
+                return value;
+            }
+        }
+        return "";
     }
 
     private Map<String, Object> dataDir(String sandboxId, String tableName) {

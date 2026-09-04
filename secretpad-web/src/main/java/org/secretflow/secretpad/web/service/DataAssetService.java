@@ -663,6 +663,7 @@ public class DataAssetService {
             return Map.of("id", id, "status", "PENDING");
         }
         upsertControl(assetId, request);
+        refreshProjectSnapshots(assetId);
         return require(assetId);
     }
 
@@ -676,9 +677,44 @@ public class DataAssetService {
         if (approved) {
             try { upsertControl(String.valueOf(row.get("asset_id")), mapper.readValue(String.valueOf(row.get("payload_json")), Map.class)); }
             catch (JsonProcessingException e) { throw new IllegalStateException("申请参数损坏", e); }
+            refreshProjectSnapshots(String.valueOf(row.get("asset_id")));
         }
         jdbc.update("update ds_asset_usage_request set status=?,comment=?,updated_at=? where id=?", approved ? "APPROVED" : "REJECTED", String.valueOf(request.getOrDefault("comment", "")), now(), id);
         return jdbc.queryForMap("select * from ds_asset_usage_request where id=?", id);
+    }
+
+    /**
+     * 把资产最新的使用控制写回它已挂载的各个项目快照。
+     *
+     * <p>{@code ds_asset_usage_control} 只存在于供数方本地，其他参与方读的是挂载时留存的
+     * 项目快照。控制改动后不刷新快照，中心端的数据目录、沙箱数据目录与沙箱方式开发都会
+     * 继续按过期前的窗口放行。{@code ProjectAssetDO} 走 P2P 同步，刷新即随之下发。</p>
+     */
+    private void refreshProjectSnapshots(String assetId) {
+        List<Map<String, Object>> attachments = jdbc.queryForList(
+                "select project_id,asset_json from ds_project_asset where asset_id=? and deleted=0", assetId);
+        if (attachments.isEmpty()) {
+            return;
+        }
+        Map<String, Object> asset = jdbc.queryForList(
+                "select * from ds_data_asset where id=? and deleted=0", assetId).stream().findFirst().orElse(null);
+        if (asset == null) {
+            return;
+        }
+        Map<String, Object> refreshed = new LinkedHashMap<>(asset);
+        decorateUsageControl(refreshed, assetId);
+        refreshed.put("schema_columns", schemaColumns(refreshed));
+        String snapshot = json(refreshed);
+        String validUntil = String.valueOf(refreshed.getOrDefault("control_valid_until",
+                refreshed.getOrDefault("valid_until", "")));
+        for (Map<String, Object> attachment : attachments) {
+            String projectId = String.valueOf(attachment.get("project_id"));
+            projectAssetRepository.findById(new ProjectAssetDO.UPK(projectId, assetId)).ifPresent(row -> {
+                row.setAssetJson(snapshot);
+                row.setExpiresAt("null".equals(validUntil) ? "" : validUntil);
+                projectAssetRepository.save(row);
+            });
+        }
     }
 
     private void upsertControl(String assetId, Map<String, Object> v) {
