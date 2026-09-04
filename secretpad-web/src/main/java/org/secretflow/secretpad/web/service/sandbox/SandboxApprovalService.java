@@ -775,6 +775,20 @@ public class SandboxApprovalService {
         if (!error.isEmpty()) throw new IllegalStateException("重建沙箱任务失败: " + error);
     }
 
+    /**
+     * 取密文同步落地的对象标识。首次同步由 {@code ensureSynced} 直接给出；
+     * 重复调用只返回同步模式，此时回查本端已登记的密文对象。
+     */
+    private String syncedObjectId(Map<String, Object> synced, String assetId) {
+        String objectId = synced == null ? "" : string(synced.get("objectId"));
+        if (notBlank(objectId)) {
+            return objectId;
+        }
+        return jdbc.query("select object_id from tee_object where asset_id=? and kind='ASSET' and is_deleted=0 "
+                        + "order by gmt_create desc limit 1",
+                rs -> rs.next() ? rs.getString(1) : "", assetId);
+    }
+
     private void syncDatasetMounts(String sandboxId, Map<String, Object> payload) {
         List<String> assetIds = stringList(payload.get("datasetAssetIds"));
         String sandboxNode = string(jdbc.queryForObject("select owner_id from ds_sandbox where id=?", String.class, sandboxId));
@@ -788,10 +802,15 @@ public class SandboxApprovalService {
             String stagingUri = string(asset.get("storage_uri"));
             if (!Objects.equals(provider, sandboxNode)) {
                 // 授权自动同步：跨节点 PROCESSED 先在本地物化；本地权威库表作为 staging 源，不再 MinIO 加密快照
-                assetSyncService.ensureSynced(projectId, assetId);
+                Map<String, Object> synced = assetSyncService.ensureSynced(projectId, assetId);
                 String localTable = assetSyncService.localPhysicalTable(projectId, assetId);
+                String objectId = syncedObjectId(synced, assetId);
                 if (localTable != null) {
                     stagingUri = "node-data://" + localTable;
+                } else if (notBlank(objectId)) {
+                    // 密文同步：本端只登记密文对象，明文只在可信运行时内部出现。
+                    // 供数方的存储对象在对端 MinIO，本端取不到，不能再退回加密快照。
+                    stagingUri = SandboxDbService.TEE_OBJECT_PREFIX + objectId;
                 } else {
                     stagingUri = assetStorage.encryptedSnapshot(stagingUri, "sandbox-staging/" + sandboxNode + "/" + sandboxId + "/" + assetId + "-v" + intValue(asset.get("version"), 1), checksum);
                 }

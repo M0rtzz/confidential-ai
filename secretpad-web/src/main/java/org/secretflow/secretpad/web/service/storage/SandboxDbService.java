@@ -13,6 +13,7 @@ package org.secretflow.secretpad.web.service.storage;
 import org.secretflow.secretpad.web.service.MinioAssetStorage;
 import org.secretflow.secretpad.web.service.governance.CsvUtil;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,6 +54,9 @@ public class SandboxDbService {
 
     private static final Logger log = LoggerFactory.getLogger(SandboxDbService.class);
     private static final String NODE_DATA_PREFIX = "node-data://";
+
+    /** 密文同步落地的挂载源前缀：指向本端已登记的密文对象，沙箱库内只建表结构、不落明文。 */
+    public static final String TEE_OBJECT_PREFIX = "tee-object://";
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
@@ -126,6 +130,12 @@ public class SandboxDbService {
                 }
             }
             if (asset == null) {
+                // 密文同步的跨节点资产：本端只登记密文对象，沙箱库内建同名空表保留表结构，
+                // 明文由可信运行时在执行时解回，不落进沙箱库。
+                Map<String, Object> ciphertextEntry = registerCiphertextMount(db, safeId, mount, dropped);
+                if (ciphertextEntry != null) {
+                    manifest.add(ciphertextEntry);
+                }
                 continue;
             }
             if (!"PROCESSED".equals(string(asset.get("data_stage")))) {
@@ -175,6 +185,73 @@ public class SandboxDbService {
             }
         }
         return preserved;
+    }
+
+
+    /**
+     * 为密文同步的挂载项建立仅有表结构的空表。
+     *
+     * <p>供数方的密文对象已登记在本端，明文不入沙箱库；建空表是为了让沙箱数据目录、
+     * 表结构预览与可信执行任务的源表校验都能找到这张表。</p>
+     *
+     * @return 清单条目；不是密文挂载或拿不到列名时返回 {@code null}
+     */
+    private Map<String, Object> registerCiphertextMount(Path db, String sandboxId,
+            Map<String, Object> mount, Set<String> dropped) {
+        String stagingUri = string(mount.get("staging_uri"));
+        if (!stagingUri.startsWith(TEE_OBJECT_PREFIX)) {
+            return null;
+        }
+        String assetId = string(mount.get("asset_id"));
+        Map<String, Object> snapshot = projectAssetSnapshot(sandboxId, assetId);
+        List<String> header = stringList(snapshot.get("schema_columns"));
+        if (header.isEmpty()) {
+            log.warn("沙箱 {} 密文资产 {} 缺少表结构，跳过", sandboxId, assetId);
+            return null;
+        }
+        String table = NodeDatasetStore.assetTableName(assetId);
+        SqliteTableLoader.dropTableIfExists(db, table);
+        SqliteTableLoader.Materialized m = SqliteTableLoader.materializeToFile(db, table, header, List.of(), false);
+        dropped.add(table);
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("table_name", m.tableName());
+        entry.put("asset_id", assetId);
+        entry.put("name", string(snapshot.getOrDefault("name", assetId)));
+        entry.put("kind", "MOUNT");
+        entry.put("source", "SYNCED");
+        entry.put("row_count", 0L);
+        return entry;
+    }
+
+    /** 读取项目侧留存的资产快照（挂载时写入，含表结构）。 */
+    private Map<String, Object> projectAssetSnapshot(String sandboxId, String assetId) {
+        String json = jdbc.query(
+                "select a.asset_json from ds_project_asset a join ds_sandbox s on s.project_id=a.project_id "
+                        + "where s.id=? and a.asset_id=? and a.deleted=0 limit 1",
+                rs -> rs.next() ? rs.getString(1) : null, sandboxId, assetId);
+        if (json == null || json.isBlank()) {
+            return Map.of();
+        }
+        try {
+            return mapper.readValue(json, new TypeReference<Map<String, Object>>() { });
+        } catch (Exception e) {
+            log.warn("沙箱 {} 资产 {} 快照解析失败: {}", sandboxId, assetId, e.getMessage());
+            return Map.of();
+        }
+    }
+
+    private List<String> stringList(Object value) {
+        if (!(value instanceof Iterable<?> iterable)) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        iterable.forEach(item -> {
+            String text = string(item);
+            if (!text.isBlank()) {
+                result.add(text);
+            }
+        });
+        return result;
     }
 
     /** 解析挂载数据：node-data:// 表 → 节点权威库；s3:// 或普通 URI → 节点库/MinIO 回退。 */
