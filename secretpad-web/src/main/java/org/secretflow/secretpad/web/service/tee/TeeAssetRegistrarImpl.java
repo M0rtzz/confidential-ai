@@ -30,7 +30,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 
 /**
  * 供数方在投出同意票时登记本方密文资产。
@@ -109,14 +108,15 @@ public class TeeAssetRegistrarImpl implements TeeAssetRegistrar {
             granted = schema;
         }
         String owner = UserContext.getUser().getOwnerId();
-        String policyId = "pl-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        // 标识按资产与沙箱推导，重复登记复用同一条策略与同一次幂等请求，不会越登越多
+        String digest = digest(assetId + "|" + sandboxId);
         TeePolicyService.RegisterResult policy = keyGateway.registerPolicy(owner,
-                new TeePolicyService.RegisterRequest(TeeContract.VERSION, UUID.randomUUID().toString().replace("-", ""),
-                        new TeePolicyService.Policy(TeeContract.VERSION, policyId, "1", assetId,
+                new TeePolicyService.RegisterRequest(TeeContract.VERSION, "pol-" + digest,
+                        new TeePolicyService.Policy(TeeContract.VERSION, "pl-" + digest, "1", assetId,
                                 object.assetVersion(), owner, sandboxId, granted, operators, expiresAt,
                                 List.of("EVALUATION_METRICS"))));
         keyGateway.registerAsset(owner, new TeeAssetService.RegisterRequest(TeeContract.VERSION,
-                UUID.randomUUID().toString().replace("-", ""), owner, schema, object,
+                "ast-" + digest, owner, schema, object,
                 policy.policyId(), policy.policyVersion()));
         log.info("密文资产 {} 已按审批登记，沙箱 {}，授权算子 {}", assetId, sandboxId, operators);
     }
@@ -166,6 +166,16 @@ public class TeeAssetRegistrarImpl implements TeeAssetRegistrar {
             }
         }
         return values(metadata.path("columns"));
+    }
+
+    private static String digest(String value) {
+        try {
+            byte[] hash = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(hash).substring(0, 12);
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
     }
 
     private Map<String, Object> single(String sql, Object... args) {

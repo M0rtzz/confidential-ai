@@ -381,12 +381,7 @@ public class SandboxApprovalService {
             case "APPROVE", "REJECT" -> {
                 if ("DATA_PROVIDER_REVIEW".equals(from)) {
                     vote(id, action, comment);
-                    if ("APPROVE".equals(action)) {
-                        // 供数方投出同意即把本方数据按批准的列与算子登记进密文资产台账，
-                        // 可信运行时执行时才能凭这份登记申领密钥。
-                        // 登记走平台间通道，失败不应回滚这一票，因此放到本事务提交之后执行。
-                        registerApprovedAssetsAfterCommit(id);
-                    }
+
                 } else if ("OPERATOR_REVIEW".equals(from)) {
                     if (!gate.isAdminOrOperator(gate.currentUser(), string(approval.get("applicant_node_id")))) {
                         throw SecretpadException.of(AuthErrorCode.AUTH_FAILED, "仅运营方可处理运营审核");
@@ -506,6 +501,7 @@ public class SandboxApprovalService {
         }
         Map<String, Object> approval = requireApproval(id);
         history(id, "COMPLETE", "EXECUTING", "COMPLETED", "");
+        registerApprovedAssetsAfterCommit(id);
         service.auditAs("AUDIT", "INFO", engineActor(), "SANDBOX_APPROVAL_COMPLETE", "SANDBOX_APPROVAL", id,
                 string(approval.get("approval_type")) + " " + string(approval.get("sandbox_id")), true);
         service.dispatchWebhooks("sandbox.approval.completed",
@@ -822,6 +818,10 @@ public class SandboxApprovalService {
      * 失败只应留下告警，不能把供数方已经投出的这一票一并回滚。
      */
     private void registerApprovedAssetsAfterCommit(String approvalId) {
+        Map<String, Object> approval = requireApproval(approvalId);
+        if (!"COMPLETED".equals(string(approval.get("status")))) {
+            return;
+        }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
             teeAssetRegistrar.ifAvailable(registrar -> registrar.registerApproved(requireApproval(approvalId)));
             return;
@@ -913,6 +913,9 @@ public class SandboxApprovalService {
                 changed |= advanceAfterMerge(id);
                 memoizeSnapshot(id, snapshotHash);
                 if (changed) {
+                    // 申请单落到已完成，供数方才把本方数据登记进密文资产台账：
+                    // 可信运行时按已完成的审批判定授权，登记早于完成会被中心端拒绝。
+                    registerApprovedAssetsAfterCommit(id);
                     // 合并后本端票据比快照更全，回传给其余参与方；星形拓扑下由中心端转发
                     republish.add(id);
                 }
