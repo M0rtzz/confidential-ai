@@ -21,6 +21,7 @@ import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -97,6 +98,68 @@ class ConfidentialModelServiceTest {
                 org.mockito.ArgumentCaptor.forClass(Map.class);
         verify(cipherGpu).registerModelDeployment(registration.capture());
         assertEquals("deepseek-llm-7b-chat", registration.getValue().get("upstreamModelId"));
+    }
+
+    @Test
+    void deploymentRetryReusesPendingDeployment() {
+        Map<String, Object> version = new LinkedHashMap<>();
+        version.put("status", "APPROVED");
+        version.put("source_type", "OPENAI_COMPATIBLE");
+        version.put("base_url", "https://8.8.8.8/v1");
+        version.put("upstream_model_id", "model-a");
+        version.put("runtime_config_json", "{\"timeoutSeconds\":30}");
+        Map<String, Object> deployment = Map.of(
+                "deployment_id", "deploy-existing",
+                "model_id", "model-1",
+                "version_id", "version-1",
+                "deployment_type", "OPENAI_COMPATIBLE",
+                "security_profile", "a100-sim",
+                "status", "AUTHORIZATION_REQUIRED",
+                "endpoint_path", "/api/v1alpha1/confidential-inference/chat/completions");
+        when(jdbc.queryForMap(contains("ds_confidential_model_version"),
+                eq("owner-1"), eq("model-1"), eq("version-1"))).thenReturn(version);
+        when(jdbc.queryForList(contains("status='AUTHORIZATION_REQUIRED'"),
+                eq("owner-1"), eq("model-1"), eq("version-1"))).thenReturn(List.of(deployment));
+        when(cipherGpu.registerModelDeployment(any())).thenReturn(new ObjectMapper().createObjectNode()
+                .put("status", "AUTHORIZATION_REQUIRED"));
+        when(jdbc.queryForMap(contains("ds_model_deployment"), eq("owner-1"), eq("deploy-existing")))
+                .thenReturn(deployment);
+
+        Map<String, Object> result = service.deploy(
+                "owner-1", "model-1", new ConfidentialModelService.DeploymentRequest("version-1"));
+
+        assertEquals("deploy-existing", result.get("deploymentId"));
+        verify(jdbc, never()).update(contains("insert into ds_model_deployment"), any(), any(), any(), any(),
+                any(), any(), any(), any());
+    }
+
+    @Test
+    void cancellingDeploymentBeforeAuthorizationRestoresApprovedModel() {
+        when(jdbc.queryForMap(contains("ds_model_deployment"), eq("owner-1"), eq("deploy-1")))
+                .thenReturn(Map.of(
+                        "deployment_id", "deploy-1",
+                        "model_id", "model-1",
+                        "version_id", "version-1",
+                        "deployment_type", "OPENAI_COMPATIBLE",
+                        "security_profile", "a100-sim",
+                        "status", "AUTHORIZATION_REQUIRED",
+                        "endpoint_path", "/api/v1alpha1/confidential-inference/chat/completions"))
+                .thenReturn(Map.of(
+                        "deployment_id", "deploy-1",
+                        "model_id", "model-1",
+                        "version_id", "version-1",
+                        "deployment_type", "OPENAI_COMPATIBLE",
+                        "security_profile", "a100-sim",
+                        "status", "OFFLINE",
+                        "endpoint_path", "/api/v1alpha1/confidential-inference/chat/completions"));
+
+        service.offline("owner-1", "deploy-1");
+
+        verify(cipherGpu).offlineModelDeployment("deploy-1");
+        verify(jdbc).update(contains("ds_confidential_model set status=?"),
+                eq("APPROVED"), anyString(), eq("model-1"));
+        verify(audit).audit(eq("owner-1"), eq("MODEL_DEPLOYMENT_AUTHORIZATION_CANCELLED"),
+                eq("deploy-1"), any());
     }
 
     private ConfidentialModelService.OpenAiVersionRequest openAiRequest(String baseUrl, ObjectNode credential) {

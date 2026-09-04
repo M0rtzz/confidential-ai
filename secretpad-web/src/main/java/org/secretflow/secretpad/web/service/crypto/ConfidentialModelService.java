@@ -311,10 +311,14 @@ public class ConfidentialModelService {
     }
 
     @Transactional
-    public Map<String, Object> deploy(String ownerId, String modelId, DeploymentRequest request) {
+    public synchronized Map<String, Object> deploy(String ownerId, String modelId, DeploymentRequest request) {
         Map<String, Object> version = version(ownerId, modelId, requireText(request.versionId(), "versionId"));
         if (!"APPROVED".equals(text(version.get("status")))) throw invalid("仅已批准版本可以部署");
-        String deploymentId = id("deploy");
+        List<Map<String, Object>> pending = jdbc.queryForList(
+                "select * from ds_model_deployment where owner_id=? and model_id=? and version_id=? "
+                        + "and status='AUTHORIZATION_REQUIRED' order by updated_at desc limit 1",
+                ownerId, modelId, request.versionId());
+        String deploymentId = pending.isEmpty() ? id("deploy") : text(pending.get(0).get("deployment_id"));
         String now = Instant.now().toString();
         Map<String, Object> registration = new LinkedHashMap<>();
         registration.put("deploymentId", deploymentId);
@@ -330,10 +334,14 @@ public class ConfidentialModelService {
         if (!"AUTHORIZATION_REQUIRED".equals(registered.path("status").asText())) {
             throw invalid("CipherGPU 未进入等待授权状态");
         }
-        jdbc.update("insert into ds_model_deployment(deployment_id,model_id,version_id,owner_id,deployment_type,"
-                        + "security_profile,status,endpoint_path,created_at,updated_at) values(?,?,?,?,?,"
-                        + "'a100-sim','AUTHORIZATION_REQUIRED',?,?,?)", deploymentId, modelId, request.versionId(), ownerId,
-                text(version.get("source_type")), "/api/v1alpha1/confidential-inference/chat/completions", now, now);
+        if (pending.isEmpty()) {
+            jdbc.update("insert into ds_model_deployment(deployment_id,model_id,version_id,owner_id,deployment_type,"
+                            + "security_profile,status,endpoint_path,created_at,updated_at) values(?,?,?,?,?,"
+                            + "'a100-sim','AUTHORIZATION_REQUIRED',?,?,?)", deploymentId, modelId, request.versionId(), ownerId,
+                    text(version.get("source_type")), "/api/v1alpha1/confidential-inference/chat/completions", now, now);
+        } else {
+            jdbc.update("update ds_model_deployment set updated_at=? where deployment_id=?", now, deploymentId);
+        }
         jdbc.update("update ds_confidential_model set status='PUBLISHING',updated_at=? where model_id=?", now, modelId);
         audit.audit(ownerId, "MODEL_DEPLOYMENT_AUTHORIZATION_REQUIRED", deploymentId,
                 mapper.valueToTree(Map.of("modelId", modelId, "versionId", request.versionId(),
@@ -372,12 +380,16 @@ public class ConfidentialModelService {
         Map<String, Object> deployment = deployment(ownerId, deploymentId);
         cipherGpu.offlineModelDeployment(deploymentId);
         String now = Instant.now().toString();
+        boolean cancelledBeforeAuthorization = "AUTHORIZATION_REQUIRED".equals(text(deployment.get("status")));
         jdbc.update("update ds_model_deployment set status='OFFLINE',authorization_session_id=null,updated_at=? "
-                + "where deployment_id=?", now, deploymentId);
-        jdbc.update("update ds_confidential_model set status='OFFLINE',updated_at=? where model_id=?", now,
+                        + "where deployment_id=?", now, deploymentId);
+        String modelStatus = cancelledBeforeAuthorization ? "APPROVED" : "OFFLINE";
+        jdbc.update("update ds_confidential_model set status=?,updated_at=? where model_id=?", modelStatus, now,
                 text(deployment.get("model_id")));
-        audit.audit(ownerId, "CONFIDENTIAL_MODEL_OFFLINE", deploymentId,
-                mapper.valueToTree(Map.of("sessionKeysDestroyed", true, "simulated", true)));
+        audit.audit(ownerId, cancelledBeforeAuthorization
+                        ? "MODEL_DEPLOYMENT_AUTHORIZATION_CANCELLED" : "CONFIDENTIAL_MODEL_OFFLINE",
+                deploymentId, mapper.valueToTree(Map.of("sessionKeysDestroyed", true,
+                        "authorizationConsumed", !cancelledBeforeAuthorization, "simulated", true)));
         return deploymentView(deployment(ownerId, deploymentId));
     }
 

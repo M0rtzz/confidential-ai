@@ -2,12 +2,15 @@ package org.secretflow.secretpad.web.service.crypto;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.secretflow.secretpad.web.service.tee.TeeContract;
 import org.secretflow.secretpad.web.service.tee.TeeException;
 import org.secretflow.secretpad.web.service.tee.TeeMutualTls;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import javax.net.ssl.SSLContext;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -18,11 +21,13 @@ import java.time.Duration;
 /** mTLS-only client for the CipherGPU data plane. */
 @Component
 public class CipherGpuClient {
+    private static final Logger LOGGER = LoggerFactory.getLogger(CipherGpuClient.class);
+
     private final ObjectMapper mapper;
     private final String baseUrl;
     private final Path certDir;
     private final boolean allowInsecureHttp;
-    private volatile HttpClient client;
+    private volatile SSLContext sslContext;
 
     public CipherGpuClient(ObjectMapper mapper,
             @Value("${CIPHERGPU_URL:https://ciphergpu:9000}") String baseUrl,
@@ -87,24 +92,32 @@ public class CipherGpuClient {
             Thread.currentThread().interrupt();
             throw TeeException.of(TeeContract.Error.KEY_SERVICE_UNAVAILABLE, "CipherGPU 调用被中断");
         } catch (Exception failure) {
+            LOGGER.warn("CipherGPU {} {} transport failed: {}: {}", method, path,
+                    failure.getClass().getSimpleName(), failure.getMessage());
             throw TeeException.of(TeeContract.Error.KEY_SERVICE_UNAVAILABLE, "CipherGPU mTLS 通道不可用");
         }
     }
 
     private HttpClient client() throws Exception {
-        HttpClient result = client;
+        HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5));
+        if (baseUrl.startsWith("https://")) {
+            builder.sslContext(tlsContext());
+        }
+        // Uvicorn closes idle HTTP/1.1 connections after a short keep-alive window. A fresh
+        // client prevents a later POST from racing with a stale pooled mTLS connection.
+        return builder.build();
+    }
+
+    private SSLContext tlsContext() throws Exception {
+        SSLContext result = sslContext;
         if (result != null) {
             return result;
         }
         synchronized (this) {
-            if (client == null) {
-                HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5));
-                if (baseUrl.startsWith("https://")) {
-                    builder.sslContext(TeeMutualTls.context(certDir, "ciphergpu-control-plane"));
-                }
-                client = builder.build();
+            if (sslContext == null) {
+                sslContext = TeeMutualTls.context(certDir, "ciphergpu-control-plane");
             }
-            return client;
+            return sslContext;
         }
     }
 }
