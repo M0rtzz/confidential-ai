@@ -295,6 +295,11 @@ public class SandboxApprovalService {
         if (Set.of("CREATE", "DATA_CHANGE").contains(type)) {
             payload.put("datasetNames",
                     datasetAssetNames(projectId, request.get("datasetAssetIds"), request.get("datasetNames")));
+            // 授权列缺省取所选数据已登记的表结构：可信运行时按审批批准的列放行，
+            // 而供数方的资产行只在对方本地，中心端无法在放行时临时推导。
+            if (stringList(request.get("teeColumns")).isEmpty()) {
+                payload.put("teeColumns", approvedColumns(projectId, request.get("datasetAssetIds")));
+            }
         }
         if ("RECYCLE".equals(type)) {
             payload.put("sandboxName", string(requireSandbox(sandboxId).get("name")));
@@ -379,7 +384,8 @@ public class SandboxApprovalService {
                     if ("APPROVE".equals(action)) {
                         // 供数方投出同意即把本方数据按批准的列与算子登记进密文资产台账，
                         // 可信运行时执行时才能凭这份登记申领密钥。
-                        teeAssetRegistrar.ifAvailable(registrar -> registrar.registerApproved(requireApproval(id)));
+                        // 登记走平台间通道，失败不应回滚这一票，因此放到本事务提交之后执行。
+                        registerApprovedAssetsAfterCommit(id);
                     }
                 } else if ("OPERATOR_REVIEW".equals(from)) {
                     if (!gate.isAdminOrOperator(gate.currentUser(), string(approval.get("applicant_node_id")))) {
@@ -796,6 +802,40 @@ public class SandboxApprovalService {
         return jdbc.query("select object_id from tee_object where asset_id=? and kind='ASSET' and is_deleted=0 "
                         + "order by gmt_create desc limit 1",
                 rs -> rs.next() ? rs.getString(1) : "", assetId);
+    }
+
+    /** 所选数据已登记的表结构列去重合并，作为审批批准的列。 */
+    private List<String> approvedColumns(String projectId, Object selected) {
+        List<String> columns = new ArrayList<>();
+        for (String assetId : stringList(selected)) {
+            for (String column : stringList(projectAsset(projectId, assetId).get("schema_columns"))) {
+                if (!columns.contains(column)) {
+                    columns.add(column);
+                }
+            }
+        }
+        return columns;
+    }
+
+    /**
+     * 事务提交后登记本方密文资产：登记要经平台间契约通道请求中心端，
+     * 失败只应留下告警，不能把供数方已经投出的这一票一并回滚。
+     */
+    private void registerApprovedAssetsAfterCommit(String approvalId) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            teeAssetRegistrar.ifAvailable(registrar -> registrar.registerApproved(requireApproval(approvalId)));
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                try {
+                    teeAssetRegistrar.ifAvailable(registrar -> registrar.registerApproved(requireApproval(approvalId)));
+                } catch (RuntimeException failure) {
+                    log.warn("申请单 {} 的密文资产登记失败: {}", approvalId, failure.getMessage());
+                }
+            }
+        });
     }
 
     private void syncDatasetMounts(String sandboxId, Map<String, Object> payload) {
