@@ -53,6 +53,46 @@ public final class CanvasOperatorRegistry {
     public static final String RENDER_SCRIPT = PYTHON_ASCII_OPEN_COMPAT
             + "import modeling_ops as mops\nmops.main()\n";
 
+    /**
+     * 链路脚本：按 {@code params.chain} 依次调用运行器内置的 {@code modeling_ops.run}。
+     *
+     * <p>可信执行模式下算子产物是密文对象、不落明文中间表，链上的中间结果因此只在本进程内
+     * 以临时文件传递，进程退出即随临时目录一并消失；写出的只有最后一步的结果。
+     * {@code chain} 缺省时退回单算子行为，与 {@link #RENDER_SCRIPT} 等价。</p>
+     */
+    public static final String CHAIN_RENDER_SCRIPT = PYTHON_ASCII_OPEN_COMPAT + """
+            import argparse, json, os, shutil, sys, tempfile
+            import modeling_ops as mops
+
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--input', required=True)
+            parser.add_argument('--output', required=True)
+            parser.add_argument('--params', default='{}')
+            parser.add_argument('--input-table', dest='input_table', default='')
+            parser.add_argument('--jdbc-url', dest='jdbc_url', default='')
+            args = parser.parse_args()
+            params = json.loads(args.params or '{}')
+            chain = params.get('chain') or [{'op': params.get('op'), 'params': params}]
+
+            work = tempfile.mkdtemp(prefix='canvas-chain-')
+            try:
+                current = args.input
+                table = args.input_table
+                for index, step in enumerate(chain):
+                    last = index == len(chain) - 1
+                    step_params = dict(step.get('params') or {})
+                    step_params['op'] = step.get('op') or step_params.get('op')
+                    target = args.output if last else os.path.join(work, 'step-%d.csv' % index)
+                    rows, has_model = mops.run(step_params['op'], current, target, step_params,
+                                               table, args.jdbc_url)
+                    sys.stderr.write('[chain] step=%d op=%s rows=%d model=%s\\n'
+                                     % (index, step_params['op'], rows, has_model))
+                    current = target
+                    table = ''
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+            """;
+
     private static final String DEFAULT_CPU = "0.5";
     private static final String DEFAULT_MEMORY = "512Mi";
 

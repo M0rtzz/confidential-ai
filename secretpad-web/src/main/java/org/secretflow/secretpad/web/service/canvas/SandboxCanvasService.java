@@ -2205,20 +2205,29 @@ public class SandboxCanvasService {
             jdbc.update("update ds_compute_run set status='RUNNING',started_at=?,updated_at=? where id=?",
                     now(), now(), runId);
             String failMessage = "";
-            for (Node node : order) {
-                if (!included.contains(node.id)) {
-                    continue;
-                }
-                if (isCancelled(runId)) {
-                    markRemainingCancelled(runId, node.id);
-                    break;
-                }
+            List<Node> pending = order.stream().filter(node -> included.contains(node.id)).toList();
+            if (devJobExecutor.teeEnabled() && pending.size() > 1) {
+                // 可信执行模式下算子产物是密文对象，不落明文中间表，逐个节点派发时下游取不到输入。
+                // 整条链渲染成一次任务，中间结果只在可信运行时的进程内传递。
                 try {
-                    executeNode(node, runId, canvasId, sandboxId, canvas, graph, nodeDomain);
+                    executeTeeChain(pending, runId, canvasId, sandboxId, canvas, graph, nodeDomain);
                 } catch (Exception e) {
                     failMessage = truncate(e.getMessage(), 1900);
-                    log.error("画布节点 {} 执行失败: {}", node.id, failMessage, e);
-                    break;
+                    log.error("画布链路执行失败 runId={}: {}", runId, failMessage, e);
+                }
+            } else {
+                for (Node node : pending) {
+                    if (isCancelled(runId)) {
+                        markRemainingCancelled(runId, node.id);
+                        break;
+                    }
+                    try {
+                        executeNode(node, runId, canvasId, sandboxId, canvas, graph, nodeDomain);
+                    } catch (Exception e) {
+                        failMessage = truncate(e.getMessage(), 1900);
+                        log.error("画布节点 {} 执行失败: {}", node.id, failMessage, e);
+                        break;
+                    }
                 }
             }
             String status = isCancelled(runId) ? "CANCELLED"
@@ -2238,6 +2247,98 @@ public class SandboxCanvasService {
         } finally {
             UserContext.remove();
         }
+    }
+
+    /**
+     * 可信执行模式下把整条算子链渲染成一次任务。
+     *
+     * <p>算子产物是密文对象，不回填明文中间表，因此逐节点派发时下游按表名找不到输入。
+     * 这里按拓扑序把链上的算子串成一段脚本，依次调用运行器内置的 {@code modeling_ops.run}，
+     * 中间结果只在可信运行时的进程内以临时文件传递，落库的只有最后一步的密文产出与报告。
+     * 数据资源节点是虚拟节点，只负责指明输入表，不参与执行。</p>
+     */
+    private void executeTeeChain(List<Node> pending, String runId, String canvasId, String sandboxId,
+            Map<String, Object> canvas, GraphModel graph, String nodeDomain) {
+        List<Node> operators = pending.stream()
+                .filter(node -> !CanvasOperatorRegistry.isVirtual(node.componentCode)).toList();
+        if (operators.isEmpty()) {
+            for (Node node : pending) {
+                executeNode(node, runId, canvasId, sandboxId, canvas, graph, nodeDomain);
+            }
+            return;
+        }
+        // 数据资源节点先各自结算，同时确定整条链的输入表
+        String inputTable = "";
+        for (Node node : pending) {
+            if (CanvasOperatorRegistry.isVirtual(node.componentCode)) {
+                executeNode(node, runId, canvasId, sandboxId, canvas, graph, nodeDomain);
+                inputTable = string(node.params.get("table"));
+            }
+        }
+        if (!notBlank(inputTable)) {
+            inputTable = resolveInputTable(operators.get(0), graph, runId, canvasId, sandboxId);
+        }
+        dataControl.requireMountTableUsable(sandboxId, inputTable);
+
+        List<Map<String, Object>> steps = new ArrayList<>();
+        for (Node node : operators) {
+            Map<String, Object> params = new LinkedHashMap<>();
+            params.put("op", node.componentCode);
+            params.putAll(node.params);
+            if (CanvasOperatorRegistry.needsCompareTable(node.componentCode)) {
+                throw new IllegalArgumentException("双表算子暂不支持在可信执行模式下串联：" + node.name);
+            }
+            steps.add(Map.of("op", node.componentCode, "params", params));
+        }
+        Node last = operators.get(operators.size() - 1);
+        String outputTable = opTableName(runId, last.id);
+        Map<String, Object> chainParams = new LinkedHashMap<>();
+        chainParams.put("op", last.componentCode);
+        chainParams.put("chain", steps);
+        chainParams.putAll(last.params);
+
+        for (Node node : operators) {
+            jdbc.update("update ds_compute_node_run set status='RUNNING',started_at=?,updated_at=? "
+                            + "where run_id=? and node_id=? and deleted=0", now(), now(), runId, node.id);
+        }
+        String taskId = dataDevService.createCanvasTask(sandboxId, canvasId, last.id, last.componentCode,
+                CanvasOperatorRegistry.CHAIN_RENDER_SCRIPT, chainParams, List.of(), inputTable, outputTable);
+        dataDevService.claimCanvasTask(taskId);
+        devJobExecutor.submitSandboxChannel(taskId, nodeDomain, "", "PYTHON",
+                CanvasOperatorRegistry.CHAIN_RENDER_SCRIPT, chainParams, List.of(), sandboxId, inputTable,
+                outputTable, new LinkedHashSet<>(Set.of(inputTable)), "canvas");
+        Map<String, Object> result = devJobExecutor.runAndAwait(taskId);
+        if (!"SUCCEEDED".equals(string(result.get("status")))) {
+            String error = "链路执行失败: " + string(result.get("errorMessage"));
+            for (Node node : operators) {
+                jdbc.update("update ds_compute_node_run set status='FAILED',task_id=?,error_message=?,"
+                                + "finished_at=?,updated_at=? where run_id=? and node_id=? and deleted=0",
+                        taskId, truncate(error, 1900), now(), now(), runId, node.id);
+            }
+            throw new IllegalStateException(error);
+        }
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("runtimeMode", "SIMULATION");
+        summary.put("attestationVerified", false);
+        summary.put("reports", result.getOrDefault("reports", List.of()));
+        summary.put("encryptedOutputs", result.getOrDefault("encryptedOutputs", List.of()));
+        String summaryJson = json(summary);
+        for (Node node : operators) {
+            boolean tail = node.id.equals(last.id);
+            jdbc.update("update ds_compute_node_run set status='SUCCEEDED',task_id=?,input_table=?,output_table=?,"
+                            + "result_summary=?,model_b64='',fit_params='',finished_at=?,updated_at=? "
+                            + "where run_id=? and node_id=? and deleted=0",
+                    taskId, inputTable, tail ? outputTable : "", tail ? summaryJson : json(Map.of(
+                            "runtimeMode", "SIMULATION", "attestationVerified", false,
+                            "chained", true, "chainTaskId", taskId)),
+                    now(), now(), runId, node.id);
+        }
+        if (CanvasOperatorRegistry.isTrain(last.componentCode)) {
+            registerTeeModel(canvas, last, sandboxId, runId,
+                    modelObjectId(result.getOrDefault("encryptedOutputs", List.of())));
+        }
+        audit("CANVAS_TEE_CHAIN_SUCCEEDED", "COMPUTE_RUN", runId,
+                "canvas=" + canvasId + " steps=" + operators.size() + " task=" + taskId, true);
     }
 
     private void executeNode(Node node, String runId, String canvasId, String sandboxId,
