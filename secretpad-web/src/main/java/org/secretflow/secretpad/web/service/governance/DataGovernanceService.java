@@ -22,6 +22,7 @@ import org.secretflow.secretpad.persistence.entity.NodeDO;
 import org.secretflow.secretpad.persistence.repository.NodeRepository;
 import org.secretflow.secretpad.web.service.DataSandboxMvpService;
 import org.secretflow.secretpad.web.service.DataAssetService;
+import org.secretflow.secretpad.web.service.storage.NodeDatasetStore;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -93,6 +94,7 @@ public class DataGovernanceService {
     private final DataSandboxMvpService mvp;
     private final GovernanceCustomExecutor customExecutor;
     private final DataAssetService dataAssetService;
+    private final NodeDatasetStore nodeDatasetStore;
 
     @Value("${secretpad.data.dir-path:/app/data/}")
     private String storeDir;
@@ -114,7 +116,8 @@ public class DataGovernanceService {
             NodeRepository nodeRepository,
             DataSandboxMvpService mvp,
             GovernanceCustomExecutor customExecutor,
-            DataAssetService dataAssetService) {
+            DataAssetService dataAssetService,
+            NodeDatasetStore nodeDatasetStore) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.kuscia = kuscia;
@@ -123,6 +126,7 @@ public class DataGovernanceService {
         this.mvp = mvp;
         this.customExecutor = customExecutor;
         this.dataAssetService = dataAssetService;
+        this.nodeDatasetStore = nodeDatasetStore;
     }
 
     /* ============================== 权限 ============================== */
@@ -614,7 +618,17 @@ public class DataGovernanceService {
             return result;
         }
         // 任务创建人可查看已脱敏结果；源数据 RAW 权限校验不适用于治理结果表。
-        DatatableDTO dst = resolveSource(string(task.get("result_node_id")), string(task.get("result_datatable_id")));
+        String resDatatableId = string(task.get("result_datatable_id"));
+        // 方案 B：优先从本地权威库 nodeDatasetStore 读取明文缓存（避免脱敏密文当 CSV 读取失败）
+        List<List<String>> dbRows = nodeDatasetStore.readTableRows(resDatatableId, 100);
+        if (dbRows != null && !dbRows.isEmpty()) {
+            List<String> header = new ArrayList<>(dbRows.get(0));
+            List<List<String>> data = dbRows.size() > 1 ? new ArrayList<>(dbRows.subList(1, dbRows.size())) : new ArrayList<>();
+            result.put("header", header);
+            result.put("rows", data);
+            return result;
+        }
+        DatatableDTO dst = resolveSource(string(task.get("result_node_id")), resDatatableId);
         List<List<String>> parsed = readCsv(dst.getNodeId(), dst.getRelativeUri());
         List<String> header = parsed.isEmpty() ? new ArrayList<>() : new ArrayList<>(parsed.get(0));
         List<List<String>> data = parsed.size() > 1 ? new ArrayList<>(parsed.subList(1, parsed.size())) : new ArrayList<>();
