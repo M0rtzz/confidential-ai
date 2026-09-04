@@ -39,6 +39,31 @@ public final class CanvasPredictScript {
         return "classification";
     }
 
+    /**
+     * 可信执行训练产物的推理脚本占位。
+     *
+     * <p>模型权重是密文对象，平台不持有密钥、也不在沙箱外解密，因此这里只记录对象标识与
+     * 推理约束：真正的推理须由可信运行时加载该密文对象后在环境内完成。脚本被直接运行时
+     * 立即报错，避免误以为拿到的是可离线执行的模型。</p>
+     */
+    public static String generateEncrypted(String objectId, String modelKind,
+            List<String> features, String task) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# 可信执行训练产物：模型为密文对象，不能在可信运行时之外加载\n");
+        sb.append("MODEL_OBJECT_ID = ").append(quote(objectId)).append("\n");
+        sb.append("MODEL_KIND = ").append(quote(modelKind)).append("\n");
+        sb.append("FEATURES = [").append(features == null ? "" : features.stream()
+                .map(CanvasPredictScript::quote).collect(java.util.stream.Collectors.joining(", ")))
+                .append("]\n");
+        sb.append("TASK = ").append(quote(task == null ? "" : task)).append("\n\n");
+        sb.append("def predict(df):\n");
+        sb.append("    raise RuntimeError(\n");
+        sb.append("        '模型 ' + MODEL_OBJECT_ID + ' 是密文对象，推理必须在可信运行时内进行；'\n");
+        sb.append("        '如需在环境外使用，请先通过结果导出审批取回。'\n");
+        sb.append("    )\n");
+        return sb.toString();
+    }
+
     public static String generate(String modelB64, String modelKind, List<String> features, String task) {
         return generate(modelB64, modelKind, features, task, null);
     }

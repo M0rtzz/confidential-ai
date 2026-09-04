@@ -998,7 +998,14 @@ public class DataDevService {
         List<Map<String, Object>> runLogs = jdbc.queryForList(
                 "select id,attempt,length(log_text) as log_len,created_at from ds_dev_run_log where task_id=? order by attempt asc", id);
         Map<String, Object> result = new LinkedHashMap<>(task);
+        Map<String, Object> preview = parseJsonMap(string(task.get("result_preview")));
         removeResultContent(result);
+        // 可信执行的产物是密文，明文表不落库；报告内容与密文产出清单本就在结果快照里，
+        // 详情需要它们才能说清这次运行到底产出了什么，明文数据行仍然不下发。
+        result.put("runtimeMode", preview.getOrDefault("runtimeMode", ""));
+        result.put("attestationVerified", preview.getOrDefault("attestationVerified", false));
+        result.put("reports", preview.getOrDefault("reports", List.of()));
+        result.put("encryptedOutputs", preview.getOrDefault("encryptedOutputs", List.of()));
         result.put("lineage", lineage);
         result.put("runLogs", runLogs);
         return result;

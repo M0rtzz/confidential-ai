@@ -2309,8 +2309,13 @@ public class SandboxCanvasService {
                 jdbc.update("update ds_compute_node_run set status='SUCCEEDED',task_id=?,input_table=?,output_table=?,"
                                 + "result_summary=?,model_b64='',fit_params='',finished_at=?,updated_at=? where id=?",
                         taskId, inputTable, outputTable, json(summary), now(), now(), nodeRunId);
+                // 训练算子的产物是密文模型对象，仍要登记为模型，否则模型列表与报告入口全空
+                boolean registered = CanvasOperatorRegistry.isTrain(node.componentCode)
+                        && registerTeeModel(canvas, node, sandboxId, runId,
+                                modelObjectId(result.getOrDefault("encryptedOutputs", List.of())));
                 audit("CANVAS_NODE_TEE_SUCCEEDED", "COMPUTE_NODE_RUN", nodeRunId,
-                        "node=" + node.id + " op=" + node.componentCode + " encrypted=true", true);
+                        "node=" + node.id + " op=" + node.componentCode + " encrypted=true"
+                                + " modelRegistered=" + registered, true);
                 return;
             }
             @SuppressWarnings("unchecked")
@@ -2387,6 +2392,74 @@ public class SandboxCanvasService {
      *
      * @return 是否成功回填 {@code ds_compute_node_run.model_id}
      */
+    /** 密文产出里的模型对象标识；没有模型产出返回空串。 */
+    @SuppressWarnings("unchecked")
+    private String modelObjectId(Object encryptedOutputs) {
+        if (!(encryptedOutputs instanceof List<?> outputs)) {
+            return "";
+        }
+        for (Object item : outputs) {
+            if (item instanceof Map<?, ?> output && "MODEL".equals(string(((Map<String, Object>) output).get("kind")))) {
+                return string(((Map<String, Object>) output).get("objectId"));
+            }
+        }
+        return "";
+    }
+
+    /**
+     * 登记可信执行产出的密文模型。
+     *
+     * <p>模型权重是密文对象，平台不持有密钥、也不在沙箱外解密，因此制品内容只记录对象标识与
+     * 推理约束，实际推理必须在可信运行时内进行。登记的意义在于模型列表、评估报告与后续的
+     * 服务化发布都能找到这次训练的产出，而不是让界面一片空白。</p>
+     */
+    private boolean registerTeeModel(Map<String, Object> canvas, Node node, String sandboxId,
+            String runId, String objectId) {
+        try {
+            String projectId = string(canvas.get("project_id"));
+            String artifactName = "画布模型-" + string(canvas.get("name")) + "-" + string(node.name);
+            String kind = node.componentCode.startsWith("ml.")
+                    ? node.componentCode.substring(3) : node.componentCode;
+            String script = CanvasPredictScript.generateEncrypted(objectId, kind,
+                    stringList(node.params.get("features")), string(node.params.get("task")));
+            List<Map<String, Object>> existing = jdbc.queryForList(
+                    "select * from ds_dev_artifact where name=? and sandbox_id=? and deleted=0",
+                    artifactName, sandboxId);
+            String artifactId;
+            if (existing.isEmpty()) {
+                Map<String, Object> req = new LinkedHashMap<>();
+                req.put("name", artifactName);
+                req.put("type", "PYTHON");
+                req.put("projectId", projectId);
+                req.put("sandboxId", sandboxId);
+                req.put("source", ARTIFACT_SOURCE_CANVAS);
+                req.put("description", "画布节点 " + node.id + " 的可信执行训练产物（" + kind
+                        + "），模型为密文对象 " + objectId);
+                artifactId = string(dataDevService.createArtifact(req).get("id"));
+            } else {
+                artifactId = string(existing.get(0).get("id"));
+            }
+            Map<String, Object> vreq = new LinkedHashMap<>();
+            vreq.put("artifactId", artifactId);
+            vreq.put("contentText", script);
+            vreq.put("description", "可信执行训练，密文模型对象 " + objectId + "，训练时间 " + now());
+            String versionId = string(dataDevService.createVersion(vreq).get("id"));
+            Map<String, Object> model = modelApprovalService.registerModelAutoApproved(
+                    artifactName, projectId, artifactId, versionId, sandboxId,
+                    "可信执行训练产物自动注册（" + kind + "，密文模型）");
+            String modelId = string(model.get("id"));
+            jdbc.update("update ds_compute_node_run set model_id=?,updated_at=? "
+                            + "where run_id=? and node_id=? and deleted=0",
+                    modelId, now(), runId, node.id);
+            audit("CANVAS_TEE_MODEL_REGISTERED", "MODEL", modelId,
+                    "canvas=" + string(canvas.get("id")) + " object=" + objectId, true);
+            return true;
+        } catch (Exception e) {
+            log.warn("密文模型登记失败 node={} op={}: {}", node.id, node.componentCode, e.getMessage());
+            return false;
+        }
+    }
+
     private boolean registerModelFromTrainNode(Map<String, Object> canvas, Node node, String modelB64, String sandboxId,
             GraphModel graph, String runId) {
         try {
