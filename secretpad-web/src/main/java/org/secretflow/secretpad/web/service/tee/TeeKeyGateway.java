@@ -34,15 +34,18 @@ public class TeeKeyGateway {
 
     private final TeeKeyService keyService;
     private final TeePolicyService policyService;
+    private final TeeAssetService assetService;
     private final TeeCenterClient center;
     private final TeeKeyRepository keys;
     private final TeePolicyRepository policies;
     private final ObjectMapper mapper;
 
-    public TeeKeyGateway(TeeKeyService keyService, TeePolicyService policyService, TeeCenterClient center,
+    public TeeKeyGateway(TeeKeyService keyService, TeePolicyService policyService,
+                         TeeAssetService assetService, TeeCenterClient center,
                          TeeKeyRepository keys, TeePolicyRepository policies, ObjectMapper mapper) {
         this.keyService = keyService;
         this.policyService = policyService;
+        this.assetService = assetService;
         this.center = center;
         this.keys = keys;
         this.policies = policies;
@@ -94,6 +97,18 @@ public class TeeKeyGateway {
                 center.post("/policies/register", request, TeePolicyService.RegisterResult.class);
         mirrorPolicy(ownerId, request.policy(), result);
         return result;
+    }
+
+    /**
+     * 登记密文资产。中心端直接落本端台账，客户端经平台间契约通道交给中心端。
+     *
+     * <p>台账唯一在中心端，因此客户端不镜像资产行，避免出现第二份权威记录。</p>
+     */
+    public TeeAssetService.RegisterResult registerAsset(String ownerId, TeeAssetService.RegisterRequest request) {
+        if (!delegated()) {
+            return assetService.register(ownerId, request);
+        }
+        return center.post("/assets/register", request, TeeAssetService.RegisterResult.class);
     }
 
     /** 台账唯一在中心端；客户端一律回读中心端，不返回本地镜像的计数。 */

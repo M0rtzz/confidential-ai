@@ -31,6 +31,7 @@ import org.secretflow.secretpad.web.service.sync.AssetSyncService;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.EmptyResultDataAccessException;
@@ -92,6 +93,7 @@ public class SandboxApprovalService {
     private final AssetSyncService assetSyncService;
     private final SandboxDbService sandboxDbService;
     private final NodeDatasetStore nodeDatasetStore;
+    private final ObjectProvider<TeeAssetRegistrar> teeAssetRegistrar;
     private final Map<String, Integer> appliedSnapshotHashes = new ConcurrentHashMap<>();
 
     @Value("${secretpad.node-id:kuscia-system}")
@@ -115,7 +117,8 @@ public class SandboxApprovalService {
             ProjectDatatableRepository projectDatatableRepository,
             AssetSyncService assetSyncService,
             SandboxDbService sandboxDbService,
-            NodeDatasetStore nodeDatasetStore) {
+            NodeDatasetStore nodeDatasetStore,
+            ObjectProvider<TeeAssetRegistrar> teeAssetRegistrar) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.service = service;
@@ -127,6 +130,7 @@ public class SandboxApprovalService {
         this.assetSyncService = assetSyncService;
         this.sandboxDbService = sandboxDbService;
         this.nodeDatasetStore = nodeDatasetStore;
+        this.teeAssetRegistrar = teeAssetRegistrar;
     }
 
     /* ------------------------------- 申请单查询 ------------------------------- */
@@ -372,6 +376,11 @@ public class SandboxApprovalService {
             case "APPROVE", "REJECT" -> {
                 if ("DATA_PROVIDER_REVIEW".equals(from)) {
                     vote(id, action, comment);
+                    if ("APPROVE".equals(action)) {
+                        // 供数方投出同意即把本方数据按批准的列与算子登记进密文资产台账，
+                        // 可信运行时执行时才能凭这份登记申领密钥。
+                        teeAssetRegistrar.ifAvailable(registrar -> registrar.registerApproved(requireApproval(id)));
+                    }
                 } else if ("OPERATOR_REVIEW".equals(from)) {
                     if (!gate.isAdminOrOperator(gate.currentUser(), string(approval.get("applicant_node_id")))) {
                         throw SecretpadException.of(AuthErrorCode.AUTH_FAILED, "仅运营方可处理运营审核");
