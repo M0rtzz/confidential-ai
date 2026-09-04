@@ -583,6 +583,22 @@ def register_sampler(name):
         run('docker', 'exec', '-i', ctr, 'kubectl', 'apply', '-f', '-', input=template)
 
 
+def normalize_sandbox_images(name):
+    """放开 kuscia 镜像层对 other 的读与遍历权限。
+
+    隔离部署把 `.dev-runtime/<实例>/kuscia` 收窄到 0770，该目录挂进 kuscia 容器后，
+    containerd 解包出的镜像层同样只有属主与 gid 可读。沙箱镜像（如 Jupyter）固定以镜像
+    自带的非 root USER 运行，读不到 libc 一类共享库，容器起来即退出。此处只放开镜像层，
+    运行目录、数据库与凭据的收窄保持不变。幂等，可在拉入新沙箱镜像后重跑。
+    """
+    ctr = f'data-sandbox-dev-{name}-kuscia'
+    if not managed(ctr):
+        raise RuntimeError('Kuscia 尚未启动')
+    run('docker', 'exec', ctr, 'sh', '-c',
+        'test -d /home/kuscia/containerd && chmod -R o+rX /home/kuscia/containerd')
+    print(f'{name} 沙箱镜像层读权限已规范化')
+
+
 def up(name):
     data = manifest()
     if not platform_image_matches(data):
@@ -643,6 +659,7 @@ def up(name):
         '--port', base+88, '--gateway-port', base+80, '--internal-port', base+81,
         '--api-http-port', base+82, '--api-grpc-port', base+83, '--metrics-port', base+84,
         '--advertise-host', CONTRACT_HOST, env=env, input=(password + '\n' + password + '\n') if password else None)
+    normalize_sandbox_images(name)
 
 
 def down(name):
@@ -710,7 +727,7 @@ def main():
         'register-p5-runtime',
         'verify-tls', 'verify-native', 'verify-persistence', 'verify-environment', 'verify-isolation', 'verify-repeat', 'verify-release', 'lock-image', 'build-components',
         'refresh-detection', 'detect-schedule', 'adapter-up', 'publish-identities', 'verify-p4',
-        'sync-toolkit'])
+        'sync-toolkit', 'normalize-sandbox-images'])
     parser.add_argument('--tee', action='store_true', required=True)
     parser.add_argument('--name', choices=list(INSTANCES), default='center')
     parser.add_argument('--image-key')
@@ -737,6 +754,7 @@ def main():
         elif args.command == 'build-platform': build_platform()
         elif args.command == 'up': up(args.name)
         elif args.command == 'down': down(args.name)
+        elif args.command == 'normalize-sandbox-images': normalize_sandbox_images(args.name)
         elif args.command == 'fetch-sources': fetch_sources()
         elif args.command == 'register-p5-runtime':
             import p5_runtime

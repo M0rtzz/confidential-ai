@@ -95,6 +95,28 @@ class IsolationTests(unittest.TestCase):
         with patch.object(deploy.subprocess, 'run', return_value=result):
             with self.assertRaises(RuntimeError): deploy.managed('data-sandbox-dev-center-secretpad')
 
+    def test_normalize_sandbox_images_only_opens_image_layers(self):
+        """只放开镜像层的读权限，不触碰运行目录、数据库与凭据。"""
+        calls = []
+
+        def fake_run(*args, **kwargs):
+            calls.append(args)
+            return ''
+
+        with patch.object(deploy, 'managed', return_value={'State': {'Running': True}}), \
+                patch.object(deploy, 'run', side_effect=fake_run):
+            quiet(deploy.normalize_sandbox_images, 'center')
+        self.assertEqual(len(calls), 1)
+        command = calls[0]
+        self.assertEqual(command[:4], ('docker', 'exec', 'data-sandbox-dev-center-kuscia', 'sh'))
+        self.assertIn('chmod -R o+rX /home/kuscia/containerd', command[-1])
+        self.assertNotIn('secretpad', command[-1])
+
+    def test_normalize_sandbox_images_requires_running_kuscia(self):
+        with patch.object(deploy, 'managed', return_value=None):
+            with self.assertRaises(RuntimeError):
+                deploy.normalize_sandbox_images('center')
+
     def test_stopped_foreign_container_does_not_reserve_ports(self):
         def run(*args, **kwargs):
             if args[:3] == ('docker', 'ps', '-aq'): return 'foreign-id'
