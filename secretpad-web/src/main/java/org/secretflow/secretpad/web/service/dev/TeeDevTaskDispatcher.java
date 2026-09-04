@@ -295,9 +295,11 @@ public class TeeDevTaskDispatcher {
         }
         String table = text(task.get("source_table_name"));
         if (!table.isBlank()) {
+            // 挂载表与画布中间产物表都可作为输入：后者的 asset_id 指向派生密文资产
             List<Map<String, Object>> rows = jdbc.queryForList(
                     "select asset_id from ds_sandbox_data_dir where sandbox_id=? and table_name=? "
-                            + "and kind='MOUNT' and deleted=0 limit 1", sandboxId, table);
+                            + "and kind in ('MOUNT','OPERATOR') and coalesce(asset_id,'')<>'' and deleted=0 limit 1",
+                    sandboxId, table);
             if (!rows.isEmpty()) {
                 return text(rows.get(0).get("asset_id"));
             }

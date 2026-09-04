@@ -278,6 +278,30 @@ def cleanup_run_assets(asset_ids, instance='center'):
     return removed
 
 
+def cleanup_governed_assets(entries):
+    """删除本次验收在各实例上留下的抽样脱敏产出及其原始上传。
+
+    每跑一次 P4 就在三个实例各新增一对同名资产（原始 CSV 与治理产出），
+    名称相同、标识不同、提供方各异，堆在数据目录里既占位又容易被误认成同一份数据。
+    只按本次运行记录下来的精确标识删除，不按名称批量清理。
+    """
+    removed = 0
+    for instance, asset_ids in entries:
+        ids = [asset_id for asset_id in asset_ids if asset_id]
+        if not ids:
+            continue
+        condition = 'id in (' + ', '.join(quote(asset_id) for asset_id in ids) + ')'
+        removed += int(sqlite_query(instance, 'select count(*) from ds_data_asset where '
+                                    + condition + ' and deleted=0;') or 0)
+        asset_condition = 'asset_id in (' + ', '.join(quote(asset_id) for asset_id in ids) + ')'
+        sqlite(instance, ['update ds_data_asset set deleted=1 where ' + condition + ';',
+                          'delete from ds_node_dataset where ' + asset_condition + ';',
+                          'delete from ds_asset_usage_control where ' + asset_condition + ';',
+                          'delete from ds_project_asset where ' + asset_condition + ';'])
+        cleanup_run_assets(ids, instance)
+    return removed
+
+
 def cleanup_run_objects(task_ids, instance='center'):
     """删除本次验收自己产生的结果对象。
 
@@ -415,7 +439,8 @@ def governed_encryption(instance, token, owner, checks, prefix):
                       'encryptedAtRest': True, 'ciphertextOnlyOnSync': True,
                       'plaintextBytes': metadata.get('plaintextBytes'),
                       'ledgerAtCenter': True}
-    return {'assetId': asset_id, 'metadata': metadata}
+    return {'assetId': asset_id, 'metadata': metadata,
+            'sourceAssetId': source['id'], 'instance': instance}
 
 
 def client_instance_chain(instance, checks, prefix):
@@ -516,6 +541,7 @@ def client_instance_chain(instance, checks, prefix):
     governed = governed_encryption(instance, token, owner, checks, prefix + 'Governed')
     result['governedAssetId'] = governed['assetId']
     checks[prefix] = result
+    return [governed]
 
 
 def run():
@@ -823,12 +849,24 @@ def run():
     finally:
         remove_approval(fixture)
 
-    # 36 中心实例的抽样脱敏产出加密落盘
-    governed_encryption('center', client_token, owner, checks, 'centerGoverned')
+    governed_runs = []
+    try:
+        # 36 中心实例的抽样脱敏产出加密落盘
+        governed_runs.append(governed_encryption('center', client_token, owner, checks, 'centerGoverned'))
 
-    # 37 两个客户端实例：向中心端申请密钥、登记规则、加密落盘，端角色与环境如实标注
-    client_instance_chain('client-a', checks, 'clientInstance1')
-    client_instance_chain('client-b', checks, 'clientInstance2')
+        # 37 两个客户端实例：向中心端申请密钥、登记规则、加密落盘，端角色与环境如实标注
+        governed_runs.extend(client_instance_chain('client-a', checks, 'clientInstance1'))
+        governed_runs.extend(client_instance_chain('client-b', checks, 'clientInstance2'))
+    finally:
+        # 每跑一次就在三个实例各留一对同名资产，不清理会持续堆积并被误认成同一份数据
+        try:
+            entries = [(run['instance'], [run['assetId'], run.get('sourceAssetId')])
+                       for run in governed_runs if run]
+            removed = cleanup_governed_assets(entries)
+            if removed:
+                print(f'P4 已清理本次运行产生的 {removed} 份抽样脱敏资产')
+        except Exception as cleanup_error:  # noqa: BLE001 - 清理失败不应让通过的验收变失败
+            print('P4 治理产出清理失败（不影响验收结论）：' + str(cleanup_error))
 
     return {'assetId': asset_id, 'keyId': issued['keyId'], 'policyId': policy['policyId'],
             'objectId': asset['objectId'], 'sampleBytes': len(SAMPLE_CSV),

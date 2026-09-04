@@ -75,6 +75,7 @@ public class SandboxCanvasService {
     private final DataDevService dataDevService;
     private final DevJobExecutor devJobExecutor;
     private final SandboxDbService sandboxDb;
+    private final org.secretflow.secretpad.web.service.tee.TeeIntermediateAssets intermediateAssets;
     private final DataSandboxMvpService mvp;
     private final ModelApprovalService modelApprovalService;
     private final SandboxDataControlService dataControl;
@@ -87,6 +88,7 @@ public class SandboxCanvasService {
             DataDevService dataDevService,
             DevJobExecutor devJobExecutor,
             SandboxDbService sandboxDb,
+            org.secretflow.secretpad.web.service.tee.TeeIntermediateAssets intermediateAssets,
             DataSandboxMvpService mvp,
             ModelApprovalService modelApprovalService,
             SandboxDataControlService dataControl) {
@@ -95,6 +97,7 @@ public class SandboxCanvasService {
         this.dataDevService = dataDevService;
         this.devJobExecutor = devJobExecutor;
         this.sandboxDb = sandboxDb;
+        this.intermediateAssets = intermediateAssets;
         this.mvp = mvp;
         this.modelApprovalService = modelApprovalService;
         this.dataControl = dataControl;
@@ -2414,6 +2417,9 @@ public class SandboxCanvasService {
                 boolean registered = CanvasOperatorRegistry.isTrain(node.componentCode)
                         && registerTeeModel(canvas, node, sandboxId, runId,
                                 modelObjectId(result.getOrDefault("encryptedOutputs", List.of())));
+                // 数据类产物登记成派生密文资产并补一张同名空表，下游节点因此可以单独重跑
+                registerIntermediate(node, runId, sandboxId, inputTable, outputTable,
+                        dataObjectId(result.getOrDefault("encryptedOutputs", List.of())));
                 audit("CANVAS_NODE_TEE_SUCCEEDED", "COMPUTE_NODE_RUN", nodeRunId,
                         "node=" + node.id + " op=" + node.componentCode + " encrypted=true"
                                 + " modelRegistered=" + registered, true);
@@ -2493,6 +2499,56 @@ public class SandboxCanvasService {
      *
      * @return 是否成功回填 {@code ds_compute_node_run.model_id}
      */
+    /** 密文产出里的数据对象标识；没有数据产出返回空串。 */
+    @SuppressWarnings("unchecked")
+    private String dataObjectId(Object encryptedOutputs) {
+        if (!(encryptedOutputs instanceof List<?> outputs)) {
+            return "";
+        }
+        for (Object item : outputs) {
+            if (item instanceof Map<?, ?> output && "DATA".equals(string(((Map<String, Object>) output).get("kind")))) {
+                return string(((Map<String, Object>) output).get("objectId"));
+            }
+        }
+        return "";
+    }
+
+    /**
+     * 把节点的密文数据产物登记成派生密文资产，并在沙箱库补一张同名空表。
+     *
+     * <p>登记成功后，下游节点可以单独重跑：它按表名解析到这条派生资产，凭继承自上游的授权
+     * 向可信运行时申领密钥。登记失败不影响本次运行，只是下游仍需整图执行。</p>
+     */
+    private void registerIntermediate(Node node, String runId, String sandboxId,
+            String inputTable, String outputTable, String objectId) {
+        if (!notBlank(objectId)) {
+            return;
+        }
+        String sourceAssetId = jdbc.query(
+                "select asset_id from ds_sandbox_data_dir where sandbox_id=? and table_name=? and deleted=0 limit 1",
+                rs -> rs.next() ? rs.getString(1) : "", sandboxId, inputTable);
+        String derivedAssetId = "mid-" + shortId() + "-" + outputTable.hashCode();
+        if (!intermediateAssets.register(derivedAssetId, sandboxId, sourceAssetId, objectId)) {
+            return;
+        }
+        List<String> columns = jdbc.query(
+                "select columns_json from ds_sandbox_data_dir where sandbox_id=? and table_name=? and deleted=0 limit 1",
+                rs -> rs.next() ? columnsOf(rs.getString(1)) : List.<String>of(), sandboxId, inputTable);
+        sandboxDb.registerCiphertextOperatorTable(sandboxId, runId, node.id,
+                operatorOutputName(node, parseGraph(string(requireCanvas(string(
+                        jdbc.queryForMap("select canvas_id from ds_compute_run where id=?", runId)
+                                .get("canvas_id"))).get("graph_json")))), columns, derivedAssetId);
+    }
+
+    private List<String> columnsOf(String json) {
+        try {
+            return mapper.readValue(json == null || json.isBlank() ? "[]" : json,
+                    new com.fasterxml.jackson.core.type.TypeReference<List<String>>() { });
+        } catch (Exception ignored) {
+            return List.of();
+        }
+    }
+
     /** 密文产出里的模型对象标识；没有模型产出返回空串。 */
     @SuppressWarnings("unchecked")
     private String modelObjectId(Object encryptedOutputs) {

@@ -436,11 +436,32 @@ public class SandboxDbService {
     }
 
     /**
+     * 密文中间产物建表：只建表结构、不落明文行，并把表登记到派生密文资产上。
+     *
+     * <p>可信执行的算子产物是密文对象，沙箱库里没有明文中间表。这里补一张同名空表，
+     * 使表结构预览、挂载管控与任务派发的源表解析都能找到它；真正的数据仍在密文对象里，
+     * 由可信运行时凭派生资产的授权申领密钥后读取。</p>
+     */
+    @Transactional
+    public Map<String, Object> registerCiphertextOperatorTable(String sandboxId, String runId, String nodeId,
+            String name, List<String> header, String assetId) {
+        String table = "op_" + SqliteTableLoader.sanitizeTableName(runId)
+                + "_" + SqliteTableLoader.sanitizeTableName(nodeId);
+        return backfillTable(sandboxId, table, "OPERATOR", name, header, List.of(), assetId);
+    }
+
+    /**
      * 通用产出表回填：写入沙箱库指定表名并登记清单（kind 由调用方指定 RESULT/OPERATOR）。
      */
     @Transactional
     public Map<String, Object> backfillTable(String sandboxId, String table, String kind, String name,
             List<String> header, List<List<String>> data) {
+        return backfillTable(sandboxId, table, kind, name, header, data, "");
+    }
+
+    @Transactional
+    public Map<String, Object> backfillTable(String sandboxId, String table, String kind, String name,
+            List<String> header, List<List<String>> data, String assetId) {
         String safeId = sanitizeSandboxId(sandboxId);
         Path db = sandboxDbPath(safeId);
         String safeTable = SqliteTableLoader.sanitizeTableName(table);
@@ -450,7 +471,7 @@ public class SandboxDbService {
         manifest.removeIf(e -> safeTable.equals(string(e.get("table_name"))));
         Map<String, Object> entry = new LinkedHashMap<>();
         entry.put("table_name", safeTable);
-        entry.put("asset_id", "");
+        entry.put("asset_id", assetId == null ? "" : assetId);
         entry.put("name", name == null || name.isBlank() ? safeTable : name);
         entry.put("kind", kind);
         entry.put("source", "LOCAL");
