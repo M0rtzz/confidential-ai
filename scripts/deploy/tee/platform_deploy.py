@@ -599,10 +599,13 @@ def normalize_sandbox_images(name):
     ctr = f'data-sandbox-dev-{name}-kuscia'
     if not managed(ctr):
         raise RuntimeError('Kuscia 尚未启动')
+    # 只改真正缺位的条目：镜像层动辄百万级文件，无条件 chmod -R 每次要跑十几分钟，
+    # 而按权限过滤后重复执行几乎不产生写操作。
     run('docker', 'exec', ctr, 'sh', '-c',
         'test -d /home/kuscia/containerd || exit 0; '
-        'chmod -R o+rX /home/kuscia/containerd; '
-        'find /home/kuscia/containerd -type d -perm -1000 -exec chmod o+w {} +')
+        'find /home/kuscia/containerd ! -perm -004 -exec chmod o+r {} +; '
+        'find /home/kuscia/containerd -type d ! -perm -001 -exec chmod o+x {} +; '
+        'find /home/kuscia/containerd -type d -perm -1000 ! -perm -002 -exec chmod o+w {} +')
     print(f'{name} 沙箱镜像层权限已规范化')
 
 

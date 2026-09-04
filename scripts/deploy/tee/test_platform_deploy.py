@@ -109,8 +109,9 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         command = calls[0]
         self.assertEqual(command[:4], ('docker', 'exec', 'data-sandbox-dev-center-kuscia', 'sh'))
-        self.assertIn('chmod -R o+rX /home/kuscia/containerd', command[-1])
-        self.assertIn('-perm -1000 -exec chmod o+w', command[-1])
+        self.assertIn('! -perm -004 -exec chmod o+r', command[-1])
+        self.assertIn('-perm -1000 ! -perm -002 -exec chmod o+w', command[-1])
+        self.assertNotIn('chmod -R', command[-1])
         self.assertNotIn('secretpad', command[-1])
         self.assertNotIn('/app/db', command[-1])
 
