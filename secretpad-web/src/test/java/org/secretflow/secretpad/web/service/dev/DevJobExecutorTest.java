@@ -62,6 +62,17 @@ public class DevJobExecutorTest {
     }
 
     @Test
+    void teeModelApiPredictionMapsToExistingInvokeShape() {
+        var table = DevJobExecutor.teeReportTable(Map.of("reports", List.of(Map.of(
+                "reportKind", "MODEL_API_PREDICTION",
+                "content", Map.of("header", List.of("pred", "pred_prob"),
+                        "rows", List.of(List.of(1, 0.9), List.of(0, 0.1)), "resultRows", 2)))));
+        assertEquals(List.of("pred", "pred_prob"), table.get(0));
+        assertEquals(List.of("1", "0.9"), table.get(1));
+        assertEquals(List.of("0", "0.1"), table.get(2));
+    }
+
+    @Test
     void extractsExecutionFailedLineAndStripsPythonPrefix() {
         String log = """
                 [py] running: /usr/local/bin/python /tmp/py/script_guarded.py --input /tmp/py/input.csv ...

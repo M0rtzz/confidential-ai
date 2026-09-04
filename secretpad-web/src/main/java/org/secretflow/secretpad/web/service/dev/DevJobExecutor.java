@@ -244,6 +244,18 @@ public class DevJobExecutor {
         doSubmit(taskId, nodeId, inputB64, execType, jarB64OrScript, params, allowedImports, channel, extra);
     }
 
+    /** Submit an API scoring job whose request rows and model are both encrypted TEE inputs. */
+    public void submitTeeModelApi(String taskId, String apiId, String modelId, byte[] inputCsv,
+                                  List<String> inputColumns, int maxRows) {
+        if (!kusciaEnabled || !teeDispatcher.enabled()) {
+            throw new IllegalStateException(DevErrors.DEV_PARAM_INVALID
+                    + ": TEE 运行时未启用，密文模型禁止回退到普通执行器");
+        }
+        TeeDevTaskDispatcher.Submission submission = teeDispatcher.prepareModelApi(
+                taskId, apiId, modelId, inputCsv, inputColumns, maxRows);
+        submitPreparedTee(taskId, "api", submission);
+    }
+
     private void doSubmit(String taskId, String nodeId, String inputB64, String execType,
             String jarB64OrScript, Map<String, Object> params, List<String> allowedImports, String channel,
             Map<String, Object> extraConfig) {
@@ -307,6 +319,11 @@ public class DevJobExecutor {
                            Map<String, Object> executionParameters) {
         TeeDevTaskDispatcher.Submission submission = teeDispatcher.prepare(taskId, inputB64, execType,
                 content, params, allowedImports, channel, executionParameters);
+        submitPreparedTee(taskId, channel, submission);
+    }
+
+    private void submitPreparedTee(String taskId, String channel,
+                                   TeeDevTaskDispatcher.Submission submission) {
         String jobId = "tee-" + taskId;
         String kusciaTaskId = jobId + "-task";
         Job.Party party = Job.Party.newBuilder().setDomainId(submission.nodeId()).setRole("server")
@@ -333,7 +350,7 @@ public class DevJobExecutor {
         teeDispatcher.mark(taskId, "SUBMITTED");
         jdbc.update("update ds_dev_task set kuscia_job_id=?,channel=?,updated_at=? where id=? and status=?",
                 jobId, "tee:" + (channel == null ? "dev" : channel), now(), taskId, STATUS_RUNNING);
-        log.info("TEE task {} submitted as Kuscia job {} type={} channel={}", taskId, jobId, execType, channel);
+        log.info("TEE task {} submitted as Kuscia job {} channel={}", taskId, jobId, channel);
     }
 
     static Map<String, String> teeTaskInputConfig(String taskJws) {
@@ -492,6 +509,21 @@ public class DevJobExecutor {
         } else if ("TREE_STRUCTURE".equals(kind)) {
             table.add(List.of("report_kind", "content"));
             table.add(List.of(kind, jsonStatic(content)));
+        } else if ("MODEL_API_PREDICTION".equals(kind)
+                && content.get("header") instanceof List<?> header
+                && content.get("rows") instanceof List<?> rows) {
+            List<String> columns = new ArrayList<>();
+            header.forEach(value -> columns.add(string(value)));
+            if (!columns.isEmpty()) {
+                table.add(columns);
+                for (Object value : rows) {
+                    if (value instanceof List<?> row && row.size() == columns.size()) {
+                        List<String> cells = new ArrayList<>();
+                        row.forEach(cell -> cells.add(string(cell)));
+                        table.add(cells);
+                    }
+                }
+            }
         }
         return table;
     }
@@ -673,7 +705,7 @@ public class DevJobExecutor {
                 reports.add(report);
             } else if ("DATA".equals(kind) || "MODEL".equals(kind)) {
                 Map<String, Object> metadata = new LinkedHashMap<>();
-                for (String field : List.of("kind", "resultId", "objectId", "keyId", "keyVersion",
+                for (String field : List.of("kind", "artifactType", "resultId", "objectId", "keyId", "keyVersion",
                         "ciphertextSha256", "contributors", "exportState")) {
                     metadata.put(field, objectMapper.convertValue(output.path(field), Object.class));
                 }

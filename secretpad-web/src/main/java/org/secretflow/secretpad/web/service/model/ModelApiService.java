@@ -680,6 +680,7 @@ public class ModelApiService {
         // ⑤ 执行：按制品类型分发（SQL 进程内内存计算 / FUNCTION python-runner 预置快照 / PYTHON+JAR 无状态容器）
         String modelId = string(api.get("model_id"));
         Map<String, Object> model = requireModel(modelId);
+        Map<String, Object> teeBinding = teeBinding(modelId);
         List<Map<String, Object>> rows = parseRows(body.get("rows"));
         if (rows.size() > maxRows) {
             throw new IllegalArgumentException(ModelErrors.MODEL_INPUT_TOO_LARGE
@@ -699,6 +700,16 @@ public class ModelApiService {
         String inputB64 = Base64.getEncoder().encodeToString(inputCsv.getBytes(StandardCharsets.UTF_8));
         String taskId = createInvokeTask(modelId, nodeId, execType, params, rows.size());
 
+        if (teeBinding != null) {
+            if (!"PYTHON".equals(execType)) {
+                throw new IllegalArgumentException(ModelErrors.MODEL_API_INVOKE_FAILED
+                        + ": TEE 密文模型必须绑定 PYTHON 占位制品");
+            }
+            jdbc.update("update ds_dev_task set project_id=?,sandbox_id=?,updated_at=? where id=?",
+                    string(model.get("project_id")), string(teeBinding.get("sandbox_id")), now(), taskId);
+            return invokeTeeModel(apiId, modelId, taskId, inputCsv, header, rows, caller, ip);
+        }
+
         if ("SQL".equals(execType)) {
             return invokeSql(apiId, modelId, taskId, version, params, inputCsv, rows, caller, ip);
         }
@@ -706,6 +717,31 @@ public class ModelApiService {
             return invokeFunction(apiId, modelId, taskId, nodeId, version, params, inputB64, inputCsv, rows, caller, ip);
         }
         return invokeContainer(apiId, modelId, taskId, nodeId, execType, version, params, inputB64, rows, caller, ip);
+    }
+
+    /** 密文模型专用路径：请求数据和 joblib 模型作为两个受签名约束的密文输入送入 TEE。 */
+    private Map<String, Object> invokeTeeModel(String apiId, String modelId, String taskId,
+            String inputCsv, List<String> header, List<Map<String, Object>> rows, String caller, String ip) {
+        claimTask(taskId);
+        try {
+            devJobExecutor.submitTeeModelApi(taskId, apiId, modelId,
+                    inputCsv.getBytes(StandardCharsets.UTF_8), header, maxRows);
+        } catch (Exception failure) {
+            jdbc.update("update ds_dev_task set status='FAILED',error_message=?,finished_at=?,updated_at=? where id=?",
+                    truncate(failure.getMessage(), 1900), now(), now(), taskId);
+            recordInvoke(apiId, modelId, taskId, caller, ip, rows.size(), false, 0,
+                    string(failure.getMessage()));
+            throw failure;
+        }
+        Map<String, Object> result = devJobExecutor.runAndAwait(taskId);
+        boolean success = "SUCCEEDED".equals(string(result.get("status")));
+        recordInvoke(apiId, modelId, taskId, caller, ip, rows.size(), success, result.get("elapsedMs"),
+                string(result.get("errorMessage")));
+        if (!success) {
+            throw new IllegalArgumentException(ModelErrors.MODEL_API_INVOKE_FAILED
+                    + ": " + string(result.get("errorMessage")));
+        }
+        return buildInvokeResult(result);
     }
 
     /** SQL 制品：进程内只读 SQLite 内存计算（{@link DevSqlEngine#executeNamed}），不拉起容器。 */
@@ -838,6 +874,12 @@ public class ModelApiService {
     private void deny(String code, String message, String apiId, String ip) {
         audit("MODEL_API_INVOKE", "MODEL_API", apiId, code + " " + message + " ip=" + ip, false);
         throw new IllegalArgumentException(code + ": " + message);
+    }
+
+    private Map<String, Object> teeBinding(String modelId) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "select * from ds_model_tee_binding where model_id=? and status='ACTIVE'", modelId);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     private String createInvokeTask(String modelId, String nodeId, String execType, Map<String, Object> params, int sourceRows) {

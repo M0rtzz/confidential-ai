@@ -2556,7 +2556,9 @@ public class SandboxCanvasService {
             return "";
         }
         for (Object item : outputs) {
-            if (item instanceof Map<?, ?> output && "MODEL".equals(string(((Map<String, Object>) output).get("kind")))) {
+            if (item instanceof Map<?, ?> output
+                    && "MODEL".equals(string(((Map<String, Object>) output).get("kind")))
+                    && !"PREPROCESSOR".equals(string(((Map<String, Object>) output).get("artifactType")))) {
                 return string(((Map<String, Object>) output).get("objectId"));
             }
         }
@@ -2605,6 +2607,29 @@ public class SandboxCanvasService {
                     artifactName, projectId, artifactId, versionId, sandboxId,
                     "可信执行训练产物自动注册（" + kind + "，密文模型）");
             String modelId = string(model.get("id"));
+            List<Map<String, Object>> objects = jdbc.queryForList(
+                    "select result_id,task_id,key_id,key_version,ciphertext_sha256,size_bytes,contributors_json "
+                            + "from tee_object where object_id=? and kind='MODEL' and is_deleted=0", objectId);
+            if (objects.size() != 1) {
+                throw new IllegalStateException("TEE 模型密文对象不存在或类型错误: " + objectId);
+            }
+            Map<String, Object> binding = objects.get(0);
+            String timestamp = now();
+            jdbc.update("insert into ds_model_tee_binding(model_id,object_id,result_id,source_task_id,key_id,"
+                            + "key_version,ciphertext_sha256,size_bytes,model_kind,features_json,task_type,"
+                            + "sandbox_id,contributors_json,status,created_at,updated_at) "
+                            + "values(?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE',?,?) "
+                            + "on conflict(model_id) do update set object_id=excluded.object_id,result_id=excluded.result_id,"
+                            + "source_task_id=excluded.source_task_id,key_id=excluded.key_id,key_version=excluded.key_version,"
+                            + "ciphertext_sha256=excluded.ciphertext_sha256,size_bytes=excluded.size_bytes,"
+                            + "model_kind=excluded.model_kind,features_json=excluded.features_json,"
+                            + "task_type=excluded.task_type,sandbox_id=excluded.sandbox_id,"
+                            + "contributors_json=excluded.contributors_json,status='ACTIVE',updated_at=excluded.updated_at",
+                    modelId, objectId, string(binding.get("result_id")), string(binding.get("task_id")),
+                    string(binding.get("key_id")), string(binding.get("key_version")),
+                    string(binding.get("ciphertext_sha256")), binding.get("size_bytes"), kind,
+                    json(stringList(node.params.get("features"))), string(node.params.get("task")), sandboxId,
+                    string(binding.get("contributors_json")), timestamp, timestamp);
             jdbc.update("update ds_compute_node_run set model_id=?,updated_at=? "
                             + "where run_id=? and node_id=? and deleted=0",
                     modelId, now(), runId, node.id);

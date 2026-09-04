@@ -385,6 +385,37 @@ public class TeeRuntimeService {
         } catch (Exception failure) {
             throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "报告内容无法序列化");
         }
+        if ("MODEL_API_PREDICTION".equals(reportKind)) {
+            validatePredictionReport(content);
+        }
+    }
+
+    private void validatePredictionReport(JsonNode content) {
+        JsonNode header = content.path("header");
+        JsonNode rows = content.path("rows");
+        if (!header.isArray() || header.isEmpty() || header.size() > 2 || !rows.isArray()
+                || rows.isEmpty() || rows.size() > 1000
+                || !content.path("resultRows").canConvertToInt()
+                || content.path("resultRows").asInt() != rows.size()) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "模型 API 预测报告结构无效");
+        }
+        Set<String> allowed = Set.of("pred", "pred_prob", "cluster");
+        Set<String> actual = new LinkedHashSet<>();
+        header.forEach(value -> actual.add(value.asText("")));
+        if (actual.size() != header.size() || !allowed.containsAll(actual)
+                || (!actual.contains("pred") && !actual.contains("cluster"))) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "模型 API 预测列不在白名单内");
+        }
+        for (JsonNode row : rows) {
+            if (!row.isArray() || row.size() != header.size()) {
+                throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "模型 API 预测行宽不一致");
+            }
+            for (JsonNode value : row) {
+                if (!value.isValueNode() || value.isContainerNode()) {
+                    throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "模型 API 预测值必须是标量");
+                }
+            }
+        }
     }
 
     private LinkedHashSet<String> jsonStrings(JsonNode values) {

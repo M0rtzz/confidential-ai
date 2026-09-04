@@ -37,7 +37,8 @@ public final class TeeContract {
     public static final String WILDCARD = "*";
 
     public static final Set<String> REPORT_KINDS =
-            Set.of("EVALUATION_METRICS", "FEATURE_IMPORTANCE", "TREE_STRUCTURE");
+            Set.of("EVALUATION_METRICS", "FEATURE_IMPORTANCE", "TREE_STRUCTURE",
+                    "MODEL_API_PREDICTION");
     public static final Set<String> RESULT_KINDS = Set.of("REPORT", "DATA", "MODEL");
     public static final Set<String> PROGRAM_KINDS = Set.of("BUILTIN", "SQL", "PYTHON", "JAR");
     public static final List<String> CHAIN_STAGES =

@@ -19,6 +19,7 @@ import org.secretflow.secretpad.web.service.tee.TeeContract;
 import org.secretflow.secretpad.web.service.tee.TeeCrypto;
 import org.secretflow.secretpad.web.service.tee.TeeException;
 import org.secretflow.secretpad.web.service.tee.TeePolicyService;
+import org.secretflow.secretpad.web.service.tee.TeeModelApiAssets;
 import org.secretflow.secretpad.web.service.tee.TeeTaskSpec;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -65,6 +66,7 @@ public class TeeDevTaskDispatcher {
     private final TeeRuntimeTaskRepository runtimeTasks;
     private final TeeAssetService assetService;
     private final TeePolicyService policyService;
+    private final TeeModelApiAssets modelApiAssets;
 
     @Value("${secretpad.data-sandbox.tee.dispatch-enabled:false}")
     private boolean enabled;
@@ -90,7 +92,7 @@ public class TeeDevTaskDispatcher {
     public TeeDevTaskDispatcher(@Qualifier("jdbcTemplate") JdbcTemplate jdbc, ObjectMapper mapper,
                                 TeeAssetRepository assets, TeeObjectRepository objects,
                                 TeeRuntimeTaskRepository runtimeTasks, TeeAssetService assetService,
-                                TeePolicyService policyService) {
+                                TeePolicyService policyService, TeeModelApiAssets modelApiAssets) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.assets = assets;
@@ -98,6 +100,7 @@ public class TeeDevTaskDispatcher {
         this.runtimeTasks = runtimeTasks;
         this.assetService = assetService;
         this.policyService = policyService;
+        this.modelApiAssets = modelApiAssets;
     }
 
     public record Submission(String taskJws, String appImage, String nodeId) {
@@ -198,6 +201,52 @@ public class TeeDevTaskDispatcher {
                     .get("tee_task_jws"));
             if (winner.isBlank()) {
                 throw contract("TEE 任务说明持久化失败");
+            }
+            compact = winner;
+        }
+        return new Submission(compact, runtimeAppImage, nodeId);
+    }
+
+    /** Build a signed two-input task for encrypted-model API inference. */
+    @Transactional
+    public Submission prepareModelApi(String taskId, String apiId, String modelId, byte[] inputCsv,
+                                      List<String> inputColumns, int maxRows) {
+        requireCenterConfiguration();
+        Map<String, Object> taskRow = one("select * from ds_dev_task where id=? and deleted=0", taskId);
+        String stored = text(taskRow.get("tee_task_jws"));
+        if (!stored.isBlank()) {
+            return new Submission(stored, runtimeAppImage, nodeId);
+        }
+        TeeModelApiAssets.Prepared prepared = modelApiAssets.prepare(
+                taskId, apiId, modelId, inputCsv, inputColumns);
+        Map<String, Object> parameters = new LinkedHashMap<>();
+        parameters.put("op", TeeModelApiAssets.OPERATOR);
+        parameters.put("inputKinds", List.of("DATA", "MODEL"));
+        parameters.put("features", prepared.features());
+        parameters.put("modelKind", prepared.modelKind());
+        parameters.put("task", prepared.taskType());
+        parameters.put("maxRows", Math.min(Math.max(maxRows, 1), 1000));
+        TeeTaskSpec.Program program = builtinProgram(parameters);
+        Instant issuedAt = Instant.now();
+        long lifetime = Math.min(Math.max(lifetimeSeconds, 1), TeeContract.MAX_TASK_LIFETIME_SECONDS);
+        String requestId = UUID.randomUUID().toString();
+        String nonce = UUID.randomUUID().toString();
+        TeeTaskSpec spec = new TeeTaskSpec(TeeContract.VERSION, taskId, requestId, nodeId, audience,
+                prepared.sandboxId(), TeeModelApiAssets.OPERATOR, prepared.features(), prepared.inputs(),
+                program, issuedAt.toString(), issuedAt.plusSeconds(lifetime).toString(), nonce,
+                new TeeTaskSpec.OutputPolicy(List.of(TeeModelApiAssets.REPORT_KIND), true, true, true),
+                runtimeImageDigest);
+        String compact = compactJws(mapper, spec, readPrivateKey(Path.of(signerKey)), signerKid);
+        int updated = jdbc.update("update ds_dev_task set tee_task_jws=?,tee_request_id=?,tee_nonce=?,"
+                        + "tee_runtime_image_digest=?,tee_dispatch_status='PREPARED',sandbox_id=?,"
+                        + "source_asset_id=?,updated_at=? where id=? and deleted=0 and coalesce(tee_task_jws,'')=''",
+                compact, requestId, nonce, runtimeImageDigest, prepared.sandboxId(),
+                prepared.inputs().get(0).assetId(), java.time.LocalDateTime.now().toString(), taskId);
+        if (updated != 1) {
+            String winner = text(one("select tee_task_jws from ds_dev_task where id=? and deleted=0", taskId)
+                    .get("tee_task_jws"));
+            if (winner.isBlank()) {
+                throw contract("TEE 模型 API 任务说明持久化失败");
             }
             compact = winner;
         }
