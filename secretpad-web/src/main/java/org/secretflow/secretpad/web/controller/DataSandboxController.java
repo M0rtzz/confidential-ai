@@ -12,6 +12,7 @@ package org.secretflow.secretpad.web.controller;
 
 import org.secretflow.secretpad.service.model.common.SecretPadResponse;
 import org.secretflow.secretpad.web.service.DataSandboxMvpService;
+import org.secretflow.secretpad.web.service.sandbox.SandboxApprovalOperators;
 import org.secretflow.secretpad.web.service.sandbox.SandboxApprovalGate;
 
 import io.swagger.v3.oas.annotations.Operation;
@@ -44,6 +45,12 @@ public class DataSandboxController {
     public DataSandboxController(DataSandboxMvpService service, SandboxApprovalGate gate) {
         this.service = service;
         this.gate = gate;
+    }
+
+    @Operation(summary = "可授权的可信计算算子清单（供沙箱申请与挂载申请勾选）")
+    @GetMapping("/approvals/operators")
+    public SecretPadResponse<List<Map<String, Object>>> approvalOperators() {
+        return SecretPadResponse.success(SandboxApprovalOperators.list());
     }
 
     @Operation(summary = "查询沙箱")
