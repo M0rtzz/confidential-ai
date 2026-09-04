@@ -38,6 +38,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -819,6 +821,7 @@ public class SandboxApprovalService {
      */
     @SuppressWarnings("unchecked")
     public void applySyncedApprovals() {
+        List<String> republish = new ArrayList<>();
         for (SandboxApprovalSyncDO sync : approvalSyncRepository.findAll()) {
             try {
                 String approvalId = sync.getUpk() == null ? "" : sync.getUpk().getApprovalId();
@@ -835,23 +838,105 @@ public class SandboxApprovalService {
                     continue;
                 }
                 upsertSyncedApproval(approval);
-                jdbc.update("delete from ds_sandbox_approval_vote where approval_id=?", id);
-                for (Map<String, Object> vote : mapList(snapshot.get("votes"))) {
-                    jdbc.update("insert into ds_sandbox_approval_vote(approval_id,voter_node_id,status,voter,comment,voted_at) values(?,?,?,?,?,?)",
-                            id, vote.get("voter_node_id"), vote.get("status"), value(vote, "voter", ""),
-                            value(vote, "comment", ""), value(vote, "voted_at", ""));
+                boolean changed = mergeSyncedVotes(id, mapList(snapshot.get("votes")));
+                changed |= mergeSyncedHistory(id, mapList(snapshot.get("history")));
+                changed |= advanceAfterMerge(id);
+                memoizeSnapshot(id, snapshotHash);
+                if (changed) {
+                    // 合并后本端票据比快照更全，回传给其余参与方；星形拓扑下由中心端转发
+                    republish.add(id);
                 }
-                jdbc.update("delete from ds_sandbox_approval_history where approval_id=?", id);
-                for (Map<String, Object> history : mapList(snapshot.get("history"))) {
-                    jdbc.update("insert into ds_sandbox_approval_history(approval_id,action,from_status,to_status,operator,comment,created_at) values(?,?,?,?,?,?,?)",
-                            id, history.get("action"), value(history, "from_status", ""), history.get("to_status"),
-                            history.get("operator"), value(history, "comment", ""), history.get("created_at"));
-                }
-                appliedSnapshotHashes.put(id, snapshotHash);
             } catch (Exception e) {
                 log.warn("Ignore malformed sandbox approval sync snapshot {}", sync.getUpk(), e);
             }
         }
+        for (String id : republish) {
+            try {
+                publishSnapshot(id);
+            } catch (Exception e) {
+                log.warn("Republish merged sandbox approval snapshot {} failed", id, e);
+            }
+        }
+    }
+
+    /**
+     * 合并快照票据：各参与方只在本端记下自己那一票，快照按申请单主键共用一行，
+     * 后到的快照会覆盖先到的。已投出的票据视为终态，不被他方快照里的 PENDING 覆盖，
+     * 合并因此与到达顺序无关。
+     *
+     * @return 本端票据是否发生变化
+     */
+    private boolean mergeSyncedVotes(String id, List<Map<String, Object>> votes) {
+        boolean changed = false;
+        for (Map<String, Object> vote : votes) {
+            String voter = string(vote.get("voter_node_id"));
+            if (!notBlank(voter)) continue;
+            String status = value(vote, "status", "PENDING");
+            List<Map<String, Object>> local = jdbc.queryForList(
+                    "select status from ds_sandbox_approval_vote where approval_id=? and voter_node_id=?", id, voter);
+            if (local.isEmpty()) {
+                jdbc.update("insert into ds_sandbox_approval_vote(approval_id,voter_node_id,status,voter,comment,voted_at) values(?,?,?,?,?,?)",
+                        id, voter, status, value(vote, "voter", ""), value(vote, "comment", ""), value(vote, "voted_at", ""));
+                changed = true;
+                continue;
+            }
+            if (!"PENDING".equals(string(local.get(0).get("status"))) || "PENDING".equals(status)) {
+                continue;
+            }
+            jdbc.update("update ds_sandbox_approval_vote set status=?,voter=?,comment=?,voted_at=? where approval_id=? and voter_node_id=?",
+                    status, value(vote, "voter", ""), value(vote, "comment", ""), value(vote, "voted_at", ""), id, voter);
+            changed = true;
+        }
+        return changed;
+    }
+
+    /** 按（动作，操作人，发生时间）去重追加历史，避免整表覆盖丢掉本端已有的条目。 */
+    private boolean mergeSyncedHistory(String id, List<Map<String, Object>> histories) {
+        boolean changed = false;
+        for (Map<String, Object> history : histories) {
+            long exists = count("select count(1) from ds_sandbox_approval_history where approval_id=? and action=? and operator=? and created_at=?",
+                    id, history.get("action"), value(history, "operator", ""), history.get("created_at"));
+            if (exists > 0) continue;
+            jdbc.update("insert into ds_sandbox_approval_history(approval_id,action,from_status,to_status,operator,comment,created_at) values(?,?,?,?,?,?,?)",
+                    id, history.get("action"), value(history, "from_status", ""), history.get("to_status"),
+                    history.get("operator"), value(history, "comment", ""), history.get("created_at"));
+            changed = true;
+        }
+        return changed;
+    }
+
+    /**
+     * 快照合并后推进供数方审核：票据是各方分别投出并同步过来的，
+     * 本端不会在 {@code vote()} 里收到最后一票，需要在合并处补上同样的状态跃迁。
+     */
+    private boolean advanceAfterMerge(String id) {
+        Map<String, Object> approval = requireApproval(id);
+        if (!"DATA_PROVIDER_REVIEW".equals(string(approval.get("status")))) return false;
+        if (count("select count(1) from ds_sandbox_approval_vote where approval_id=?", id) == 0) return false;
+        if (count("select count(1) from ds_sandbox_approval_vote where approval_id=? and status='REJECTED'", id) > 0) {
+            return jdbc.update("update ds_sandbox_approval set status='REJECTED',current_stage='REJECTED',updated_at=? "
+                    + "where id=? and status='DATA_PROVIDER_REVIEW'", now(), id) == 1;
+        }
+        if (count("select count(1) from ds_sandbox_approval_vote where approval_id=? and status='PENDING'", id) > 0) return false;
+        return jdbc.update("update ds_sandbox_approval set status='APPROVED',current_stage='APPROVED',approved_at=?,updated_at=? "
+                + "where id=? and status='DATA_PROVIDER_REVIEW'", now(), now(), id) == 1;
+    }
+
+    /**
+     * 记住已落地的快照散列。若调用方所在事务随后回滚（例如中心端并非投票方、审批动作抛错），
+     * 落地的行会被撤销，此时不能留下散列，否则该快照将被永久跳过。
+     */
+    private void memoizeSnapshot(String approvalId, int snapshotHash) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    appliedSnapshotHashes.put(approvalId, snapshotHash);
+                }
+            });
+            return;
+        }
+        appliedSnapshotHashes.put(approvalId, snapshotHash);
     }
 
     private void upsertSyncedApproval(Map<String, Object> approval) {
@@ -891,7 +976,7 @@ public class SandboxApprovalService {
         sync.setSnapshotJson(snapshotJson);
         sync.setGmtModified(LocalDateTime.now(java.time.ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.SECONDS));
         approvalSyncRepository.saveAndFlush(sync);
-        appliedSnapshotHashes.put(approvalId, snapshotJson.hashCode());
+        memoizeSnapshot(approvalId, snapshotJson.hashCode());
     }
 
     private List<Map<String, Object>> mapList(Object value) {

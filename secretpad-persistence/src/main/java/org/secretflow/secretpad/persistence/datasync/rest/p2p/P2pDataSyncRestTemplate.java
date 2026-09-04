@@ -163,7 +163,11 @@ public class P2pDataSyncRestTemplate extends DataSyncRestTemplate {
         log.info("recordMetrics target:{}, tableName:{}, duration:{}, status:{}, size:{}", target, tableName, duration, status, size);
         try {
             Timer timer = Timer.builder("p2p.data.sync.duration")
-                    .tags(Tags.of("target", target, "tableName", tableName, "status", status, "size", String.valueOf(size)))
+                    // 星形拓扑下对端可能没有路由，target 为空时用占位值，避免打点抛 NPE 淹没日志
+                    .tags(Tags.of("target", target == null ? "unknown" : target,
+                            "tableName", tableName == null ? "unknown" : tableName,
+                            "status", status == null ? "unknown" : status,
+                            "size", String.valueOf(size)))
                     .register(meterRegistry);
             timer.record(Duration.ofMillis(duration));
         } catch (Exception e) {
