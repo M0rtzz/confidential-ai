@@ -95,7 +95,80 @@ public class SandboxDataControlService {
                         + "left join ds_sandbox_result_control c on c.sandbox_id=d.sandbox_id and c.table_name=d.table_name "
                         + "where d.sandbox_id=? and d.kind='RESULT' and d.deleted=0 order by d.created_at desc", sandboxId);
         rows.forEach(this::addResultState);
+        appendTeeResults(sandboxId, rows);
         return rows;
+    }
+
+    /**
+     * 正式 TEE 任务不会在沙箱数据库落明文 RESULT 表，产出只存在于已验签的结果快照和
+     * TEE 对象台账。原列表以 ds_sandbox_data_dir 为主表，因此这类成功任务始终显示为空。
+     * 这里把密文对象与允许明文出域的报告补成只读行；它们的权限来自多方导出审批或
+     * 输出规则，不能复用本地明文结果表的查看/导出开关。
+     */
+    private void appendTeeResults(String sandboxId, List<Map<String, Object>> rows) {
+        List<Map<String, Object>> tasks = jdbc.queryForList(
+                "select id task_id,sandbox_id,name task_name,result_rows,finished_at,result_preview "
+                        + "from ds_dev_task where sandbox_id=? and run_mode='PROD' and status='SUCCEEDED' "
+                        + "and deleted=0 and result_preview is not null and result_preview<>'' "
+                        + "order by finished_at desc", sandboxId);
+        for (Map<String, Object> task : tasks) {
+            JsonNode preview;
+            try {
+                preview = mapper.readTree(string(task.get("result_preview")));
+            } catch (Exception malformed) {
+                continue;
+            }
+            if (!"SIMULATION".equals(preview.path("runtimeMode").asText())) continue;
+            for (JsonNode output : preview.path("encryptedOutputs")) {
+                Map<String, Object> row = teeBaseRow(task);
+                copyText(output, row, "kind", "resultId", "objectId", "keyId", "keyVersion",
+                        "ciphertextSha256", "exportState");
+                row.put("name", output.path("kind").asText("DATA") + " 密文结果");
+                row.put("table_name", "tee:" + output.path("resultId").asText(
+                        output.path("objectId").asText("unknown")));
+                row.put("contributors", stringList(output.path("contributors")));
+                row.put("tee_encrypted", true);
+                row.put("permission_mode", "MULTI_PARTY_EXPORT_APPROVAL");
+                row.put("canPreview", false);
+                row.put("canExport", false);
+                rows.add(row);
+            }
+            int reportIndex = 0;
+            for (JsonNode report : preview.path("reports")) {
+                Map<String, Object> row = teeBaseRow(task);
+                copyText(report, row, "kind", "reportKind");
+                row.put("name", report.path("reportKind").asText("REPORT") + " 明文报告");
+                row.put("table_name", "tee-report:" + task.get("task_id") + ":" + reportIndex++);
+                row.put("tee_report", true);
+                row.put("permission_mode", "RULE_AUTHORIZED");
+                row.put("canPreview", true);
+                row.put("canExport", false);
+                rows.add(row);
+            }
+        }
+    }
+
+    private Map<String, Object> teeBaseRow(Map<String, Object> task) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("sandbox_id", task.get("sandbox_id"));
+        row.put("task_id", task.get("task_id"));
+        row.put("task_name", task.get("task_name"));
+        row.put("row_count", task.get("result_rows"));
+        row.put("finished_at", task.get("finished_at"));
+        row.put("runtime_mode", "SIMULATION");
+        return row;
+    }
+
+    private static void copyText(JsonNode source, Map<String, Object> target, String... fields) {
+        for (String field : fields) {
+            target.put(field, source.path(field).asText(""));
+        }
+    }
+
+    private static List<String> stringList(JsonNode values) {
+        List<String> result = new ArrayList<>();
+        if (values.isArray()) values.forEach(value -> result.add(value.asText()));
+        return result;
     }
 
     @Transactional
