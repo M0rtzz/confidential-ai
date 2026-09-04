@@ -553,11 +553,13 @@ public class SandboxApprovalService {
     private void execCreate(Map<String, Object> approval) {
         String sandboxId = string(approval.get("sandbox_id"));
         if (notBlank(sandboxId)) {
-            // 重试路径：沙箱已建出，校验存在性后按需拉起
+            // 重试路径：沙箱已建出，校验存在性后补齐挂载再按需拉起。
+            // 首次执行若在挂载或拉起环节失败，挂载可能只落了一半，这里按申请单重新对齐。
             Map<String, Object> sbx = requireSandbox(sandboxId);
             if (((Number) sbx.get("deleted")).intValue() == 1 || "DESTROYED".equals(string(sbx.get("status")))) {
                 throw new IllegalStateException("沙箱已销毁，无法继续执行");
             }
+            syncDatasetMounts(sandboxId, parsePayload(approval));
             startIfNeeded(sbx);
             return;
         }

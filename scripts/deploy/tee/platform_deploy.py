@@ -587,16 +587,23 @@ def normalize_sandbox_images(name):
     """放开 kuscia 镜像层对 other 的读与遍历权限。
 
     隔离部署把 `.dev-runtime/<实例>/kuscia` 收窄到 0770，该目录挂进 kuscia 容器后，
-    containerd 解包出的镜像层同样只有属主与 gid 可读。沙箱镜像（如 Jupyter）固定以镜像
-    自带的非 root USER 运行，读不到 libc 一类共享库，容器起来即退出。此处只放开镜像层，
-    运行目录、数据库与凭据的收窄保持不变。幂等，可在拉入新沙箱镜像后重跑。
+    containerd 解包出的镜像层丢掉了 other 位。沙箱镜像（如 Jupyter）固定以镜像自带的
+    非 root USER 运行，于是读不到 libc 一类共享库，也写不进 /tmp，容器起来即退出。
+
+    两条规则都只作用于镜像层，运行目录、数据库与凭据的收窄保持不变：
+    - 全部条目补回 other 的读与目录遍历权限；
+    - 带粘滞位的目录补回 other 的写权限，粘滞位本身就代表这是公共可写的暂存目录。
+
+    幂等，可在拉入新沙箱镜像后重跑。
     """
     ctr = f'data-sandbox-dev-{name}-kuscia'
     if not managed(ctr):
         raise RuntimeError('Kuscia 尚未启动')
     run('docker', 'exec', ctr, 'sh', '-c',
-        'test -d /home/kuscia/containerd && chmod -R o+rX /home/kuscia/containerd')
-    print(f'{name} 沙箱镜像层读权限已规范化')
+        'test -d /home/kuscia/containerd || exit 0; '
+        'chmod -R o+rX /home/kuscia/containerd; '
+        'find /home/kuscia/containerd -type d -perm -1000 -exec chmod o+w {} +')
+    print(f'{name} 沙箱镜像层权限已规范化')
 
 
 def up(name):

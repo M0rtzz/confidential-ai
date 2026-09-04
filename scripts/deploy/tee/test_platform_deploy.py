@@ -110,7 +110,9 @@ class IsolationTests(unittest.TestCase):
         command = calls[0]
         self.assertEqual(command[:4], ('docker', 'exec', 'data-sandbox-dev-center-kuscia', 'sh'))
         self.assertIn('chmod -R o+rX /home/kuscia/containerd', command[-1])
+        self.assertIn('-perm -1000 -exec chmod o+w', command[-1])
         self.assertNotIn('secretpad', command[-1])
+        self.assertNotIn('/app/db', command[-1])
 
     def test_normalize_sandbox_images_requires_running_kuscia(self):
         with patch.object(deploy, 'managed', return_value=None):

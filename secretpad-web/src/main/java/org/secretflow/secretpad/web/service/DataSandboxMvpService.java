@@ -1348,25 +1348,37 @@ public class DataSandboxMvpService {
         }
     }
 
-    /** 停止 Kuscia Job（幂等，job 为空返回 ""）。供 Z-03 审批执行引擎复用。 */
+    /**
+     * Kuscia 已回收的 Job 视同已停止、已删除。
+     *
+     * <p>失败的 Job 会被 Kuscia 自行回收，此后停止与删除都会返回 not found。若把它当成失败，
+     * 沙箱的规格变更、数据挂载与销毁将被这条永远不会消失的报错长期挡住。</p>
+     */
+    private static boolean jobAlreadyGone(String message) {
+        return message != null && message.toLowerCase(Locale.ROOT).contains("not found");
+    }
+
+    /** 停止 Kuscia Job（幂等，job 为空或已被回收返回 ""）。供 Z-03 审批执行引擎复用。 */
     public String stopKuscia(Map<String, Object> sandbox, String reason) {
         if (!kusciaEnabled || !notBlank(string(sandbox.get("kuscia_job_id")))) return "";
         try {
             var response = kuscia.stopJob(Job.StopJobRequest.newBuilder().setJobId(string(sandbox.get("kuscia_job_id"))).setReason(reason).build());
-            return response.getStatus().getCode() == 0 ? "" : response.getStatus().getMessage();
+            if (response.getStatus().getCode() == 0) return "";
+            return jobAlreadyGone(response.getStatus().getMessage()) ? "" : response.getStatus().getMessage();
         } catch (Exception e) {
-            return truncate(e.getMessage(), 900);
+            return jobAlreadyGone(e.getMessage()) ? "" : truncate(e.getMessage(), 900);
         }
     }
 
-    /** 删除 Kuscia Job（幂等，job 为空返回 ""）。供 Z-03 审批执行引擎复用。 */
+    /** 删除 Kuscia Job（幂等，job 为空或已被回收返回 ""）。供 Z-03 审批执行引擎复用。 */
     public String deleteKuscia(Map<String, Object> sandbox) {
         if (!kusciaEnabled || !notBlank(string(sandbox.get("kuscia_job_id")))) return "";
         try {
             var response = kuscia.deleteJob(Job.DeleteJobRequest.newBuilder().setJobId(string(sandbox.get("kuscia_job_id"))).build());
-            return response.getStatus().getCode() == 0 ? "" : response.getStatus().getMessage();
+            if (response.getStatus().getCode() == 0) return "";
+            return jobAlreadyGone(response.getStatus().getMessage()) ? "" : response.getStatus().getMessage();
         } catch (Exception e) {
-            return truncate(e.getMessage(), 900);
+            return jobAlreadyGone(e.getMessage()) ? "" : truncate(e.getMessage(), 900);
         }
     }
 
