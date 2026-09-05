@@ -4,6 +4,7 @@ import org.secretflow.secretpad.common.util.UserContext;
 import org.secretflow.secretpad.service.model.common.SecretPadResponse;
 import org.secretflow.secretpad.web.service.crypto.ConfidentialAssetService;
 import org.secretflow.secretpad.web.service.crypto.ConfidentialTrainingService;
+import org.secretflow.secretpad.web.service.tee.TeeException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -37,7 +38,16 @@ public class ConfidentialAssetController implements CryptoApi {
     @PostMapping("/confidential-assets/generate-data")
     public SecretPadResponse<Map<String, Object>> generateData(
             @RequestBody ConfidentialAssetService.GenerateDataRequest request) {
-        return SecretPadResponse.success(service.generateData(owner(), request));
+        try {
+            return SecretPadResponse.success(service.generateData(owner(), request));
+        } catch (TeeException failure) {
+            // The generation UI needs a safe, actionable failure reason. The general
+            // contract handler deliberately hides details for key-release APIs, but
+            // this endpoint never returns a credential, prompt, or generated rows.
+            return new SecretPadResponse<>(
+                    new SecretPadResponse.SecretPadResponseStatus(failure.error().code(), failure.getMessage()),
+                    Map.of("errorCode", failure.error().name(), "retryable", failure.error().retryable()));
+        }
     }
 
     @PostMapping(value = "/confidential-assets/upload-sessions/{id}/chunks",

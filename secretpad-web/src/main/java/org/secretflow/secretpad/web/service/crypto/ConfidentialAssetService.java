@@ -175,7 +175,15 @@ public class ConfidentialAssetService {
         } catch (Exception ignored) {
             // Keep provider error parsing best-effort and never expose the request body.
         }
-        if (detail.isBlank()) detail = "请检查 API 地址、模型名称和 API Key";
+        if (statusCode == 401 || statusCode == 403) {
+            detail = "API Key 无效、已过期或没有调用该模型的权限";
+        } else if (statusCode == 404) {
+            detail = "接口地址或模型名称不存在，请确认 Base URL 不包含 /chat/completions";
+        } else if (statusCode == 429) {
+            detail = "模型服务限流，请稍后重试或降低生成条数";
+        } else if (detail.isBlank()) {
+            detail = "请检查 API 地址、模型名称和 API Key";
+        }
         if (detail.length() > 180) detail = detail.substring(0, 180);
         return prefix + "，HTTP " + statusCode + "：" + detail;
     }
