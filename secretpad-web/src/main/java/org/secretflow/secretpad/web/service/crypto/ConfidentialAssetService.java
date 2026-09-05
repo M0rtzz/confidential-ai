@@ -124,9 +124,17 @@ public class ConfidentialAssetService {
         try {
             String model = configuredModel;
             if (model == null || model.isBlank()) {
-                HttpRequest modelsRequest = HttpRequest.newBuilder(URI.create(baseUrl + "/models"))
-                        .timeout(Duration.ofSeconds(20)).GET().build();
-                JsonNode models = mapper.readTree(http.send(modelsRequest, HttpResponse.BodyHandlers.ofString()).body());
+                HttpRequest.Builder modelsBuilder = HttpRequest.newBuilder(URI.create(baseUrl + "/models"))
+                        .timeout(Duration.ofSeconds(20)).header("Accept", "application/json");
+                if (apiKey != null && !apiKey.isBlank()) {
+                    modelsBuilder.header("Authorization", "Bearer " + apiKey.trim());
+                }
+                HttpResponse<String> modelsResponse = http.send(modelsBuilder.GET().build(),
+                        HttpResponse.BodyHandlers.ofString());
+                if (modelsResponse.statusCode() < 200 || modelsResponse.statusCode() >= 300) {
+                    throw invalid(providerError("模型列表获取失败", modelsResponse.statusCode(), modelsResponse.body()));
+                }
+                JsonNode models = mapper.readTree(modelsResponse.body());
                 model = models.path("data").path(0).path("id").asText();
             }
             if (model == null || model.isBlank()) throw invalid("模型 API 未返回可用 Model ID");
@@ -141,7 +149,7 @@ public class ConfidentialAssetService {
             HttpResponse<String> response = http.send(builder.POST(HttpRequest.BodyPublishers.ofString(write(body))).build(),
                     HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() < 200 || response.statusCode() >= 300)
-                throw invalid("模型 API 调用失败，HTTP " + response.statusCode());
+                throw invalid(providerError("模型 API 调用失败", response.statusCode(), response.body()));
             String value = mapper.readTree(response.body()).path("choices").path(0).path("message").path("content").asText().trim();
             if (value.startsWith("```")) value = value.replaceFirst("^```(?:csv)?\\s*", "").replaceFirst("\\s*```$", "");
             String[] lines = value.replace("\r", "").split("\n");
@@ -156,6 +164,20 @@ public class ConfidentialAssetService {
         } catch (Exception failure) {
             throw invalid("模型 API 调用失败：" + failure.getMessage());
         }
+    }
+
+    private String providerError(String prefix, int statusCode, String body) {
+        String detail = "";
+        try {
+            JsonNode payload = mapper.readTree(body == null ? "" : body);
+            detail = payload.path("error").path("message").asText("");
+            if (detail.isBlank()) detail = payload.path("message").asText("");
+        } catch (Exception ignored) {
+            // Keep provider error parsing best-effort and never expose the request body.
+        }
+        if (detail.isBlank()) detail = "请检查 API 地址、模型名称和 API Key";
+        if (detail.length() > 180) detail = detail.substring(0, 180);
+        return prefix + "，HTTP " + statusCode + "：" + detail;
     }
 
     @Transactional
