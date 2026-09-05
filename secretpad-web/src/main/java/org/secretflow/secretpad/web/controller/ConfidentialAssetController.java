@@ -3,6 +3,7 @@ package org.secretflow.secretpad.web.controller;
 import org.secretflow.secretpad.common.util.UserContext;
 import org.secretflow.secretpad.service.model.common.SecretPadResponse;
 import org.secretflow.secretpad.web.service.crypto.ConfidentialAssetService;
+import org.secretflow.secretpad.web.service.crypto.ConfidentialTrainingService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,9 +21,11 @@ import java.util.Map;
 @RequestMapping("/api/v1alpha1")
 public class ConfidentialAssetController implements CryptoApi {
     private final ConfidentialAssetService service;
+    private final ConfidentialTrainingService training;
 
-    public ConfidentialAssetController(ConfidentialAssetService service) {
+    public ConfidentialAssetController(ConfidentialAssetService service, ConfidentialTrainingService training) {
         this.service = service;
+        this.training = training;
     }
 
     @PostMapping("/confidential-assets/upload-sessions")
@@ -117,6 +120,61 @@ public class ConfidentialAssetController implements CryptoApi {
     public SecretPadResponse<Map<String, Object>> output(@PathVariable String id,
             @RequestBody ConfidentialAssetService.ExecutionOutputRequest request) {
         return SecretPadResponse.success(service.registerOutput(owner(), id, request));
+    }
+
+    @PostMapping("/confidential-training-tasks")
+    public SecretPadResponse<Map<String, Object>> createTrainingTask(
+            @RequestBody ConfidentialTrainingService.CreateTaskRequest request) {
+        return SecretPadResponse.success(training.create(owner(), request));
+    }
+
+    @GetMapping("/confidential-training-tasks")
+    public SecretPadResponse<List<Map<String, Object>>> trainingTasks() {
+        return SecretPadResponse.success(training.list(owner()));
+    }
+
+    @GetMapping("/confidential-training-tasks/{id}")
+    public SecretPadResponse<Map<String, Object>> trainingTask(@PathVariable String id) {
+        return SecretPadResponse.success(training.task(owner(), id));
+    }
+
+    @PostMapping("/confidential-training-tasks/{id}/start")
+    public SecretPadResponse<Map<String, Object>> startTrainingTask(@PathVariable String id) {
+        return SecretPadResponse.success(training.start(owner(), id));
+    }
+
+    @PostMapping("/confidential-training-tasks/{id}/progress")
+    public SecretPadResponse<Map<String, Object>> trainingProgress(@PathVariable String id,
+            @RequestBody ConfidentialTrainingService.ProgressRequest request) {
+        return SecretPadResponse.success(training.progress(owner(), id, request));
+    }
+
+    @PostMapping("/confidential-training-tasks/{id}/complete")
+    public SecretPadResponse<Map<String, Object>> completeTrainingTask(@PathVariable String id,
+            @RequestBody ConfidentialTrainingService.CompleteRequest request) {
+        return SecretPadResponse.success(training.complete(owner(), id, request));
+    }
+
+    @PostMapping("/confidential-training-tasks/{id}/fail")
+    public SecretPadResponse<Map<String, Object>> failTrainingTask(@PathVariable String id,
+            @RequestBody ConfidentialTrainingService.FailRequest request) {
+        return SecretPadResponse.success(training.fail(owner(), id, request));
+    }
+
+    @PostMapping("/confidential-llm-providers")
+    public SecretPadResponse<Map<String, Object>> saveLlmProvider(
+            @RequestBody ConfidentialTrainingService.ProviderRequest request) {
+        return SecretPadResponse.success(training.saveProvider(owner(), request));
+    }
+
+    @GetMapping("/confidential-llm-providers")
+    public SecretPadResponse<List<Map<String, Object>>> llmProviders() {
+        return SecretPadResponse.success(training.providers(owner()));
+    }
+
+    @GetMapping("/confidential-llm-providers/{id}/credential")
+    public SecretPadResponse<Map<String, Object>> llmProviderCredential(@PathVariable String id) {
+        return SecretPadResponse.success(training.providerCredential(owner(), id));
     }
 
     private static String owner() {

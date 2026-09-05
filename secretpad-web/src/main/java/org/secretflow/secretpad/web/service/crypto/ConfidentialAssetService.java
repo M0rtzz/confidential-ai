@@ -6,6 +6,7 @@ import org.secretflow.secretpad.web.service.MinioAssetStorage;
 import org.secretflow.secretpad.web.service.tee.TeeContract;
 import org.secretflow.secretpad.web.service.tee.TeeException;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,6 +14,11 @@ import org.springframework.transaction.annotation.Transactional;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -37,14 +43,18 @@ public class ConfidentialAssetService {
     private final MinioAssetStorage storage;
     private final ConfidentialComputeService compute;
     private final ConfidentialMetadataStore audit;
+    private final String defaultLlmUrl;
+    private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
     public ConfidentialAssetService(@Qualifier("jdbcTemplate") JdbcTemplate jdbc, ObjectMapper mapper,
-            MinioAssetStorage storage, ConfidentialComputeService compute, ConfidentialMetadataStore audit) {
+            MinioAssetStorage storage, ConfidentialComputeService compute, ConfidentialMetadataStore audit,
+            @Value("${DATA_SANDBOX_DEV_VLLM_URL:http://host.docker.internal:39089/v1}") String defaultLlmUrl) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.storage = storage;
         this.compute = compute;
         this.audit = audit;
+        this.defaultLlmUrl = defaultLlmUrl.replaceAll("/$", "");
     }
 
     public record CreateUploadRequest(String assetType, String sourceType, String name, String description,
@@ -59,33 +69,73 @@ public class ConfidentialAssetService {
             List<String> assetVersionIds) {}
     public record ExecutionEventRequest(String eventType, String status, JsonNode detail) {}
     public record ExecutionOutputRequest(String uploadSessionId, CommitRequest asset) {}
-    public record GenerateDataRequest(String providerId, String prompt, List<String> fields, int rowCount) {}
+    public record GenerateDataRequest(String providerId, String prompt, List<String> fields, int rowCount,
+            String apiKey) {}
     public record ConsumeGrantRequest(String taskId, String computeNode, String token) {}
     public record ProtocolAuthorizationRequest(String scenario) {}
 
-    /** Adapter boundary for an OpenAI-compatible generator; the demo provider returns bounded CSV in memory. */
+    /** Calls an OpenAI-compatible provider and keeps generated clear text in memory only. */
     public Map<String, Object> generateData(String ownerId, GenerateDataRequest request) {
         required(request.providerId(), "providerId");
         required(request.prompt(), "prompt");
         if (request.fields() == null || request.fields().isEmpty() || request.fields().size() > 64)
             throw invalid("CSV 字段数必须为 1 至 64");
         int rows = request.rowCount() <= 0 ? 20 : Math.min(request.rowCount(), 1000);
-        StringBuilder csv = new StringBuilder(String.join(",", request.fields())).append('\n');
-        for (int row = 0; row < rows; row++) {
-            for (int column = 0; column < request.fields().size(); column++) {
-                if (column > 0) csv.append(',');
-                String field = request.fields().get(column).toLowerCase();
-                if (field.contains("species") || field.contains("class") || field.contains("label"))
-                    csv.append(row % 3 == 0 ? "setosa" : row % 3 == 1 ? "versicolor" : "virginica");
-                else csv.append(String.format(java.util.Locale.ROOT, "%.2f", 1.0 + ((row * 7 + column * 3) % 61) / 10.0));
-            }
-            csv.append('\n');
+        String providerId = required(request.providerId(), "providerId");
+        String baseUrl = defaultLlmUrl;
+        String modelId = "";
+        if (!"platform-model-api".equals(providerId)) {
+            List<Map<String, Object>> providers = jdbc.queryForList("select * from ds_confidential_llm_provider where owner_id=? and provider_id=? and status='ACTIVE'", ownerId, providerId);
+            if (providers.size() != 1) throw invalid("大模型 API 配置不存在");
+            baseUrl = text(providers.get(0).get("base_url")).replaceAll("/$", "");
+            modelId = text(providers.get(0).get("model_id"));
+            if (providers.get(0).get("encrypted_credential_json") != null && (request.apiKey() == null || request.apiKey().isBlank()))
+                throw invalid("本次生成需要由浏览器解封 API Key");
         }
+        String csv = callCsvGenerator(baseUrl, modelId, request.apiKey(), request.prompt(), request.fields(), rows);
         audit.audit(ownerId, "AI_DATA_GENERATED", id("generation"),
                 mapper.valueToTree(Map.of("providerId", request.providerId(), "rowCount", rows,
                         "fieldCount", request.fields().size())));
-        return Map.of("providerId", request.providerId(), "format", "CSV", "rowCount", rows,
-                "csv", csv.toString());
+        return Map.of("providerId", providerId, "format", "CSV", "rowCount", rows, "csv", csv);
+    }
+
+    private String callCsvGenerator(String baseUrl, String configuredModel, String apiKey, String prompt,
+            List<String> fields, int rows) {
+        try {
+            String model = configuredModel;
+            if (model == null || model.isBlank()) {
+                HttpRequest modelsRequest = HttpRequest.newBuilder(URI.create(baseUrl + "/models"))
+                        .timeout(Duration.ofSeconds(20)).GET().build();
+                JsonNode models = mapper.readTree(http.send(modelsRequest, HttpResponse.BodyHandlers.ofString()).body());
+                model = models.path("data").path(0).path("id").asText();
+            }
+            if (model == null || model.isBlank()) throw invalid("模型 API 未返回可用 Model ID");
+            String instruction = "只输出 RFC4180 CSV，不要 Markdown 代码块或解释。首行必须严格为："
+                    + String.join(",", fields) + "。生成严格 " + rows + " 行数据（不含表头）。要求：" + prompt;
+            JsonNode body = mapper.valueToTree(Map.of("model", model, "temperature", 0.3,
+                    "messages", List.of(Map.of("role", "system", "content", "你是结构化测试数据生成器。"),
+                            Map.of("role", "user", "content", instruction))));
+            HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl + "/chat/completions"))
+                    .timeout(Duration.ofSeconds(90)).header("Content-Type", "application/json");
+            if (apiKey != null && !apiKey.isBlank()) builder.header("Authorization", "Bearer " + apiKey.trim());
+            HttpResponse<String> response = http.send(builder.POST(HttpRequest.BodyPublishers.ofString(write(body))).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() < 200 || response.statusCode() >= 300)
+                throw invalid("模型 API 调用失败，HTTP " + response.statusCode());
+            String value = mapper.readTree(response.body()).path("choices").path(0).path("message").path("content").asText().trim();
+            if (value.startsWith("```")) value = value.replaceFirst("^```(?:csv)?\\s*", "").replaceFirst("\\s*```$", "");
+            String[] lines = value.replace("\r", "").split("\n");
+            if (lines.length != rows + 1 || !String.join(",", fields).equals(lines[0].trim()))
+                throw invalid("模型返回内容未通过 CSV 字段或行数校验");
+            return String.join("\n", lines) + "\n";
+        } catch (TeeException failure) {
+            throw failure;
+        } catch (InterruptedException failure) {
+            Thread.currentThread().interrupt();
+            throw invalid("模型 API 调用被中断");
+        } catch (Exception failure) {
+            throw invalid("模型 API 调用失败：" + failure.getMessage());
+        }
     }
 
     @Transactional
