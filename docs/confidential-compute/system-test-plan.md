@@ -24,7 +24,7 @@
 ```bash
 cd /data/collab/Projects/gpu-confidential-mvp/data-sandbox-package
 export DATA_SANDBOX_DEV_VLLM_URL=http://host.docker.internal:39089/v1
-./develop.sh restart --name confidential-mvp
+./develop.sh restart --name confidential-mvp --port 39088
 ```
 
 - 代码、镜像或依赖改变才执行重建：
@@ -32,7 +32,7 @@ export DATA_SANDBOX_DEV_VLLM_URL=http://host.docker.internal:39089/v1
 ```bash
 cd /data/collab/Projects/gpu-confidential-mvp/data-sandbox-package
 export DATA_SANDBOX_DEV_VLLM_URL=http://host.docker.internal:39089/v1
-./develop.sh up --name confidential-mvp
+./develop.sh up --name confidential-mvp --port 39088
 ```
 
 ## 3. 统一执行环境与证据
@@ -106,7 +106,7 @@ Docker 可读；三个 checkout 存在。
 执行统一 Git 检查；记录三仓库 branch/HEAD/upstream/diff，不改环境。
 
 ### 正常测试
-`TEST-001-01 [P0][AUTO]`：运行 `./develop.sh status --name confidential-mvp`，预期只列出 `${CC_PREFIX}-{kuscia,minio,sim-attestation,ciphergpu,secretpad}`、端口 39088/39080/39082/39083/39081/39084 和 `a100-sim`；名称或端口越界即 FAIL。
+`TEST-001-01 [P0][AUTO]`：运行 `./develop.sh status --name confidential-mvp --port 39088`，预期只列出 `${CC_PREFIX}-{kuscia,minio,sim-attestation,ciphergpu,secretpad}`、控制台端口 39088、其他端口 39080/39082/39083/39081/39084 和 `a100-sim`；名称或端口越界即 FAIL。
 
 ### 边界测试
 `TEST-001-02 [P1][AUTO]`：运行 `./develop.sh manifest --name confidential-mvp`（若命令会写文件，仅读取已有 manifest），核对 workspace、实例、镜像和端口；任何指向其他开发者目录记 FAIL。
