@@ -70,7 +70,7 @@ public class ConfidentialAssetService {
     public record ExecutionEventRequest(String eventType, String status, JsonNode detail) {}
     public record ExecutionOutputRequest(String uploadSessionId, CommitRequest asset) {}
     public record GenerateDataRequest(String providerId, String prompt, List<String> fields, int rowCount,
-            String apiKey) {}
+            String apiKey, String baseUrl, String modelId) {}
     public record ConsumeGrantRequest(String taskId, String computeNode, String token) {}
     public record ProtocolAuthorizationRequest(String scenario) {}
 
@@ -84,7 +84,10 @@ public class ConfidentialAssetService {
         String providerId = required(request.providerId(), "providerId");
         String baseUrl = defaultLlmUrl;
         String modelId = "";
-        if (!"platform-model-api".equals(providerId)) {
+        if (request.baseUrl() != null && !request.baseUrl().isBlank()) {
+            baseUrl = validGeneratorUrl(request.baseUrl());
+            modelId = request.modelId() == null ? "" : request.modelId().trim();
+        } else if (!"platform-model-api".equals(providerId)) {
             List<Map<String, Object>> providers = jdbc.queryForList("select * from ds_confidential_llm_provider where owner_id=? and provider_id=? and status='ACTIVE'", ownerId, providerId);
             if (providers.size() != 1) throw invalid("大模型 API 配置不存在");
             baseUrl = text(providers.get(0).get("base_url")).replaceAll("/$", "");
@@ -97,6 +100,23 @@ public class ConfidentialAssetService {
                 mapper.valueToTree(Map.of("providerId", request.providerId(), "rowCount", rows,
                         "fieldCount", request.fields().size())));
         return Map.of("providerId", providerId, "format", "CSV", "rowCount", rows, "csv", csv);
+    }
+
+    private static String validGeneratorUrl(String value) {
+        try {
+            URI uri = URI.create(value.trim());
+            String scheme = uri.getScheme();
+            boolean developmentVllm = "http".equalsIgnoreCase(scheme)
+                    && "host.docker.internal".equalsIgnoreCase(uri.getHost());
+            if ((!"https".equalsIgnoreCase(scheme) && !developmentVllm) || uri.getHost() == null
+                    || uri.getUserInfo() != null || uri.getFragment() != null) throw invalid("模型 API 地址必须是 HTTPS（本机 vLLM 可使用 host.docker.internal）");
+            String result = uri.toString();
+            return result.endsWith("/") ? result.substring(0, result.length() - 1) : result;
+        } catch (TeeException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw invalid("模型 API 地址格式无效");
+        }
     }
 
     private String callCsvGenerator(String baseUrl, String configuredModel, String apiKey, String prompt,
