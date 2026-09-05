@@ -75,9 +75,8 @@ public class ConfidentialComputeService {
 
     public List<Map<String, Object>> domains() {
         return List.of(
-                domain("a100-domain-a", "A100 模拟域 A", "active", "trusted"),
-                domain("a100-domain-b", "A100 模拟域 B", "active", "trusted"),
-                domain("a100-domain-c", "A100 阻断域", "offline", "blocked"));
+                domain("a100-domain-a", "可信域A", "active", "trusted"),
+                domain("a100-domain-b", "可信域B", "active", "trusted"));
     }
 
     public Map<String, Object> domain(String domainId) {
