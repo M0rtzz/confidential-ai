@@ -418,7 +418,12 @@ public class TeeExportService {
     private List<String> contributors(TeeObjectDO object) {
         try {
             List<String> values = mapper.readerForListOf(String.class).readValue(object.getContributorsJson());
-            return List.copyOf(new LinkedHashSet<>(TeeGuard.requireGrantSet(values, "贡献方")));
+            LinkedHashSet<String> normalized = new LinkedHashSet<>();
+            for (String value : TeeGuard.requireGrantSet(values, "贡献方")) {
+                String canonical = registry.canonicalInstitutionId(value);
+                normalized.add(canonical == null || canonical.isBlank() ? value : canonical);
+            }
+            return List.copyOf(TeeGuard.requireGrantSet(new ArrayList<>(normalized), "贡献方"));
         } catch (TeeException rejected) {
             throw rejected;
         } catch (Exception failure) {

@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.cert.X509Certificate;
+import java.util.Iterator;
 import java.util.Map;
 
 /**
@@ -73,6 +74,40 @@ public class TeeIdentityRegistry {
             throw TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "调用方证书未登记为平台间契约身份");
         }
         return node.asText();
+    }
+
+    /**
+     * 将节点 domainId、历史机构别名归一为平台间证书登记使用的 ownerId。
+     *
+     * <p>TEE 结果的贡献方来自输入资产台账。部分资产沿用 Kuscia 节点 domainId，
+     * 而客户端 mTLS 身份使用平台登录返回的 ownerId；两者在公开登记中指向同一实例。
+     * 这里只接受部署时已经登记且实例一致的别名，不能由请求方自行声明映射。</p>
+     */
+    public String canonicalInstitutionId(String institutionId) {
+        String requested = TeeGuard.requireText(institutionId, "institutionId");
+        JsonNode root = read();
+        JsonNode contractOwners = root.path("contractClientCertificates");
+        if (!contractOwners.isObject()) {
+            return requested;
+        }
+        Iterator<JsonNode> owners = contractOwners.elements();
+        while (owners.hasNext()) {
+            if (requested.equals(owners.next().asText())) {
+                return requested;
+            }
+        }
+        String instance = root.path(requested).path("instance").asText("");
+        if (instance.isBlank()) {
+            return requested;
+        }
+        owners = contractOwners.elements();
+        while (owners.hasNext()) {
+            String owner = owners.next().asText("");
+            if (!owner.isBlank() && instance.equals(root.path(owner).path("instance").asText(""))) {
+                return owner;
+            }
+        }
+        return requested;
     }
 
     /** Resolve an mTLS caller to an immutable institution and endpoint role. */

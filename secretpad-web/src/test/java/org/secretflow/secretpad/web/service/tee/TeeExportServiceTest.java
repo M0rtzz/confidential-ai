@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.secretflow.secretpad.persistence.entity.TeeExportRequestDO;
 import org.secretflow.secretpad.persistence.entity.TeeExportVoteDO;
 import org.secretflow.secretpad.persistence.entity.TeeObjectDO;
+import org.secretflow.secretpad.persistence.entity.TeeRuntimeTaskDO;
 import org.secretflow.secretpad.persistence.repository.TeeExportRequestRepository;
 import org.secretflow.secretpad.persistence.repository.TeeExportVoteRepository;
 import org.secretflow.secretpad.persistence.repository.TeeObjectRepository;
@@ -58,6 +59,25 @@ class TeeExportServiceTest {
                 new TeeExportService.CreateRequest(TeeContract.VERSION, "req-2", "result-1", "pem")));
 
         assertEquals(TeeContract.Error.AUDIT_ACCESS_DENIED, rejected.error());
+    }
+
+    @Test
+    void exportableNormalizesNodeAliasToAuthenticatedInstitution() {
+        TeeObjectDO result = object("DATA", "[\"domain-client-a\"]");
+        TeeRuntimeTaskDO task = TeeRuntimeTaskDO.builder()
+                .upk(new TeeRuntimeTaskDO.UPK("task-1"))
+                .status("SUCCEEDED").receiptVerified(true).build();
+        when(registry.canonicalInstitutionId("domain-client-a")).thenReturn("inst-a");
+        when(objects.findTop200ByKindInOrderByGmtCreateDesc(List.of("DATA", "MODEL")))
+                .thenReturn(List.of(result));
+        when(tasks.findById(new TeeRuntimeTaskDO.UPK("task-1"))).thenReturn(Optional.of(task));
+        when(requests.findByResultIdAndRequesterOwnerIdOrderByGmtCreateDesc("result-1", "inst-a"))
+                .thenReturn(List.of());
+
+        TeeExportService.ExportableResult exportable = service.exportable("inst-a");
+
+        assertEquals(1, exportable.items().size());
+        assertEquals(List.of("inst-a"), exportable.items().get(0).contributors());
     }
 
     @Test
