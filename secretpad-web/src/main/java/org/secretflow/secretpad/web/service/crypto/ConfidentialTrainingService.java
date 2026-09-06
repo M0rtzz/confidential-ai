@@ -75,9 +75,10 @@ public class ConfidentialTrainingService {
         if (!text(data.get("domain_id")).equals(text(model.get("domain_id")))) {
             throw invalid("数据和模型必须属于同一可信域");
         }
-        JsonNode config = request.trainingConfig() == null || !request.trainingConfig().isObject()
+        JsonNode requestedConfig = request.trainingConfig() == null || !request.trainingConfig().isObject()
                 ? defaultConfig(adapter, request.epochs(), request.learningRate()) : request.trainingConfig();
-        validateConfig(adapter, config);
+        validateConfig(adapter, requestedConfig);
+        JsonNode config = normalizeTrainingConfig(requestedConfig);
         String dataRecipient = parse(text(data.get("manifest_json"))).path("publicKeyId").asText();
         String modelRecipient = parse(text(model.get("manifest_json"))).path("publicKeyId").asText();
         if (!dataRecipient.equals(modelRecipient) || dataRecipient.isBlank()) {
@@ -535,6 +536,24 @@ public class ConfidentialTrainingService {
             value.put("maxLength", 256); value.put("weightDecay", 0.01); value.put("warmupRatio", 0.1);
         }
         return value;
+    }
+
+    private JsonNode normalizeTrainingConfig(JsonNode value) {
+        if (value.isObject()) {
+            ObjectNode result = mapper.createObjectNode();
+            value.fields().forEachRemaining(field ->
+                    result.set(field.getKey(), normalizeTrainingConfig(field.getValue())));
+            return result;
+        }
+        if (value.isArray()) {
+            ArrayNode result = mapper.createArrayNode();
+            value.forEach(item -> result.add(normalizeTrainingConfig(item)));
+            return result;
+        }
+        if (value.isFloatingPointNumber()) {
+            return mapper.getNodeFactory().textNode(value.decimalValue().stripTrailingZeros().toPlainString());
+        }
+        return value.deepCopy();
     }
 
     private static void validateConfig(String adapter, JsonNode config) {
