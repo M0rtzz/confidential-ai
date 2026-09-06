@@ -1055,7 +1055,7 @@ public class DataDevService {
             throw new IllegalStateException(DevErrors.DEV_STATE_CONFLICT + ": 仅 FAILED 任务可重试");
         }
         int retries = intValue(task.get("retry_count"), 0);
-        if (retries >= maxRetries) {
+        if (retries >= maxRetries && (!devJobExecutor.teeEnabled() || notBlank(string(task.get("tee_task_jws"))))) {
             throw new IllegalStateException(DevErrors.DEV_STATE_CONFLICT + ": 重试次数已达上限 " + maxRetries);
         }
         if ("JAR".equals(string(task.get("exec_type")))

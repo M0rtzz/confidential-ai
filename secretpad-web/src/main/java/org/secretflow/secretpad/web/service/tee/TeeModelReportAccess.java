@@ -24,6 +24,8 @@ import java.util.Map;
 public class TeeModelReportAccess {
     public static final String VERSION = "tee-contract/2.0";
     public static final String OPERATOR = "report.tree_structure";
+    public static final String EVALUATION_OPERATOR = "report.model_evaluation";
+    public static final String EVALUATION_KIND = "EVALUATION_METRICS";
     public static final String REPORT_KIND = "TREE_STRUCTURE";
     public static final String PARSER_VERSION = "tree-report/1";
 
@@ -49,14 +51,15 @@ public class TeeModelReportAccess {
     }
 
     public static boolean isModelReport(TeeTaskSpec task) {
-        return VERSION.equals(task.contractVersion()) && OPERATOR.equals(task.operatorId());
+        return VERSION.equals(task.contractVersion())
+                && List.of(OPERATOR, EVALUATION_OPERATOR).contains(task.operatorId());
     }
 
     /** 仅信任已核实训练回执中登记的模型，历史模型无需先补 ds_model_tee_binding。 */
     public Authorized authorize(String objectId, String sandboxId, List<String> features) {
         TeeObjectDO object = objects.findById(new TeeObjectDO.UPK(objectId))
                 .orElseThrow(() -> denied("历史模型密文对象不存在，请核对训练产物"));
-        if (!"MODEL".equals(object.getKind()) || object.getTaskId() == null) {
+        if (!List.of("MODEL", "DATA").contains(object.getKind()) || object.getTaskId() == null) {
             throw denied("报告输入必须是已登记的训练 MODEL 结果");
         }
         TeeRuntimeTaskDO training = tasks.findById(new TeeRuntimeTaskDO.UPK(object.getTaskId()))
@@ -68,9 +71,14 @@ public class TeeModelReportAccess {
         if (!sandboxId.equals(source.sandboxId()) || source.inputs() == null || source.inputs().isEmpty()) {
             throw denied("模型来源未绑定当前沙箱");
         }
+        boolean evaluation = "DATA".equals(object.getKind());
+        if (evaluation && !List.of("ml.xgboost", "ml.lightgbm", "ml.decision_tree", "ml.logistic_regression",
+                "ml.linear_regression", "ml.knn", "ml.dnn").contains(source.operatorId())) {
+            throw denied("评估报告只接受已核实的模型训练预测结果");
+        }
         boolean found = false;
         for (JsonNode output : payload(training.getReceiptJws()).path("outputs")) {
-            if (objectId.equals(output.path("objectId").asText()) && "MODEL".equals(output.path("kind").asText())
+            if (objectId.equals(output.path("objectId").asText()) && object.getKind().equals(output.path("kind").asText())
                     && !"PREPROCESSOR".equals(output.path("artifactType").asText())
                     && object.getCiphertextSha256().equals(output.path("ciphertextSha256").asText())
                     && object.getKeyId().equals(output.path("keyId").asText())
@@ -97,14 +105,16 @@ public class TeeModelReportAccess {
             // 原训练授权必须仍有效，新增报告授权不覆盖原策略撤销和源密钥吊销。
             policies.requireAllows(policy, source.columns(), source.operatorId());
             keys.requireActive(keys.require(input.keyId(), String.valueOf(input.keyVersion())));
-            boolean direct = policies.reportKinds(policy).contains(REPORT_KIND)
+            boolean direct = evaluation ? policies.reportKinds(policy).contains(EVALUATION_KIND)
+                    : policies.reportKinds(policy).contains(REPORT_KIND)
                     && stringList(policy.getOperatorsJson()).contains(OPERATOR);
             // 标准报告规则只适用于启用后开始的新树模型训练，不追溯扩张历史授权。
             List<String> cutoffs = jdbc.query("select value from ds_model_report_setting where id='standard_reports_since'",
                     (rs, index) -> rs.getString(1));
             boolean standard = !cutoffs.isEmpty() && Instant.parse(source.issuedAt()).isAfter(Instant.parse(cutoffs.get(0)))
                     && List.of("ml.decision_tree", "ml.xgboost", "ml.lightgbm").contains(source.operatorId());
-            direct = direct || standard;
+            direct = direct || (!evaluation && standard);
+            if (evaluation && !direct) throw denied("原训练来源未授权评估报告");
             String grantId = "original-policy";
             if (!direct) {
                 List<Map<String, Object>> grants = jdbc.queryForList(
@@ -157,17 +167,22 @@ public class TeeModelReportAccess {
     public Authorized validate(TeeTaskSpec task) {
         if (!isModelReport(task) || task.inputs() == null || task.inputs().size() != 1
                 || task.program() == null || !"BUILTIN".equals(task.program().kind())
-                || !List.of(REPORT_KIND).equals(task.outputPolicy().reportKinds())) {
+                || !List.of(EVALUATION_OPERATOR.equals(task.operatorId()) ? EVALUATION_KIND : REPORT_KIND)
+                        .equals(task.outputPolicy().reportKinds())) {
             throw denied("MODEL 报告任务结构无效");
         }
         Map<String, Object> p = task.program().parameters();
-        if (p == null || !List.of("MODEL").equals(p.get("inputKinds"))
-                || !OPERATOR.equals(p.get("op")) || !PARSER_VERSION.equals(p.get("parserVersion"))) {
+        boolean evaluation = EVALUATION_OPERATOR.equals(task.operatorId());
+        if (p == null || !List.of(evaluation ? "DATA" : "MODEL").equals(p.get("inputKinds"))
+                || !task.operatorId().equals(p.get("op")) || !PARSER_VERSION.equals(p.get("parserVersion"))) {
             throw denied("MODEL 报告任务缺少固定解析器绑定");
         }
         TeeTaskSpec.Input input = task.inputs().get(0);
         Authorized authorized = authorize(input.objectId(), task.sandboxId(), task.columns());
-        if (!input(authorized).equals(input)
+        if (!operator(authorized).equals(task.operatorId())
+                || (evaluation && (!java.util.Objects.equals(label(authorized), p.get("label"))
+                    || !java.util.Objects.equals(taskType(authorized), p.get("taskType"))))
+                || !input(authorized).equals(input)
                 || !authorized.object().getTaskId().equals(p.get("sourceTaskId"))
                 || !authorized.policyFingerprint().equals(p.get("policyFingerprint"))
                 || !task.columns().equals(p.get("features"))) {
@@ -179,6 +194,22 @@ public class TeeModelReportAccess {
             throw denied("树索引必须是范围内的非负整数");
         }
         return authorized;
+    }
+
+    public String operator(Authorized authorized) {
+        return "DATA".equals(authorized.object().getKind()) ? EVALUATION_OPERATOR : OPERATOR;
+    }
+
+    public String reportKind(Authorized authorized) {
+        return "DATA".equals(authorized.object().getKind()) ? EVALUATION_KIND : REPORT_KIND;
+    }
+
+    public String label(Authorized authorized) {
+        return java.util.Objects.toString(authorized.source().program().parameters().get("label"), "");
+    }
+
+    public String taskType(Authorized authorized) {
+        return java.util.Objects.toString(authorized.source().program().parameters().get("task"), "classification");
     }
 
     public TeeTaskSpec readTask(String compact) {

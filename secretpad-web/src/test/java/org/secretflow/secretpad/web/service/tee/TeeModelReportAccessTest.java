@@ -151,11 +151,30 @@ class TeeModelReportAccessTest {
     private Map<String, Object> receipt(String objectId) {
         Map<String, Object> output = new LinkedHashMap<>();
         output.put("objectId", objectId);
-        output.put("kind", "MODEL");
+        output.put("kind", model.getKind());
         output.put("artifactType", "TREE");
         output.put("ciphertextSha256", model.getCiphertextSha256());
         output.put("keyId", model.getKeyId());
         output.put("keyVersion", model.getKeyVersion());
         return Map.of("outputs", List.of(output));
     }
+    @Test
+    void historicalPredictionDataUsesEvaluationPermissionWithoutTreeGrant() throws Exception {
+        model.setKind("DATA");
+        TeeRuntimeTaskDO training = tasks.findById(new TeeRuntimeTaskDO.UPK("train-1")).orElseThrow();
+        training.setReceiptJws(payloadJws(receipt("model-1")));
+        when(policies.reportKinds(sourcePolicy)).thenReturn(List.of("EVALUATION_METRICS"));
+        TeeModelReportAccess.Authorized result = access.authorize("model-1", "sandbox-1", List.of("age"));
+        assertEquals("report.model_evaluation", access.operator(result));
+        assertEquals("EVALUATION_METRICS", access.reportKind(result));
+    }
+
+    @Test
+    void predictionDataCannotUseTreePermissionAsEvaluationPermission() throws Exception {
+        model.setKind("DATA");
+        TeeRuntimeTaskDO training = tasks.findById(new TeeRuntimeTaskDO.UPK("train-1")).orElseThrow();
+        training.setReceiptJws(payloadJws(receipt("model-1")));
+        assertThrows(TeeException.class, () -> access.authorize("model-1", "sandbox-1", List.of("age")));
+    }
+
 }

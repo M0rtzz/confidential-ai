@@ -365,7 +365,7 @@ public class TeeRuntimeService {
     private void validateSucceededOutputs(String callerId, TeeTaskSpec task, JsonNode outputs) {
         if (TeeModelReportAccess.isModelReport(task) && (outputs.size() != 1
                 || !"REPORT".equals(outputs.path(0).path("kind").asText())
-                || !"TREE_STRUCTURE".equals(outputs.path(0).path("reportKind").asText()))) {
+                || !task.outputPolicy().reportKinds().get(0).equals(outputs.path(0).path("reportKind").asText()))) {
             throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "树报告任务只能输出一份 TREE_STRUCTURE 报告");
         }
         Map<String, org.secretflow.secretpad.persistence.entity.TeeObjectDO> stored =
@@ -423,13 +423,32 @@ public class TeeRuntimeService {
         } catch (Exception failure) {
             throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "报告内容无法序列化");
         }
-        if (TeeModelReportAccess.isModelReport(task)) {
+        if (TeeModelReportAccess.EVALUATION_OPERATOR.equals(task.operatorId())) {
+            validateEvaluationReport(content);
+        } else if (TeeModelReportAccess.isModelReport(task)) {
             TeeTreeReportValidator.validate(content, task.columns(),
                     ((Number) task.program().parameters().get("treeIndex")).intValue());
         }
         if ("MODEL_API_PREDICTION".equals(reportKind)) {
             validatePredictionReport(content);
         }
+    }
+
+    /** 评估只允许有限聚合指标，禁止样本行和任意嵌套内容。 */
+    private void validateEvaluationReport(JsonNode content) {
+        Set<String> allowed = Set.of("accuracy", "precision", "recall", "f1", "auc", "true_positive",
+                "true_negative", "false_positive", "false_negative", "mae", "rmse", "r2", "n");
+        JsonNode metrics = content.path("metrics");
+        if (content.size() != 1 || !metrics.isObject() || metrics.isEmpty() || !metrics.path("n").canConvertToInt()
+                || metrics.path("n").asInt() <= 0) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "评估报告结构无效");
+        }
+        metrics.fields().forEachRemaining(entry -> {
+            if (!allowed.contains(entry.getKey()) || !entry.getValue().isNumber()
+                    || !Double.isFinite(entry.getValue().asDouble())) {
+                throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "评估报告包含未授权字段");
+            }
+        });
     }
 
     private void validatePredictionReport(JsonNode content) {

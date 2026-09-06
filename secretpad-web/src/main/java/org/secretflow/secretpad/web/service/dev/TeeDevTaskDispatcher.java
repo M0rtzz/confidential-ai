@@ -263,8 +263,10 @@ public class TeeDevTaskDispatcher {
         requireCenterConfiguration();
         var authorized = modelReports.authorize(objectId, sandboxId, features);
         Map<String, Object> parameters = new LinkedHashMap<>();
-        parameters.put("op", org.secretflow.secretpad.web.service.tee.TeeModelReportAccess.OPERATOR);
-        parameters.put("inputKinds", List.of("MODEL"));
+        parameters.put("op", modelReports.operator(authorized));
+        parameters.put("inputKinds", List.of(authorized.object().getKind()));
+        parameters.put("label", modelReports.label(authorized));
+        parameters.put("taskType", modelReports.taskType(authorized));
         parameters.put("features", features);
         parameters.put("modelKind", modelKind);
         parameters.put("treeIndex", treeIndex);
@@ -276,10 +278,10 @@ public class TeeDevTaskDispatcher {
         String nonce = UUID.randomUUID().toString();
         TeeTaskSpec spec = new TeeTaskSpec(org.secretflow.secretpad.web.service.tee.TeeModelReportAccess.VERSION,
                 taskId, requestId, nodeId, audience, sandboxId,
-                org.secretflow.secretpad.web.service.tee.TeeModelReportAccess.OPERATOR, features,
+                modelReports.operator(authorized), features,
                 List.of(modelReports.input(authorized)), builtinProgram(parameters), issued.toString(),
                 issued.plusSeconds(Math.min(Math.max(lifetimeSeconds, 1), TeeContract.MAX_TASK_LIFETIME_SECONDS)).toString(),
-                nonce, new TeeTaskSpec.OutputPolicy(List.of("TREE_STRUCTURE"), true, true, true), runtimeImageDigest);
+                nonce, new TeeTaskSpec.OutputPolicy(List.of(modelReports.reportKind(authorized)), true, true, true), runtimeImageDigest);
         modelReports.validate(spec);
         String compact = compactJws(mapper, spec, readPrivateKey(Path.of(signerKey)), signerKid);
         int updated = jdbc.update("update ds_dev_task set tee_task_jws=?,tee_request_id=?,tee_nonce=?,"

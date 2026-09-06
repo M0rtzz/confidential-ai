@@ -76,7 +76,7 @@ public class TeeTreeReportService {
         Integer pending = jdbc.queryForObject("select count(*) from ds_model_tree_report where status='RUNNING'", Integer.class);
         if (pending != null && pending >= 20) return state("FAILED", "报告生成任务较多，请稍后重试");
         String taskId = tasks.createCanvasTask(sandboxId, canvasId, nodeId,
-                TeeModelReportAccess.OPERATOR, "", Map.of("op", TeeModelReportAccess.OPERATOR),
+                access.operator(authorized), "", Map.of("op", access.operator(authorized)),
                 List.of(), "", "");
         tasks.claimCanvasTask(taskId);
         String now = Instant.now().toString();
@@ -103,12 +103,12 @@ public class TeeTreeReportService {
                 if (!"SUCCEEDED".equals(result.get("status"))) {
                     throw new IllegalStateException(String.valueOf(result.getOrDefault("errorMessage", "可信树报告生成失败")));
                 }
-                access.authorize(objectId, sandboxId, features);
+                var authorized = access.authorize(objectId, sandboxId, features);
                 Object reports = result.get("reports");
                 Map<String, Object> content = null;
                 if (reports instanceof List<?> list) {
                     for (Object item : list) {
-                        if (item instanceof Map<?, ?> report && "TREE_STRUCTURE".equals(report.get("reportKind"))) {
+                        if (item instanceof Map<?, ?> report && access.reportKind(authorized).equals(report.get("reportKind"))) {
                             content = mapper.convertValue(report.get("content"), Map.class);
                         }
                     }

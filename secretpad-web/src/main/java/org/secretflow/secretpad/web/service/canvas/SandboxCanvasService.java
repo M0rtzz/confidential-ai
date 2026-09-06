@@ -801,7 +801,8 @@ public class SandboxCanvasService {
         result.put("features", features);
         result.put("excludedFields", excluded);
         result.put("preprocessingSteps", preprocessing);
-        Map<String, Object> savedEvaluation = savedModelEvaluation(canvasModel);
+        Map<String, Object> savedEvaluation = trustedTrainingEvaluation(canvas, trainRun, trainNode);
+        if (savedEvaluation.isEmpty()) savedEvaluation = savedModelEvaluation(canvasModel);
         result.put("evaluation", savedEvaluation.isEmpty()
                 ? modelEvaluation(string(canvasModel.get("model_id")), testId,
                         sandboxId, trainRun, trainNode, graph, sourceRunId)
@@ -822,6 +823,55 @@ public class SandboxCanvasService {
     }
 
     /** 保存模型时已全量计算的指标优先于历史测试和画布评估节点，并按报告配置过滤展示字段。 */
+    /** 密文训练结果通过固定评估算子生成聚合报告，不读取不存在的明文输出表。 */
+    private Map<String, Object> trustedTrainingEvaluation(Map<String, Object> canvas,
+            Map<String, Object> trainRun, Node trainNode) {
+        Map<String, Object> summary = parseMapOrEmpty(string(trainRun.get("result_summary")));
+        Object outputs = summary.get("encryptedOutputs");
+        if (!(outputs instanceof List<?> list)) return Map.of();
+        String objectId = "";
+        for (Object value : list) {
+            if (value instanceof Map<?, ?> output && "DATA".equals(output.get("kind"))) {
+                if (notBlank(objectId)) return Map.of("status", "UNAVAILABLE", "message", "训练预测结果绑定不唯一");
+                objectId = string(output.get("objectId"));
+            }
+        }
+        if (!notBlank(objectId)) return Map.of();
+        try {
+            List<String> features = reportFeatures(objectId, trainNode);
+            Map<String, Object> report = treeReports.request(objectId, string(canvas.get("sandbox_id")),
+                    string(canvas.get("id")), trainNode.id, trainNode.componentCode, features, 0, false);
+            if (!"AVAILABLE".equals(report.get("status"))) {
+                return Map.of("status", report.getOrDefault("status", "RUNNING"), "message",
+                        "RUNNING".equals(report.get("status")) ? "正在生成模型评估指标"
+                                : report.getOrDefault("message", "模型评估指标暂不可用"));
+            }
+            Map<String, Object> metrics = new LinkedHashMap<>(parseMapOrEmpty(json(report.get("metrics"))));
+            String metricType = CanvasOperatorRegistry.metricType(trainNode.componentCode, trainNode.params.get("task"));
+            metrics.put("metricType", metricType);
+            metrics.put("samples", metrics.remove("n"));
+            if (metrics.containsKey("true_positive")) {
+                metrics.put("confusionMatrix", Map.of("positive", "1", "tp", metrics.remove("true_positive"),
+                        "tn", metrics.remove("true_negative"), "fp", metrics.remove("false_positive"),
+                        "fn", metrics.remove("false_negative")));
+            }
+            Map<String, Object> evaluation = new LinkedHashMap<>();
+            evaluation.put("status", "AVAILABLE");
+            evaluation.put("source", "TRUSTED_TRAINING_EVALUATION");
+            evaluation.put("metricsScope", "AUTO");
+            evaluation.put("metricType", metricType);
+            evaluation.put("metrics", metrics);
+            evaluation.put("outputSummary", Map.of("rowCount", metrics.get("samples")));
+            evaluation.put("inputSummary", Map.of());
+            evaluation.put("resultPreview", Map.of());
+            evaluation.put("createdAt", trainRun.get("created_at"));
+            evaluation.put("finishedAt", report.get("computedAt"));
+            return evaluation;
+        } catch (Exception error) {
+            return Map.of("status", "BLOCKED", "message", firstNotBlank(error.getMessage(), "模型评估授权暂不可用"));
+        }
+    }
+
     private Map<String, Object> savedModelEvaluation(Map<String, Object> canvasModel) {
         String status = string(canvasModel.get("evaluation_status"));
         Map<String, Object> full = parseMapOrEmpty(string(canvasModel.get("evaluation_metrics")));

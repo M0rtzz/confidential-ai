@@ -310,9 +310,7 @@ public class LoginInterceptor implements HandlerInterceptor {
     private boolean checkEndRole(HttpServletRequest request, HttpServletResponse response) {
         String uri = request.getRequestURI();
         String required = null;
-        if ("/api/v1alpha1/tee/exports/catalog".equals(uri) && "GET".equalsIgnoreCase(request.getMethod())) {
-            required = "CENTER";
-        } else if (uri.startsWith("/api/v1alpha1/tee/keys/") || uri.startsWith("/api/v1alpha1/tee/policies/")
+        if (uri.startsWith("/api/v1alpha1/tee/keys/") || uri.startsWith("/api/v1alpha1/tee/policies/")
                 || uri.startsWith("/api/v1alpha1/tee/assets/")
                 || uri.startsWith("/api/v1alpha1/tee/exports")
                 || uri.startsWith("/api/v1alpha1/tee/results/")) {

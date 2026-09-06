@@ -209,4 +209,34 @@ class TeePolicyDeadlineTest {
         verify(policies, never()).save(any());
         assertEquals("2", asset.getPolicyVersion());
     }
+    @Test
+    void secondSandboxPointerDoesNotBreakOriginalSandboxOrHistoricalResults() {
+        String secondId = "pl-" + TeeCrypto.sha256Hex("asset-1|sandbox-2".getBytes(StandardCharsets.UTF_8)).substring(0, 12);
+        TeePolicyDO second = TeePolicyDO.builder().upk(new TeePolicyDO.UPK(secondId, "2"))
+                .assetId("asset-1").assetVersion("1").ownerId("owner-1").sandboxId("sandbox-2")
+                .columnsJson("[\"age\"]").operatorsJson("[\"sql.query\",\"python.execute\"]")
+                .reportKindsJson("[]").approvalId("apr-2").state("ACTIVE")
+                .expiresAt("2099-01-01T00:00:00Z").build();
+        versions.add(second);
+        asset.setPolicyId(secondId);
+        asset.setPolicyVersion("2");
+        deadline(Instant.parse("2099-10-01T00:00:00Z"));
+        TeePolicyDO refreshed = service.resultSourcePolicy(policyId, "1");
+        assertEquals("sandbox-1", refreshed.getSandboxId());
+        assertEquals(policyId, refreshed.getUpk().getPolicyId());
+        assertEquals("2099-10-01T00:00:00Z", refreshed.getExpiresAt());
+        assertEquals(secondId, asset.getPolicyId());
+        assertEquals("2", asset.getPolicyVersion());
+        assertSame(refreshed, service.refreshForAsset(asset, "sandbox-1"));
+        verify(assets, never()).save(any());
+    }
+
+    @Test
+    void reorderedGrantSetsStillReferToSameAuthorization() {
+        deadline(Instant.parse("2099-10-01T00:00:00Z"));
+        TeePolicyDO current = service.refreshForAsset(asset, "sandbox-1");
+        current.setOperatorsJson("[\"python.execute\",\"sql.query\"]");
+        assertSame(current, service.resultSourcePolicy(policyId, "1"));
+    }
+
 }

@@ -141,7 +141,7 @@ public class TeePolicyService {
     public synchronized TeePolicyDO refreshForAsset(TeeAssetDO input, String sandboxId) {
         TeeAssetDO asset = assets.findById(input.getUpk()).orElseThrow(
                 () -> TeeException.of(TeeContract.Error.POLICY_DENIED, "密文资产已失效"));
-        TeePolicyDO policy = require(asset.getPolicyId(), asset.getPolicyVersion());
+        TeePolicyDO policy = policyForSandbox(asset, sandboxId);
         if (!asset.getUpk().getAssetId().equals(policy.getAssetId())
                 || !asset.getUpk().getAssetVersion().equals(policy.getAssetVersion())
                 || !asset.getOwnerId().equals(policy.getOwnerId())) {
@@ -170,9 +170,30 @@ public class TeePolicyService {
                 .reportKindsJson(policy.getReportKindsJson()).expiresAt(approved.expiresAt().toString())
                 .state(TeeContract.STATE_ACTIVE).build();
         policies.save(refreshed);
-        asset.setPolicyVersion(version);
-        assets.save(asset);
+        // 资产可同时供多个沙箱使用，期限刷新不能改写另一个沙箱的默认策略指针。
+        if (policy.getUpk().getPolicyId().equals(asset.getPolicyId())) {
+            asset.setPolicyVersion(version);
+            assets.save(asset);
+        }
         return refreshed;
+    }
+
+    /** 按沙箱选择该资产的最新策略，避免后挂载沙箱覆盖原沙箱的授权入口。 */
+    private TeePolicyDO policyForSandbox(TeeAssetDO asset, String sandboxId) {
+        TeePolicyDO pointed = require(asset.getPolicyId(), asset.getPolicyVersion());
+        return policies.findByAssetIdAndAssetVersion(asset.getUpk().getAssetId(),
+                        asset.getUpk().getAssetVersion()).stream()
+                .filter(policy -> sandboxId.equals(policy.getSandboxId()))
+                .filter(policy -> asset.getOwnerId().equals(policy.getOwnerId()))
+                .filter(policy -> sandboxId.equals(pointed.getSandboxId())
+                        ? pointed.getUpk().getPolicyId().equals(policy.getUpk().getPolicyId())
+                        : followsDataDeadline(policy))
+                .max(java.util.Comparator.comparingLong(policy ->
+                        Long.parseLong(policy.getUpk().getPolicyVersion())))
+                .orElseGet(() -> {
+                    if (sandboxId.equals(pointed.getSandboxId())) return pointed;
+                    throw TeeException.of(TeeContract.Error.POLICY_DENIED, "密文资产的授权规则未覆盖当前沙箱");
+                });
     }
 
     /** 历史结果保留原训练版本，访问结果时只承接同一授权范围的自动期限修正。 */
@@ -185,7 +206,7 @@ public class TeePolicyService {
         if (!followsDataDeadline(original)) return original;
         TeeAssetDO asset = assets.findById(new TeeAssetDO.UPK(original.getAssetId(), original.getAssetVersion()))
                 .orElseThrow(() -> TeeException.of(TeeContract.Error.POLICY_DENIED, "结果来源数据已失效"));
-        TeePolicyDO current = require(asset.getPolicyId(), asset.getPolicyVersion());
+        TeePolicyDO current = policyForSandbox(asset, original.getSandboxId());
         requireSameResultScope(original, current);
         current = refreshForAsset(asset, original.getSandboxId());
         requireSameResultScope(original, current);
@@ -200,9 +221,9 @@ public class TeePolicyService {
                 || !java.util.Objects.equals(original.getOwnerId(), current.getOwnerId())
                 || !java.util.Objects.equals(original.getSandboxId(), current.getSandboxId())
                 || !java.util.Objects.equals(original.getApprovalId(), current.getApprovalId())
-                || !java.util.Objects.equals(original.getColumnsJson(), current.getColumnsJson())
-                || !java.util.Objects.equals(original.getOperatorsJson(), current.getOperatorsJson())
-                || !java.util.Objects.equals(original.getReportKindsJson(), current.getReportKindsJson())) {
+                || !new java.util.HashSet<>(read(original.getColumnsJson())).equals(new java.util.HashSet<>(read(current.getColumnsJson())))
+                || !new java.util.HashSet<>(read(original.getOperatorsJson())).equals(new java.util.HashSet<>(read(current.getOperatorsJson())))
+                || !new java.util.HashSet<>(read(original.getReportKindsJson())).equals(new java.util.HashSet<>(read(current.getReportKindsJson())))) {
             throw TeeException.of(TeeContract.Error.POLICY_DENIED, "结果来源授权范围已变化，不能沿用历史结果授权");
         }
     }

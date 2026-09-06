@@ -13,7 +13,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-/** 中心端只新增只读目录入口，不能因菜单开放而取得数据方的申请、投票或下载能力。 */
+/** 结果导出与审批仅客户端可用，中心端目录与写入口均拒绝。 */
 class TeeExportRoleTest {
     private final LoginInterceptor interceptor = mock(LoginInterceptor.class, CALLS_REAL_METHODS);
 
@@ -21,8 +21,8 @@ class TeeExportRoleTest {
     void cleanContext() { UserContext.remove(); }
 
     @Test
-    void centerCanOnlyReadCatalog() {
-        assertTrue(allowed("CENTER", "GET", "/exports/catalog"));
+    void centerCannotAccessExportModule() {
+        assertFalse(allowed("CENTER", "GET", "/exports/catalog"));
         assertFalse(allowed("CENTER", "POST", "/exports"));
         assertFalse(allowed("CENTER", "POST", "/exports/exp-1/action"));
         assertFalse(allowed("CENTER", "POST", "/exports/exp-1/download"));
@@ -31,8 +31,8 @@ class TeeExportRoleTest {
     }
 
     @Test
-    void clientCannotReadCenterCatalogButKeepsOwnExportEndpoints() {
-        assertFalse(allowed("CLIENT", "GET", "/exports/catalog"));
+    void clientKeepsOwnExportEndpoints() {
+        assertTrue(allowed("CLIENT", "GET", "/exports/catalog"));
         assertTrue(allowed("CLIENT", "GET", "/exports/exportable"));
         assertTrue(allowed("CLIENT", "GET", "/exports/history"));
         assertTrue(allowed("CLIENT", "POST", "/exports/exp-1/download"));
