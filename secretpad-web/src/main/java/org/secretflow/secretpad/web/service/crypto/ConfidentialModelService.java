@@ -415,6 +415,15 @@ public class ConfidentialModelService {
             jdbc.update("update ds_confidential_model set status='OFFLINE',updated_at=? where model_id=?", now, modelId);
             saveRuntime(deploymentId, "OFFLINE", null, null, "RUNTIME_NOT_FOUND");
         }
+        // 上面的循环只从部署侧驱动。模型标记为 ONLINE 却没有任何在线部署时循环一次都不进，
+        // 模型状态会长期停在 ONLINE——列表给出对话入口，点开却找不到在线部署。
+        // 这里按部署的实际状态收口，模型状态不再独立于部署存在。
+        Integer running = jdbc.queryForObject("select count(*) from ds_model_deployment "
+                + "where owner_id=? and model_id=? and status='ONLINE'", Integer.class, ownerId, modelId);
+        if (running != null && running == 0) {
+            jdbc.update("update ds_confidential_model set status='OFFLINE',updated_at=? "
+                    + "where model_id=? and status='ONLINE'", Instant.now().toString(), modelId);
+        }
     }
 
     @Transactional
