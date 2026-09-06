@@ -345,6 +345,8 @@ def port_check(name):
                     mapped.add(port)
     for port in ports - mapped:
         with socket.socket() as sock:
+            # 允许服务停止后的 TIME_WAIT，仍拒绝其他活动监听端口。
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(('0.0.0.0', port))
 
 
