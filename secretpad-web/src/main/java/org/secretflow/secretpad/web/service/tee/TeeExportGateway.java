@@ -165,7 +165,7 @@ public class TeeExportGateway {
                         + " kind=" + view.kind() + " bytes=" + plaintext.length, true);
         mvp.dispatchWebhooks("tee.export.download", Map.of("exportId", view.exportId(),
                 "resultId", view.resultId(), "status", view.status(), "stage", "EGRESS"));
-        return new Download(fileName(view), contentType(view.kind()), plaintext);
+        return downloadFile(view.resultId(), view.kind(), plaintext);
     }
 
     /**
@@ -181,15 +181,31 @@ public class TeeExportGateway {
                 "stage=EGRESS delegated=true " + detail, true);
     }
 
-    /** 密文对象没有格式列，文件名按结果类型推定：DATA 为 CSV，MODEL 为 JSON。 */
-    private static String fileName(TeeExportService.RequestView view) {
-        String suffix = "MODEL".equals(view.kind()) ? ".json"
-                : "DATA".equals(view.kind()) ? ".csv" : ".bin";
-        return path(view.resultId()) + suffix;
-    }
-
-    private static String contentType(String kind) {
-        return "MODEL".equals(kind) ? "application/json" : "text/csv";
+    /** 按解封后的实际格式命名模型，仅检查格式，不执行 Pickle 反序列化。 */
+    Download downloadFile(String resultId, String kind, byte[] content) {
+        String suffix = ".bin";
+        String contentType = "application/octet-stream";
+        if ("DATA".equals(kind)) {
+            suffix = ".csv";
+            contentType = "text/csv";
+        } else if ("MODEL".equals(kind)) {
+            // 运行时使用带 PROTO 头的二进制 Pickle 协议，末尾 STOP 标志为句点。
+            if (content.length >= 3 && (content[0] & 0xff) == 0x80
+                    && content[1] >= 2 && content[1] <= 5 && content[content.length - 1] == '.') {
+                suffix = ".pkl";
+            } else {
+                try {
+                    JsonNode model = mapper.readTree(content);
+                    if (model != null && (model.isObject() || model.isArray())) {
+                        suffix = ".json";
+                        contentType = "application/json";
+                    }
+                } catch (java.io.IOException ignored) {
+                    // 无法识别的模型保留二进制附件，避免错误声明为 JSON。
+                }
+            }
+        }
+        return new Download(path(resultId) + suffix, contentType, content);
     }
 
     private TeeExportService.ExportableResult exportableList(JsonNode data) {

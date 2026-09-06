@@ -184,4 +184,41 @@ class TeeExportGatewayTest {
                 Map.entry("serverTime", "2098-01-01T00:00:00Z")),
                 TeeExportService.RequestView.class);
     }
+    @Test
+    void pickleModelKeepsOriginalBytesAndUsesPklAttachment() {
+        TeeExportGateway gateway = new TeeExportGateway(null, null, null, null, new ObjectMapper());
+        for (int protocol = 2; protocol <= 5; protocol++) {
+            byte[] pickle = {(byte) 0x80, (byte) protocol, '}', '.'};
+            TeeExportGateway.Download file = gateway.downloadFile("result-1", "MODEL", pickle);
+            assertEquals("result-1.pkl", file.fileName());
+            assertEquals("application/octet-stream", file.contentType());
+            org.junit.jupiter.api.Assertions.assertSame(pickle, file.content());
+        }
+    }
+
+    @Test
+    void jsonModelAndCsvKeepTheirFormats() {
+        TeeExportGateway gateway = new TeeExportGateway(null, null, null, null, new ObjectMapper());
+        byte[] json = "{\"trees\":[]}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        TeeExportGateway.Download model = gateway.downloadFile("result-1", "MODEL", json);
+        assertEquals("result-1.json", model.fileName());
+        assertEquals("application/json", model.contentType());
+        org.junit.jupiter.api.Assertions.assertSame(json, model.content());
+        byte[] csv = "age\n18\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        TeeExportGateway.Download data = gateway.downloadFile("result-2", "DATA", csv);
+        assertEquals("result-2.csv", data.fileName());
+        assertEquals("text/csv", data.contentType());
+        org.junit.jupiter.api.Assertions.assertSame(csv, data.content());
+    }
+
+    @Test
+    void unknownModelFormatRemainsBinary() {
+        TeeExportGateway gateway = new TeeExportGateway(null, null, null, null, new ObjectMapper());
+        byte[] content = {(byte) 0x80, 5};
+        TeeExportGateway.Download file = gateway.downloadFile("result-1", "MODEL", content);
+        assertEquals("result-1.bin", file.fileName());
+        assertEquals("application/octet-stream", file.contentType());
+        org.junit.jupiter.api.Assertions.assertSame(content, file.content());
+    }
+
 }
