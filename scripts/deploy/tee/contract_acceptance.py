@@ -35,7 +35,9 @@ RUNTIME = Path(os.environ.get(
     'DATA_SANDBOX_TEE_RUNTIME_ROOT', str(WORKSPACE / '.dev-runtime'))).resolve()
 CENTER = RUNTIME / 'center'
 CLIENT = RUNTIME / 'client-a'
-PORTS = {'client-a': 19488, 'client-b': 19588, 'center': 19688}
+# 控制台对外只发布 HTTPS（19488/19588/19688）。验收脚本走各实例仅绑定回环的
+# HTTP 连接器，避免为自签名证书单独配置信任链。
+PORTS = {'client-a': 19487, 'client-b': 19587, 'center': 19687}
 PLATFORM_ZONE = ZoneInfo('Asia/Shanghai')
 
 SAMPLE_COLUMNS = ['age', 'income', 'city', 'id_card']

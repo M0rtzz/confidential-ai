@@ -46,9 +46,6 @@ LABEL = 'io.hustnlp.data-sandbox.'
 INSTANCES = {'client-a': 194, 'client-b': 195, 'center': 196}
 # 中心端平台间契约入口的对外地址；客户端实例按此申请密钥与登记规则。
 CONTRACT_PORT = 19686
-# 中心端控制台的 HTTPS 入口。大模型管理三页在浏览器内做 HPKE 封装与分块加密，
-# WebCrypto 只在安全上下文可用；HTTP 入口 19688 保持不变，前端按端口加一自动切换。
-CONSOLE_HTTPS_PORT = 19689
 CONTRACT_HOST = os.environ.get('DATA_SANDBOX_TEE_ADVERTISE_HOST', '222.20.99.38')
 CONTRACT_CENTER_URL = f'https://{CONTRACT_HOST}:{CONTRACT_PORT}'
 SOURCES = {
@@ -325,11 +322,11 @@ def managed(name, kind='container'):
 
 def port_check(name):
     base = INSTANCES[name] * 100
-    ports = {base + n for n in [80, 81, 82, 83, 84, 88]}
+    # 88 为控制台（HTTPS），87 为仅供部署脚本健康检查使用的容器内 HTTP 连接器。
+    ports = {base + n for n in [80, 81, 82, 83, 84, 87, 88]}
     if name == 'center':
         ports.add(19685)
         ports.add(CONTRACT_PORT)
-        ports.add(CONSOLE_HTTPS_PORT)
     own = {f'data-sandbox-dev-{name}-{suffix}' for suffix in ['kuscia', 'secretpad']}
     ids = run('docker', 'ps', '-aq', capture=True).split()
     mapped = set()
@@ -474,8 +471,13 @@ def prepare():
     # 只给中心 Kuscia 发布密钥服务入口，原生 CM 端口不发布。
     script = script.replace('-p "${METRICS_PORT}:9091" \\\n', '-p "${METRICS_PORT}:9091" ${TEE_GATEWAY_PORT_ARGS:-} \\\n')
     # 中心端另开一个平台间契约入口；只有中心实例设置该端口参数。
+    # 控制台统一走 HTTPS：原控制台端口改映射容器 443，容器内 8080 另开一个仅本机使用的
+    # HTTP 端口，供本脚本与工具链的健康检查调用。浏览器端加密要求安全上下文，
+    # 三端同源同端口才不会在页面间跳转时丢失会话。
     script = replace_once(script, '    -p "${CONSOLE_PORT}:8080" \\\n',
-                          '    -p "${CONSOLE_PORT}:8080" ${TEE_CONTRACT_PORT_ARGS:-} \\\n')
+                          '    -p "${CONSOLE_PORT}:443" \\\n'
+                          '    -p "127.0.0.1:${TEE_CONSOLE_HTTP_PORT}:8080" ${TEE_CONTRACT_PORT_ARGS:-} \\\n')
+    script = script.replace('wait_for_secretpad "$CONSOLE_PORT"', 'wait_for_secretpad "$TEE_CONSOLE_HTTP_PORT"')
     script = script.replace('-v "${KUSCIA_CONTAINERD_DIR}:/home/kuscia/containerd" \\\n',
                             '-v "${KUSCIA_CONTAINERD_DIR}:/home/kuscia/containerd" \\\n      -v "${DEV_ROOT}/tee:/home/kuscia/tee" \\\n')
     script = replace_once(script, '    --env-file "$CREDENTIAL_FILE" \\\n',
@@ -656,9 +658,9 @@ def up(name):
                TEE_KEY_ADAPTER_URL='https://data-sandbox-dev-center-key-adapter:8090' if name == 'center' else '',
                # 中心端发布平台间契约入口；客户端实例只持有调用地址，不开放任何入口。
                TEE_CONTRACT_PORT='8443' if name == 'center' else '0',
-               # 中心端同时发布控制台 HTTPS 入口，供大模型管理三页取得安全上下文。
-               TEE_CONTRACT_PORT_ARGS=(f'-p {CONTRACT_PORT}:8443 -p {CONSOLE_HTTPS_PORT}:443'
-                                       if name == 'center' else ''),
+               TEE_CONTRACT_PORT_ARGS=f'-p {CONTRACT_PORT}:8443' if name == 'center' else '',
+               # 控制台 HTTPS 占用原端口，容器内 HTTP 连接器只绑定回环，供健康检查使用。
+               TEE_CONSOLE_HTTP_PORT=str(base + 87),
                TEE_CONTRACT_SERVER_MOUNT=(
                    f'-v {RUNTIME / name}/tee/contract-server:/app/tee-contract-server:ro'
                    if name == 'center' else ''),
