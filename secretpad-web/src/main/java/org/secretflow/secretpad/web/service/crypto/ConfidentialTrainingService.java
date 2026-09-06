@@ -147,15 +147,14 @@ public class ConfidentialTrainingService {
         Map<String, Object> created = compute.createTask(ownerId,
                 new ConfidentialComputeService.CreateTaskRequest(domainId, "train", workload, versions,
                         List.of(text(row.get("output_recipient_kid"))), "a100-sim", "controlled-sim-ok"));
-        @SuppressWarnings("unchecked")
-        Map<String, Object> taskSpec = (Map<String, Object>) created.get("taskSpec");
+        JsonNode taskSpec = (JsonNode) created.get("taskSpec");
         JsonNode attestation = compute.createAttestation(ownerId,
-                new ConfidentialComputeService.AttestationRequest(text(taskSpec.get("taskId")),
+                new ConfidentialComputeService.AttestationRequest(taskSpec.path("taskId").asText(),
                         required(request.clientNonce(), "clientNonce"), "a100-sim"));
         String now = Instant.now().toString();
         jdbc.update("update ds_confidential_training_task set status='WAITING_KEY_RELEASE',task_spec_digest=?,"
                         + "task_spec_json=?,attestation_session_id=?,attestation_json=?,updated_at=? where task_id=?",
-                created.get("taskSpecDigest"), write(mapper.valueToTree(taskSpec)),
+                created.get("taskSpecDigest"), write(taskSpec),
                 attestation.path("sessionId").asText(), write(attestation), now, taskId);
         Map<String, Object> result = task(ownerId, taskId);
         result.put("taskSpec", taskSpec);
