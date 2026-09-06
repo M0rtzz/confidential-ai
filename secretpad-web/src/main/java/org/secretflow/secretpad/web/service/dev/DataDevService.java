@@ -954,8 +954,10 @@ public class DataDevService {
     /* ============================== 任务操作 ============================== */
 
     public List<Map<String, Object>> listTasks(String status, String runMode, String execType, String keyword, String sandboxId) {
+        // 画布节点任务经 TEE 下发后通道变为 tee:canvas，按去前缀后的通道排除，整张画布只在画布运行记录中体现
         StringBuilder sql = new StringBuilder(
-                "select * from ds_dev_task where deleted=0 and coalesce(channel,'')<>'canvas'");
+                "select * from ds_dev_task where deleted=0 "
+                        + "and replace(coalesce(channel,''),'tee:','')<>'canvas'");
         List<Object> args = new ArrayList<>();
         if (notBlank(sandboxId)) {
             sql.append(" and sandbox_id=?");

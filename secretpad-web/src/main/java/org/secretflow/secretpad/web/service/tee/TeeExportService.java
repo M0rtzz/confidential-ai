@@ -226,7 +226,12 @@ public class TeeExportService {
             TeeResultMetadataService.Metadata source = metadata.resolve(object);
             boolean active = limit.available() && Instant.now().isBefore(limit.until());
             boolean hasRequest = owned.stream().anyMatch(item -> activeRequest(item, limit));
-            String reason = centerReadOnly ? "请由贡献机构客户端申请导出" : !active ? limit.reason()
+            // 工单到期不影响重新申请，只有授权期限本身到期才拦截，此时指向供数方的延期入口
+            boolean deadlinePassed = limit.until() != null && !Instant.now().isBefore(limit.until());
+            String reason = centerReadOnly ? "请由贡献机构客户端申请导出"
+                    : !active ? (deadlinePassed
+                            ? "结果授权期限已到，需供数方在结果权限管理中延长期限后方可重新申请"
+                            : limit.reason())
                     : hasRequest ? "已有有效导出工单，请查看已有申请" : "";
             items.add(new ExportableView(object.getResultId(), object.getUpk().getObjectId(),
                     object.getKind(), object.getTaskId(), object.getCiphertextSha256(),

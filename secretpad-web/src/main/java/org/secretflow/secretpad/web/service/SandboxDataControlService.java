@@ -168,8 +168,11 @@ public class SandboxDataControlService {
         row.put("sandbox_id", task.get("sandbox_id"));
         row.put("task_id", task.get("task_id"));
         row.put("task_name", task.get("task_name"));
-        row.put("row_count", task.get("result_rows"));
+        // 密文产出不回传明文行数，回执里也没有该字段，置空由界面显示为未知，不伪造 0
+        row.put("row_count", null);
         row.put("finished_at", task.get("finished_at"));
+        // 与主表分支同口径：生成时间优先取任务完成时间
+        row.put("createdAt", task.get("finished_at"));
         row.put("runtime_mode", "SIMULATION");
         row.put("view_until", TeeResultMetadataService.earliest(task.get("result_view_until"),
                 sandboxUntil(string(task.get("sandbox_id")))));
