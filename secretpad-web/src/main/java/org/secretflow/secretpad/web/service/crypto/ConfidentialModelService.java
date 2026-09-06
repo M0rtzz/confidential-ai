@@ -35,7 +35,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ConfidentialModelService {
     public static final String LOCAL_WEIGHTS = "LOCAL_WEIGHTS";
     public static final String OPENAI_COMPATIBLE = "OPENAI_COMPATIBLE";
-    private static final int MAX_CIPHER_CHUNK_BYTES = 16 * 1024 * 1024 + 64;
+    private static final int MODEL_CIPHER_CHUNK_BYTES = 32 * 1024 * 1024;
+    private static final int MAX_CIPHER_CHUNK_BYTES = MODEL_CIPHER_CHUNK_BYTES + 64;
     private static final Set<String> ALGORITHMS = Set.of(
             "AES-256-GCM", "AES-256-GCM-SIV", "CHACHA20-POLY1305",
             "XCHACHA20-POLY1305", "AES-256-SIV");
@@ -173,7 +174,7 @@ public class ConfidentialModelService {
         values.add(capability("XCHACHA20-POLY1305", 32, 24, false));
         values.add(capability("AES-256-SIV", 64, 16, false));
         return Map.of("format", "ds-envelope/v2", "defaultAlgorithm", "AES-256-GCM",
-                "chunkSize", 8 * 1024 * 1024, "contentEncryptionAlgorithms", values);
+                "chunkSize", MODEL_CIPHER_CHUNK_BYTES, "contentEncryptionAlgorithms", values);
     }
 
     @Transactional
@@ -364,7 +365,8 @@ public class ConfidentialModelService {
     public List<Map<String, Object>> runtimeInstances() {
         return jdbc.queryForList("select d.deployment_id deploymentId,d.version_id versionId,"
                         + "d.deployment_type deploymentType,d.security_profile securityProfile,d.status,"
-                        + "d.endpoint_path endpointPath,d.error_code errorCode,d.created_at createdAt,"
+                        + "d.endpoint_path endpointPath,d.authorization_session_id authorizationSessionId,"
+                        + "d.error_code errorCode,d.created_at createdAt,"
                         + "d.updated_at updatedAt,m.model_id modelId,m.name modelName,v.version_number version "
                         + "from ds_model_deployment d join ds_confidential_model m on d.model_id=m.model_id "
                         + "left join ds_confidential_model_version v on d.version_id=v.version_id "

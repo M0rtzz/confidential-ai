@@ -405,7 +405,7 @@ UNIT-007、012、016、017、022。
 功能文档第 7.1～7.3 节。
 
 ### 对应技术实现
-`POST weight-upload-sessions`、chunk endpoint、2h TTL、16MiB+64上限、上传表与 MinIO。
+`POST weight-upload-sessions`、chunk endpoint、2h TTL、32MiB+64上限、上传表与 MinIO。
 
 ### 前置条件
 UNIT-005～007 PASS；使用小型无敏感测试文件。
