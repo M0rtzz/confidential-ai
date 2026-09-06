@@ -46,6 +46,9 @@ LABEL = 'io.hustnlp.data-sandbox.'
 INSTANCES = {'client-a': 194, 'client-b': 195, 'center': 196}
 # 中心端平台间契约入口的对外地址；客户端实例按此申请密钥与登记规则。
 CONTRACT_PORT = 19686
+# 中心端控制台的 HTTPS 入口。大模型管理三页在浏览器内做 HPKE 封装与分块加密，
+# WebCrypto 只在安全上下文可用；HTTP 入口 19688 保持不变，前端按端口加一自动切换。
+CONSOLE_HTTPS_PORT = 19689
 CONTRACT_HOST = os.environ.get('DATA_SANDBOX_TEE_ADVERTISE_HOST', '222.20.99.38')
 CONTRACT_CENTER_URL = f'https://{CONTRACT_HOST}:{CONTRACT_PORT}'
 SOURCES = {
@@ -326,6 +329,7 @@ def port_check(name):
     if name == 'center':
         ports.add(19685)
         ports.add(CONTRACT_PORT)
+        ports.add(CONSOLE_HTTPS_PORT)
     own = {f'data-sandbox-dev-{name}-{suffix}' for suffix in ['kuscia', 'secretpad']}
     ids = run('docker', 'ps', '-aq', capture=True).split()
     mapped = set()
@@ -491,7 +495,8 @@ def prepare():
                           '    -v "${DEV_ROOT}/tee/contract-client:/app/tee-contract-client:ro" \\\n'
                           '    -v "${DEV_ROOT}/tee/identity:/app/tee-identity-key:ro" \\\n'
                           '    ${TEE_TASK_SIGNER_MOUNT:-} \\\n'
-                          '    ${TEE_CONTRACT_SERVER_MOUNT:-} \\\n')
+                          '    ${TEE_CONTRACT_SERVER_MOUNT:-} \\\n'
+                          '    ${CIPHERGPU_CLIENT_MOUNT:-} \\\n')
     script = script.replace('docker run ', 'docker run --pull=never ').replace('docker create ', 'docker create --pull=never ')
     atomic(target / 'develop.sh', script, 0o700)
     data = manifest()
@@ -651,9 +656,15 @@ def up(name):
                TEE_KEY_ADAPTER_URL='https://data-sandbox-dev-center-key-adapter:8090' if name == 'center' else '',
                # 中心端发布平台间契约入口；客户端实例只持有调用地址，不开放任何入口。
                TEE_CONTRACT_PORT='8443' if name == 'center' else '0',
-               TEE_CONTRACT_PORT_ARGS='-p 19686:8443' if name == 'center' else '',
+               # 中心端同时发布控制台 HTTPS 入口，供大模型管理三页取得安全上下文。
+               TEE_CONTRACT_PORT_ARGS=(f'-p {CONTRACT_PORT}:8443 -p {CONSOLE_HTTPS_PORT}:443'
+                                       if name == 'center' else ''),
                TEE_CONTRACT_SERVER_MOUNT=(
                    f'-v {RUNTIME / name}/tee/contract-server:/app/tee-contract-server:ro'
+                   if name == 'center' else ''),
+               # 控制面到 CipherGPU 的 mTLS 客户端材料，只在中心端挂载。
+               CIPHERGPU_CLIENT_MOUNT=(
+                   f'-v {RUNTIME / name}/confidential-compute/secretpad-client:/app/ciphergpu-client:ro'
                    if name == 'center' else ''),
                TEE_TASK_SIGNER_MOUNT=(
                    f'-v {RUNTIME / name}/tee/task-signer:/app/tee-task-signer:ro'
