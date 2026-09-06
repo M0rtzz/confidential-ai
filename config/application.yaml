@@ -262,6 +262,12 @@ sfclusterDesc:
 tee:
   capsule-manager: capsule-manager.#.svc
 
+# ds-confidential/v1 使用独立数据面。A100 仿真档位需显式声明，
+# 不满足任何要求 gpu-cc 运行时安全档位的资产。
+confidential-compute:
+  security-profile: ${CONFIDENTIAL_COMPUTE_SECURITY_PROFILE:a100-sim}
+  simulation-warning: ${CONFIDENTIAL_COMPUTE_SIMULATION_WARNING:A100 simulation has no GPU CC runtime isolation}
+
 data:
   sync:
     - org.secretflow.secretpad.persistence.entity.ProjectDO
