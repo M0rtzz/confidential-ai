@@ -239,4 +239,53 @@ class TeePolicyDeadlineTest {
         assertSame(current, service.resultSourcePolicy(policyId, "1"));
     }
 
+    private TeePolicyDO currentResultPolicy() {
+        Instant until = Instant.parse("2099-09-29T16:00:00Z");
+        deadline(until);
+        original.setReportKindsJson("[\"TREE_STRUCTURE\"]");
+        TeePolicyDO current = TeePolicyDO.builder().upk(new TeePolicyDO.UPK(policyId, "2"))
+                .assetId("asset-1").assetVersion("1").ownerId("owner-1").sandboxId("sandbox-1")
+                .columnsJson(original.getColumnsJson()).operatorsJson(original.getOperatorsJson())
+                .reportKindsJson(original.getReportKindsJson()).approvalId("apr-new").state("ACTIVE")
+                .expiresAt(until.toString()).build();
+        versions.add(current);
+        asset.setPolicyVersion("2");
+        return current;
+    }
+
+    @Test
+    void renewedApprovalPreservesHistoricalResultAccess() {
+        TeePolicyDO current = currentResultPolicy();
+        assertSame(current, service.resultSourcePolicy(policyId, "1"));
+        assertEquals("apr-1", original.getApprovalId());
+        verify(policies, never()).save(any());
+    }
+
+    @Test
+    void expandedGrantCoversHistoricalResultScope() {
+        TeePolicyDO current = currentResultPolicy();
+        current.setColumnsJson("[\"age\",\"income\"]");
+        current.setOperatorsJson("[\"sql.query\",\"python.execute\",\"model.predict\"]");
+        current.setReportKindsJson("[\"TREE_STRUCTURE\",\"EVALUATION\"]");
+        assertSame(current, service.resultSourcePolicy(policyId, "1"));
+        assertEquals("[\"age\"]", original.getColumnsJson());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"columns", "operators", "reports", "state", "asset", "version"})
+    void narrowedOrInvalidCurrentGrantRejectsHistoricalResult(String field) {
+        TeePolicyDO current = currentResultPolicy();
+        switch (field) {
+            case "columns" -> current.setColumnsJson("[]");
+            case "operators" -> current.setOperatorsJson("[\"sql.query\"]");
+            case "reports" -> current.setReportKindsJson("[]");
+            case "state" -> current.setState("REVOKED");
+            case "asset" -> current.setAssetId("other-asset");
+            case "version" -> current.setAssetVersion("2");
+            default -> fail("未覆盖的测试字段");
+        }
+        assertThrows(TeeException.class, () -> service.resultSourcePolicy(policyId, "1"));
+        verify(policies, never()).save(any());
+    }
+
 }
