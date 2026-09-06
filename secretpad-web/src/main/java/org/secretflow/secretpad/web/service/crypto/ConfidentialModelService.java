@@ -17,6 +17,8 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -26,6 +28,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** Ciphertext-only registry for local weights and OpenAI-compatible model endpoints. */
 @Service
@@ -43,6 +46,8 @@ public class ConfidentialModelService {
     private final ConfidentialMetadataStore audit;
     private final ConfidentialComputeService compute;
     private final CipherGpuClient cipherGpu;
+    private final Map<String, RateWindow> rateWindows = new ConcurrentHashMap<>();
+    private static final class RateWindow { long minute; int count; }
 
     public ConfidentialModelService(@Qualifier("jdbcTemplate") JdbcTemplate jdbc, ObjectMapper mapper,
             MinioAssetStorage storage, ConfidentialMetadataStore audit, ConfidentialComputeService compute,
@@ -80,6 +85,86 @@ public class ConfidentialModelService {
     public record AuthorizeDeploymentRequest(String taskId, String grantId) {
     }
 
+    public Map<String, Object> createRuntimeApiKey(String ownerId, String deploymentId) {
+        Map<String, Object> deployment = deployment(ownerId, deploymentId);
+        if (!"ONLINE".equals(text(deployment.get("status")))) throw invalid("仅运行中的模型可以创建 API Key");
+        JsonNode actual = cipherGpu.modelDeployment(deploymentId);
+        if (!"ONLINE".equals(actual.path("status").asText())) throw invalid("模型运行实例未通过在线检查");
+        byte[] value = new byte[32];
+        new SecureRandom().nextBytes(value);
+        String raw = "dsllm_" + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(value);
+        String keyId = id("llmkey");
+        String now = Instant.now().toString();
+        jdbc.update("insert into ds_confidential_model_api_key(key_id,owner_id,deployment_id,key_prefix,key_hash,status,"
+                        + "rate_limit_per_minute,created_at) values(?,?,?,?,?,'ACTIVE',60,?)",
+                keyId, ownerId, deploymentId, raw.substring(0, Math.min(raw.length(), 16)), sha256(raw), now);
+        audit.audit(ownerId, "CONFIDENTIAL_MODEL_API_KEY_CREATED", keyId,
+                mapper.valueToTree(Map.of("deploymentId", deploymentId)));
+        return Map.of("keyId", keyId, "apiKey", raw, "prefix", raw.substring(0, 16), "createdAt", now);
+    }
+
+    public List<Map<String, Object>> runtimeApiKeys(String ownerId, String deploymentId) {
+        deployment(ownerId, deploymentId);
+        return jdbc.queryForList("select key_id,key_prefix,status,rate_limit_per_minute,created_at,revoked_at,last_used_at "
+                + "from ds_confidential_model_api_key where owner_id=? and deployment_id=? order by created_at desc",
+                ownerId, deploymentId).stream().map(row -> Map.<String, Object>of(
+                        "keyId", row.get("key_id"), "keyPrefix", row.get("key_prefix"),
+                        "status", row.get("status"), "rateLimitPerMinute", row.get("rate_limit_per_minute"),
+                        "createdAt", text(row.get("created_at")), "revokedAt", text(row.get("revoked_at")),
+                        "lastUsedAt", text(row.get("last_used_at")))).toList();
+    }
+
+    public void revokeRuntimeApiKey(String ownerId, String keyId) {
+        int changed = jdbc.update("update ds_confidential_model_api_key set status='REVOKED',revoked_at=? "
+                        + "where key_id=? and owner_id=? and status='ACTIVE'", Instant.now().toString(), keyId, ownerId);
+        if (changed != 1) throw invalid("API Key 不存在或已吊销");
+        audit.audit(ownerId, "CONFIDENTIAL_MODEL_API_KEY_REVOKED", keyId, mapper.createObjectNode());
+    }
+
+    public JsonNode invokeRuntimeApi(String authorization, JsonNode request) {
+        if (authorization == null || !authorization.startsWith("Bearer ")) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "缺少 Bearer API Key");
+        }
+        String raw = authorization.substring(7).trim();
+        if (!raw.startsWith("dsllm_") || raw.length() > 128) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "API Key 无效");
+        }
+        List<Map<String, Object>> rows = jdbc.queryForList("select k.*,d.status as deployment_status,m.name as model_name "
+                + "from ds_confidential_model_api_key k join ds_model_deployment d on k.deployment_id=d.deployment_id "
+                + "join ds_confidential_model m on d.model_id=m.model_id where k.key_hash=? and k.status='ACTIVE'",
+                sha256(raw));
+        if (rows.size() != 1) throw TeeException.of(TeeContract.Error.POLICY_DENIED, "API Key 无效或已吊销");
+        Map<String, Object> key = rows.get(0);
+        if (!"ONLINE".equals(text(key.get("deployment_status")))) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "模型实例未运行");
+        }
+        if (!request.isObject() || !request.path("messages").isArray() || write(request).length() > 1024 * 1024) {
+            throw invalid("请求必须是有效的 chat/completions JSON 且不超过 1 MiB");
+        }
+        String requestedModel = requireText(request.path("model").asText(), "model");
+        if (!requestedModel.equals(text(key.get("model_name")))) {
+            throw invalid("请求中的 model 与 API Key 所属模型不匹配");
+        }
+        enforceRateLimit(text(key.get("key_id")), number(key.get("rate_limit_per_minute")));
+        JsonNode response = cipherGpu.runtimeChat(text(key.get("deployment_id")), request);
+        jdbc.update("update ds_confidential_model_api_key set last_used_at=? where key_id=?",
+                Instant.now().toString(), key.get("key_id"));
+        audit.audit(text(key.get("owner_id")), "CONFIDENTIAL_MODEL_API_INVOKED", text(key.get("key_id")),
+                mapper.valueToTree(Map.of("deploymentId", key.get("deployment_id"))));
+        return response;
+    }
+
+    private void enforceRateLimit(String keyId, int limit) {
+        long minute = System.currentTimeMillis() / 60_000L;
+        RateWindow window = rateWindows.computeIfAbsent(keyId, ignored -> new RateWindow());
+        synchronized (window) {
+            if (window.minute != minute) { window.minute = minute; window.count = 0; }
+            if (++window.count > Math.max(1, limit)) {
+                throw TeeException.of(TeeContract.Error.POLICY_DENIED, "API Key 调用频率超过限制");
+            }
+        }
+    }
+
     public Map<String, Object> capabilities() {
         List<Map<String, Object>> values = new ArrayList<>();
         values.add(capability("AES-256-GCM", 32, 12, true));
@@ -94,7 +179,7 @@ public class ConfidentialModelService {
     @Transactional
     public Map<String, Object> createUploadSession(String ownerId, UploadSessionRequest request) {
         requireText(request.modelName(), "modelName");
-        requireText(request.originalFileName(), "originalFileName");
+        requireModelPackageName(request.originalFileName());
         compute.requireUsableDomain(requireText(request.domainId(), "domainId"));
         requireAlgorithm(request.contentEncryptionAlgorithm());
         if (request.originalSize() <= 0 || request.expectedChunks() <= 0) {
@@ -208,6 +293,8 @@ public class ConfidentialModelService {
         insertVersion(ownerId, modelId, versionId, version, LOCAL_WEIGHTS, text(session.get("domain_id")),
                 text(session.get("content_encryption_algorithm")), assetVersionId, manifestJson, manifestHash,
                 null, null, null, request.runtimeConfig(), requirement(request.runtimeSecurityRequirement()));
+        jdbc.update("update ds_confidential_model_version set upload_session_id=? where version_id=?",
+                request.uploadSessionId(), versionId);
         jdbc.update("update ds_confidential_upload_session set status='COMMITTED' where upload_session_id=?",
                 request.uploadSessionId());
         updateLatest(modelId, version, "IMPORTED");
@@ -256,24 +343,76 @@ public class ConfidentialModelService {
                         + "left join ds_confidential_model_version v on v.model_id=m.model_id "
                         + "and v.version_number=m.latest_version where m.owner_id=? order by m.updated_at desc",
                 ownerId);
+        // The operator runtime view is built from this list endpoint.  Returning
+        // only modelView here used to omit deployments, making a successfully
+        // running instance indistinguishable from an empty runtime list.  Use
+        // the same projection as the detail endpoint so list and detail have
+        // one authoritative representation of versions and runtime instances.
         List<Map<String, Object>> result = new ArrayList<>();
-        for (Map<String, Object> row : rows) result.add(modelView(row));
+        for (Map<String, Object> row : rows) {
+            result.add(modelDetail(ownerId, text(row.get("model_id"))));
+        }
         return result;
+    }
+
+    /**
+     * Platform-safe node runtime projection.  This deliberately does not use
+     * the model owner filter: an operator must be able to see every instance
+     * scheduled on this node, while model packages, manifests, credentials and
+     * API keys remain unavailable from this endpoint.
+     */
+    public List<Map<String, Object>> runtimeInstances() {
+        return jdbc.queryForList("select d.deployment_id deploymentId,d.version_id versionId,"
+                        + "d.deployment_type deploymentType,d.security_profile securityProfile,d.status,"
+                        + "d.endpoint_path endpointPath,d.error_code errorCode,d.created_at createdAt,"
+                        + "d.updated_at updatedAt,m.model_id modelId,m.name modelName,v.version_number version "
+                        + "from ds_model_deployment d join ds_confidential_model m on d.model_id=m.model_id "
+                        + "left join ds_confidential_model_version v on d.version_id=v.version_id "
+                        + "order by d.updated_at desc");
     }
 
     public Map<String, Object> modelDetail(String ownerId, String modelId) {
         Map<String, Object> model = model(ownerId, modelId);
+        reconcileRuntimeState(ownerId, modelId);
+        model = model(ownerId, modelId);
         Map<String, Object> result = modelView(model);
         List<Map<String, Object>> versions = jdbc.queryForList(
                 "select * from ds_confidential_model_version where owner_id=? and model_id=? order by version_number desc",
                 ownerId, modelId);
         result.put("versions", versions.stream().map(this::versionView).toList());
+        if (!versions.isEmpty()) {
+            Map<String, Object> latest = versions.get(0);
+            result.put("versionId", latest.get("version_id"));
+            result.put("domainId", latest.get("domain_id"));
+            result.put("contentEncryptionAlgorithm", latest.get("content_encryption_algorithm"));
+            result.put("runtimeSecurityRequirement", latest.get("runtime_security_requirement"));
+        }
         result.put("deployments", jdbc.queryForList("select deployment_id deploymentId,version_id versionId,"
                         + "deployment_type deploymentType,security_profile securityProfile,status,endpoint_path endpointPath,"
                         + "authorization_session_id authorizationSessionId,error_code errorCode,created_at createdAt,"
                         + "updated_at updatedAt from ds_model_deployment where owner_id=? and model_id=? order by updated_at desc",
                 ownerId, modelId));
         return result;
+    }
+
+    private void reconcileRuntimeState(String ownerId, String modelId) {
+        List<Map<String, Object>> online = jdbc.queryForList("select deployment_id from ds_model_deployment "
+                + "where owner_id=? and model_id=? and status='ONLINE'", ownerId, modelId);
+        for (Map<String, Object> row : online) {
+            String deploymentId = text(row.get("deployment_id"));
+            try {
+                if ("ONLINE".equals(cipherGpu.modelDeployment(deploymentId).path("status").asText())) continue;
+            } catch (RuntimeException ignored) {
+                // An ephemeral node runtime disappears on restart. Fail closed
+                // and require a fresh owner authorization instead of showing a
+                // database-only ONLINE state.
+            }
+            String now = Instant.now().toString();
+            jdbc.update("update ds_model_deployment set status='OFFLINE',authorization_session_id=null,"
+                    + "error_code='RUNTIME_NOT_FOUND',updated_at=? where deployment_id=?", now, deploymentId);
+            jdbc.update("update ds_confidential_model set status='OFFLINE',updated_at=? where model_id=?", now, modelId);
+            saveRuntime(deploymentId, "OFFLINE", null, null, "RUNTIME_NOT_FOUND");
+        }
     }
 
     @Transactional
@@ -356,20 +495,37 @@ public class ConfidentialModelService {
         if (!"AUTHORIZATION_REQUIRED".equals(text(deployment.get("status")))) {
             throw invalid("部署当前不需要授权");
         }
-        JsonNode execution = compute.start(ownerId, requireText(request.taskId(), "taskId"),
-                requireText(request.grantId(), "grantId"));
-        if (!"SUCCEEDED".equals(execution.path("status").asText())) throw invalid("授权执行未成功");
-        String sessionId = execution.path("receipt").path("sessionId").asText();
-        String runtimeStatus = execution.path("receipt").path("modelDeploymentStatus").asText();
-        if (!Set.of("ONLINE", "RUNTIME_REQUIRED").contains(runtimeStatus)) {
-            throw invalid("任务 workloadId 未绑定该模型部署");
+        Map<String, Object> version = version(ownerId, text(deployment.get("model_id")), text(deployment.get("version_id")));
+        JsonNode execution;
+        String sessionId;
+        String runtimeStatus;
+        if (LOCAL_WEIGHTS.equals(text(version.get("source_type")))) {
+            String uploadSessionId = requireText(text(version.get("upload_session_id")), "uploadSessionId");
+            List<Map<String, Object>> chunks = jdbc.queryForList("select chunk_index,object_uri,cipher_hash,cipher_size "
+                    + "from ds_confidential_upload_chunk where upload_session_id=? order by chunk_index", uploadSessionId);
+            execution = compute.startModelStream(ownerId, requireText(request.taskId(), "taskId"),
+                    requireText(request.grantId(), "grantId"), deploymentId, text(version.get("asset_version_id")),
+                    readJson(text(version.get("manifest_json"))), chunks, storage);
+            sessionId = execution.path("sessionId").asText();
+            runtimeStatus = execution.path("status").asText();
+        } else {
+            execution = compute.start(ownerId, requireText(request.taskId(), "taskId"),
+                    requireText(request.grantId(), "grantId"));
+            if (!"SUCCEEDED".equals(execution.path("status").asText())) throw invalid("授权执行未成功");
+            sessionId = execution.path("receipt").path("sessionId").asText();
+            runtimeStatus = execution.path("receipt").path("modelDeploymentStatus").asText();
         }
+        if (!"ONLINE".equals(runtimeStatus)) throw invalid("模型运行时未通过健康检查");
         String now = Instant.now().toString();
         jdbc.update("update ds_model_deployment set status=?,authorization_session_id=?,error_code=?,updated_at=? "
                 + "where deployment_id=?", runtimeStatus, sessionId,
-                "RUNTIME_REQUIRED".equals(runtimeStatus) ? "VLLM_ENDPOINT_NOT_CONFIGURED" : null, now, deploymentId);
+                null, now, deploymentId);
         jdbc.update("update ds_confidential_model set status=?,updated_at=? where model_id=?", runtimeStatus, now,
                 text(deployment.get("model_id")));
+        saveRuntime(deploymentId, runtimeStatus, execution.path("runtimePort").isInt()
+                ? execution.path("runtimePort").asInt() : null,
+                execution.path("runtimePid").isInt() ? execution.path("runtimePid").asText() : null,
+                execution.path("errorCode").asText(null));
         audit.audit(ownerId, "A100_SIMULATED_MODEL_ONLINE", deploymentId,
                 mapper.valueToTree(Map.of("sessionId", sessionId, "simulated", true)));
         return deploymentView(deployment(ownerId, deploymentId));
@@ -386,10 +542,70 @@ public class ConfidentialModelService {
         String modelStatus = cancelledBeforeAuthorization ? "APPROVED" : "OFFLINE";
         jdbc.update("update ds_confidential_model set status=?,updated_at=? where model_id=?", modelStatus, now,
                 text(deployment.get("model_id")));
+        saveRuntime(deploymentId, "OFFLINE", null, null, null);
         audit.audit(ownerId, cancelledBeforeAuthorization
                         ? "MODEL_DEPLOYMENT_AUTHORIZATION_CANCELLED" : "CONFIDENTIAL_MODEL_OFFLINE",
                 deploymentId, mapper.valueToTree(Map.of("sessionKeysDestroyed", true,
                         "authorizationConsumed", !cancelledBeforeAuthorization, "simulated", true)));
+        return deploymentView(deployment(ownerId, deploymentId));
+    }
+
+    @Transactional
+    public Map<String, Object> restart(String ownerId, String deploymentId) {
+        Map<String, Object> deployment = deployment(ownerId, deploymentId);
+        if (!Set.of("OFFLINE", "FAILED").contains(text(deployment.get("status")))) {
+            throw invalid("仅已下线或失败的部署可以重新启动");
+        }
+        Map<String, Object> version = version(ownerId, text(deployment.get("model_id")),
+                text(deployment.get("version_id")));
+        Map<String, Object> registration = new LinkedHashMap<>();
+        registration.put("deploymentId", deploymentId);
+        registration.put("sourceType", version.get("source_type"));
+        registration.put("baseUrl", version.get("base_url"));
+        registration.put("upstreamModelId", OPENAI_COMPATIBLE.equals(text(version.get("source_type")))
+                ? version.get("upstream_model_id")
+                : runtimeModelName(version.get("runtime_config_json"), text(deployment.get("model_id"))));
+        registration.put("timeoutSeconds", runtimeTimeout(version.get("runtime_config_json")));
+        registration.put("securityProfile", "a100-sim");
+        registration.put("simulated", true);
+        JsonNode registered = cipherGpu.registerModelDeployment(registration);
+        if (!"AUTHORIZATION_REQUIRED".equals(registered.path("status").asText())) {
+            throw invalid("CipherGPU 未进入重新授权状态");
+        }
+        String now = Instant.now().toString();
+        jdbc.update("update ds_model_deployment set status='AUTHORIZATION_REQUIRED',error_code=null,updated_at=? "
+                + "where deployment_id=?", now, deploymentId);
+        jdbc.update("update ds_confidential_model set status='PUBLISHING',updated_at=? where model_id=?", now,
+                deployment.get("model_id"));
+        audit.audit(ownerId, "CONFIDENTIAL_MODEL_RUNTIME_RESTART_REQUESTED", deploymentId,
+                mapper.valueToTree(Map.of("freshAuthorizationRequired", true)));
+        return deploymentView(deployment(ownerId, deploymentId));
+    }
+
+    public Map<String, Object> runtimeLogs(String ownerId, String deploymentId) {
+        deployment(ownerId, deploymentId);
+        JsonNode result = cipherGpu.modelDeploymentLogs(deploymentId);
+        return Map.of("deploymentId", deploymentId, "status", result.path("status").asText(),
+                "logs", result.path("logs").asText());
+    }
+
+    /** Retires the runtime instance. Ciphertext model artifacts and audit evidence remain retained. */
+    @Transactional
+    public Map<String, Object> destroy(String ownerId, String deploymentId) {
+        Map<String, Object> deployment = deployment(ownerId, deploymentId);
+        String current = text(deployment.get("status"));
+        if (!"DESTROYED".equals(current)) cipherGpu.offlineModelDeployment(deploymentId);
+        String now = Instant.now().toString();
+        jdbc.update("update ds_model_deployment set status='DESTROYED',authorization_session_id=null,"
+                        + "error_code=null,updated_at=? where deployment_id=?", now, deploymentId);
+        jdbc.update("update ds_confidential_model set status='APPROVED',updated_at=? where model_id=?",
+                now, text(deployment.get("model_id")));
+        saveRuntime(deploymentId, "DESTROYED", null, null, null);
+        jdbc.update("update ds_confidential_model_api_key set status='REVOKED',revoked_at=? "
+                + "where deployment_id=? and status='ACTIVE'", now, deploymentId);
+        audit.audit(ownerId, "CONFIDENTIAL_MODEL_RUNTIME_DESTROYED", deploymentId,
+                mapper.valueToTree(Map.of("ciphertextRetained", true, "temporaryKeysDestroyed", true,
+                        "simulated", true)));
         return deploymentView(deployment(ownerId, deploymentId));
     }
 
@@ -404,6 +620,15 @@ public class ConfidentialModelService {
                         body.path("encryptedRequest").path("cipherHash").asText(),
                         "securityProfile", "a100-sim", "simulated", true)));
         return result;
+    }
+
+    public JsonNode runtimeChatForOwner(String ownerId, String deploymentId, JsonNode request) {
+        Map<String, Object> deployment = deployment(ownerId, deploymentId);
+        if (!"ONLINE".equals(text(deployment.get("status")))) throw invalid("模型部署未上线");
+        JsonNode response = cipherGpu.runtimeChat(deploymentId, requireObject(request, "request"));
+        audit.audit(ownerId, "CONFIDENTIAL_MODEL_WEB_CHAT", deploymentId,
+                mapper.valueToTree(Map.of("transport", "HTTPS+mTLS")));
+        return response;
     }
 
     private Map<String, Object> capability(String algorithm, int keySize, int nonceSize, boolean recommended) {
@@ -540,6 +765,7 @@ public class ConfidentialModelService {
         value.put("contentEncryptionAlgorithm", row.get("content_encryption_algorithm"));
         value.put("assetVersionId", row.get("asset_version_id"));
         value.put("manifestHash", row.get("manifest_hash"));
+        value.put("manifest", row.get("manifest_json") == null ? null : readJson(text(row.get("manifest_json"))));
         value.put("baseUrl", row.get("base_url"));
         value.put("upstreamModelId", row.get("upstream_model_id"));
         value.put("credentialId", row.get("credential_id"));
@@ -564,8 +790,8 @@ public class ConfidentialModelService {
     }
 
     private int runtimeTimeout(Object json) {
-        if (json == null) return 60;
-        int value = ConfidentialCanonical.parse(mapper, text(json)).path("timeoutSeconds").asInt(60);
+        if (json == null) return 180;
+        int value = ConfidentialCanonical.parse(mapper, text(json)).path("timeoutSeconds").asInt(180);
         return Math.max(5, Math.min(300, value));
     }
 
@@ -618,6 +844,15 @@ public class ConfidentialModelService {
         return result;
     }
 
+    private String requireModelPackageName(String value) {
+        String name = requireText(value, "originalFileName");
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (!lower.endsWith(".zip") && !lower.endsWith(".tar") && !lower.endsWith(".tar.gz")) {
+            throw invalid("大模型必须上传 ZIP、TAR 或 TAR.GZ 格式的完整模型包");
+        }
+        return name;
+    }
+
     private void requireAlgorithm(String algorithm) {
         if (!ALGORITHMS.contains(algorithm)) throw invalid("不支持或未启用的内容加密算法");
     }
@@ -645,8 +880,25 @@ public class ConfidentialModelService {
         }
     }
 
+    private JsonNode readJson(String value) {
+        try {
+            return mapper.readTree(value);
+        } catch (Exception failure) {
+            throw invalid("模型密文清单损坏");
+        }
+    }
+
     private static String id(String prefix) {
         return prefix + "_" + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private static String sha256(String value) {
+        try {
+            return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception failure) {
+            throw new IllegalStateException("SHA-256 unavailable", failure);
+        }
     }
 
     private static String safe(String value) {
@@ -659,6 +911,26 @@ public class ConfidentialModelService {
 
     private static int number(Object value) {
         return value instanceof Number number ? number.intValue() : Integer.parseInt(text(value));
+    }
+
+    private void saveRuntime(String deploymentId, String status, Integer port, String pid, String error) {
+        String now = Instant.now().toString();
+        Integer count = jdbc.queryForObject("select count(1) from ds_confidential_model_runtime where deployment_id=?",
+                Integer.class, deploymentId);
+        if (count != null && count > 0) {
+            jdbc.update("update ds_confidential_model_runtime set runtime_status=?,runtime_endpoint=?,runtime_pid=?,"
+                    + "runtime_port=?,last_health_at=?,last_error=?,updated_at=? where deployment_id=?", status,
+                    port == null ? null : "http://127.0.0.1:" + port + "/v1", pid, port,
+                    "ONLINE".equals(status) ? now : null, error, now, deploymentId);
+        } else {
+            jdbc.update("insert into ds_confidential_model_runtime(deployment_id,runtime_status,runtime_endpoint,"
+                    + "runtime_pid,runtime_port,started_at,stopped_at,last_health_at,last_error,updated_at) "
+                    + "values(?,?,?,?,?,?,?,?,?,?)",
+                    deploymentId, status, port == null ? null : "http://127.0.0.1:" + port + "/v1", pid, port,
+                    "ONLINE".equals(status) ? now : null,
+                    Set.of("OFFLINE", "DESTROYED").contains(status) ? now : null,
+                    "ONLINE".equals(status) ? now : null, error, now);
+        }
     }
 
     private static TeeException invalid(String message) {

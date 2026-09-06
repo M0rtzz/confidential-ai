@@ -16,6 +16,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
+import java.io.InputStream;
 import java.time.Duration;
 
 /** mTLS-only client for the CipherGPU data plane. */
@@ -58,12 +59,58 @@ public class CipherGpuClient {
         return send("POST", "/v1/model-deployments", request);
     }
 
+    public JsonNode modelDeployment(String deploymentId) {
+        return send("GET", "/v1/model-deployments/" + deploymentId, null);
+    }
+
+    public JsonNode modelDeploymentLogs(String deploymentId) {
+        return send("GET", "/v1/model-deployments/" + deploymentId + "/logs", null);
+    }
+
     public JsonNode offlineModelDeployment(String deploymentId) {
         return send("POST", "/v1/model-deployments/" + deploymentId + "/offline", java.util.Map.of());
     }
 
     public JsonNode infer(Object request) {
         return send("POST", "/v1/confidential-inference/chat/completions", request, Duration.ofSeconds(310));
+    }
+
+    /** mTLS-only forwarding path for a customer API request already authenticated by the control plane. */
+    public JsonNode runtimeChat(String deploymentId, Object request) {
+        return send("POST", "/v1/model-deployments/" + deploymentId + "/chat/completions", request,
+                Duration.ofSeconds(310));
+    }
+
+    public JsonNode prepareModelStream(String deploymentId, Object request) {
+        return send("POST", "/v1/model-deployments/" + deploymentId + "/stream/prepare", request);
+    }
+
+    public JsonNode uploadModelStreamChunk(String deploymentId, int index, InputStream input) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/model-deployments/"
+                            + deploymentId + "/stream/chunks/" + index))
+                    .timeout(Duration.ofMinutes(5)).header("Content-Type", "application/octet-stream")
+                    .PUT(HttpRequest.BodyPublishers.ofInputStream(() -> input)).build();
+            HttpResponse<String> response = client().send(request, HttpResponse.BodyHandlers.ofString());
+            JsonNode body = mapper.readTree(response.body());
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw TeeException.of(TeeContract.Error.POLICY_DENIED,
+                        body.path("error").path("code").asText("CIPHERGPU_STREAM_REJECTED"));
+            }
+            return body;
+        } catch (TeeException rejected) {
+            throw rejected;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw TeeException.of(TeeContract.Error.KEY_SERVICE_UNAVAILABLE, "模型流式传输被中断");
+        } catch (Exception failure) {
+            throw TeeException.of(TeeContract.Error.KEY_SERVICE_UNAVAILABLE, "模型流式传输失败");
+        }
+    }
+
+    public JsonNode finalizeModelStream(String deploymentId) {
+        return send("POST", "/v1/model-deployments/" + deploymentId + "/stream/finalize", java.util.Map.of(),
+                Duration.ofMinutes(10));
     }
 
     private JsonNode send(String method, String path, Object payload) {

@@ -35,6 +35,12 @@ public class ConfidentialModelController implements CryptoApi {
         return SecretPadResponse.success(service.models(owner()));
     }
 
+    /** Platform runtime view: no model package, plaintext or credential fields. */
+    @GetMapping("/runtime-instances")
+    public SecretPadResponse<List<Map<String, Object>>> runtimeInstances() {
+        return SecretPadResponse.success(service.runtimeInstances());
+    }
+
     @GetMapping("/{modelId}")
     public SecretPadResponse<Map<String, Object>> model(@PathVariable String modelId) {
         return SecretPadResponse.success(service.modelDetail(owner(), modelId));
@@ -86,6 +92,43 @@ public class ConfidentialModelController implements CryptoApi {
     @PostMapping("/deployments/{deploymentId}/offline")
     public SecretPadResponse<Map<String, Object>> offline(@PathVariable String deploymentId) {
         return SecretPadResponse.success(service.offline(owner(), deploymentId));
+    }
+
+    @PostMapping("/deployments/{deploymentId}/restart")
+    public SecretPadResponse<Map<String, Object>> restart(@PathVariable String deploymentId) {
+        return SecretPadResponse.success(service.restart(owner(), deploymentId));
+    }
+
+    @GetMapping("/deployments/{deploymentId}/logs")
+    public SecretPadResponse<Map<String, Object>> logs(@PathVariable String deploymentId) {
+        return SecretPadResponse.success(service.runtimeLogs(owner(), deploymentId));
+    }
+
+    @PostMapping("/deployments/{deploymentId}/destroy")
+    public SecretPadResponse<Map<String, Object>> destroy(@PathVariable String deploymentId) {
+        return SecretPadResponse.success(service.destroy(owner(), deploymentId));
+    }
+
+    @PostMapping("/deployments/{deploymentId}/api-keys")
+    public SecretPadResponse<Map<String, Object>> createApiKey(@PathVariable String deploymentId) {
+        return SecretPadResponse.success(service.createRuntimeApiKey(owner(), deploymentId));
+    }
+
+    @GetMapping("/deployments/{deploymentId}/api-keys")
+    public SecretPadResponse<List<Map<String, Object>>> apiKeys(@PathVariable String deploymentId) {
+        return SecretPadResponse.success(service.runtimeApiKeys(owner(), deploymentId));
+    }
+
+    @PostMapping("/api-keys/{keyId}/revoke")
+    public SecretPadResponse<Void> revokeApiKey(@PathVariable String keyId) {
+        service.revokeRuntimeApiKey(owner(), keyId);
+        return SecretPadResponse.success();
+    }
+
+    @PostMapping("/deployments/{deploymentId}/chat/completions")
+    public SecretPadResponse<com.fasterxml.jackson.databind.JsonNode> runtimeChat(
+            @PathVariable String deploymentId, @RequestBody com.fasterxml.jackson.databind.JsonNode request) {
+        return SecretPadResponse.success(service.runtimeChatForOwner(owner(), deploymentId, request));
     }
 
     private static String owner() {

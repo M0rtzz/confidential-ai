@@ -1,0 +1,4 @@
+alter table ds_confidential_model_version add column upload_session_id varchar(128);
+create table if not exists ds_confidential_model_runtime (deployment_id varchar(128) primary key, runtime_status varchar(32) not null, runtime_endpoint varchar(512), runtime_pid varchar(64), runtime_port integer, started_at varchar(64), stopped_at varchar(64), last_health_at varchar(64), last_error text, updated_at varchar(64) not null);
+create table if not exists ds_confidential_model_api_key (key_id varchar(128) primary key, owner_id varchar(128) not null, deployment_id varchar(128) not null, key_prefix varchar(32) not null, key_hash varchar(128) not null, status varchar(32) not null, rate_limit_per_minute integer not null, created_at varchar(64) not null, revoked_at varchar(64), last_used_at varchar(64));
+create index if not exists idx_confidential_model_api_key_deployment on ds_confidential_model_api_key(deployment_id, status);

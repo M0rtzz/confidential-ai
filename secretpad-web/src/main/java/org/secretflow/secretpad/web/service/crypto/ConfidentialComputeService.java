@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.secretflow.secretpad.web.service.tee.TeeContract;
 import org.secretflow.secretpad.web.service.tee.TeeException;
+import org.secretflow.secretpad.web.service.MinioAssetStorage;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -231,6 +232,53 @@ public class ConfidentialComputeService {
         store.audit(ownerId, "A100_SIMULATED_EXECUTION_COMPLETED", response.path("executionId").asText(),
                 mapper.valueToTree(Map.of("taskId", taskId, "outputCiphertextSha256",
                         response.path("encryptedOutput").path("ciphertextSha256").asText(), "simulated", true)));
+        return response;
+    }
+
+    public JsonNode startModelStream(String ownerId, String taskId, String grantId, String deploymentId,
+                                     String assetVersionId, JsonNode manifest,
+                                     List<Map<String, Object>> storedChunks, MinioAssetStorage storage) {
+        ConfidentialMetadataStore.TaskRow task = store.task(ownerId, taskId);
+        ConfidentialMetadataStore.GrantRow grant = store.consumeGrant(ownerId, grantId);
+        if (!taskId.equals(grant.taskId())) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "grant 与模型部署任务不匹配");
+        }
+        ObjectNode prepare = mapper.createObjectNode();
+        prepare.set("taskSpec", task.spec());
+        prepare.put("taskSpecDigest", task.digest());
+        prepare.put("sessionId", grant.sessionId());
+        prepare.set("grant", grant.payload().path("grant"));
+        JsonNode sealed = grant.payload().path("sealedDeks").path(0);
+        prepare.set("sealedDek", sealed);
+        prepare.put("assetVersionId", assetVersionId);
+        var normalized = mapper.createArrayNode();
+        for (JsonNode chunk : manifest.path("chunks")) {
+            ObjectNode item = mapper.createObjectNode();
+            item.put("index", chunk.path("index").asInt());
+            item.put("format", manifest.path("format").asText("ds-envelope/v2"));
+            item.put("envelopeId", manifest.path("envelopeId").asText());
+            item.put("implementationVersion",
+                    manifest.path("contentEncryption").path("implementationVersion").asText("1"));
+            item.put("algorithm", manifest.path("algorithm").asText());
+            item.put("nonce", chunk.path("nonce").asText());
+            item.set("aad", chunk.path("aad"));
+            item.put("ciphertextSha256", chunk.path("sha256").asText());
+            normalized.add(item);
+        }
+        prepare.set("chunks", normalized);
+        cipherGpu.prepareModelStream(deploymentId, prepare);
+        for (int index = 0; index < storedChunks.size(); index++) {
+            Map<String, Object> chunk = storedChunks.get(index);
+            try (var input = storage.open(String.valueOf(chunk.get("object_uri")))) {
+                cipherGpu.uploadModelStreamChunk(deploymentId, index, input);
+            } catch (java.io.IOException failure) {
+                throw TeeException.of(TeeContract.Error.KEY_SERVICE_UNAVAILABLE, "读取模型密文分块失败");
+            }
+        }
+        JsonNode response = cipherGpu.finalizeModelStream(deploymentId);
+        store.audit(ownerId, "CONFIDENTIAL_MODEL_STREAM_DEPLOYED", deploymentId,
+                mapper.valueToTree(Map.of("taskId", taskId, "assetVersionId", assetVersionId,
+                        "chunks", storedChunks.size())));
         return response;
     }
 
