@@ -72,7 +72,7 @@ class TeeExportDeadlineTest {
                         .taskJws(compact).status("SUCCEEDED").receiptVerified(true).build()));
         policy = TeePolicyDO.builder().upk(new TeePolicyDO.UPK("policy-1", "1"))
                 .state("ACTIVE").expiresAt(upperBound.toString()).build();
-        when(policies.require("policy-1", "1")).thenReturn(policy);
+        when(policies.resultSourcePolicy("policy-1", "1")).thenReturn(policy);
         X509Certificate certificate = mock(X509Certificate.class);
         when(certificate.getEncoded()).thenReturn(new byte[]{1, 2, 3});
         certificateSha = TeeCrypto.certificateSha256(certificate);

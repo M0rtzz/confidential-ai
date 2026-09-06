@@ -71,7 +71,7 @@ class TeeModelReportAccessTest {
                 .status("SUCCEEDED").receiptVerified(true).build();
         when(objects.findById(any())).thenReturn(Optional.of(model));
         when(tasks.findById(any())).thenReturn(Optional.of(training));
-        when(policies.require("policy-1", "1")).thenReturn(sourcePolicy);
+        when(policies.resultSourcePolicy("policy-1", "1")).thenReturn(sourcePolicy);
         when(policies.reportKinds(sourcePolicy)).thenReturn(List.of(TeeModelReportAccess.REPORT_KIND));
         when(keys.require("model-key", "1")).thenReturn(key);
         when(keys.require("source-key", "1")).thenReturn(key);

@@ -88,7 +88,7 @@ public class TeeModelReportAccess {
         LinkedHashSet<String> contributors = new LinkedHashSet<>();
         List<Object> fingerprint = new ArrayList<>();
         for (TeeTaskSpec.Input input : source.inputs()) {
-            TeePolicyDO policy = policies.require(input.policyId(), String.valueOf(input.policyVersion()));
+            TeePolicyDO policy = policies.resultSourcePolicy(input.policyId(), String.valueOf(input.policyVersion()));
             if (!input.assetId().equals(policy.getAssetId())
                     || !String.valueOf(input.assetVersion()).equals(policy.getAssetVersion())
                     || !sandboxId.equals(policy.getSandboxId())) {
@@ -118,7 +118,7 @@ public class TeeModelReportAccess {
                 grantId = grant.get("id").toString();
             }
             contributors.add(policy.getOwnerId());
-            fingerprint.add(List.of(input, policy.getExpiresAt(), policy.getState(),
+            fingerprint.add(List.of(input, policy.getUpk(), policy.getExpiresAt(), policy.getState(),
                     policy.getOperatorsJson(), policy.getReportKindsJson(), grantId));
         }
         // 模型的贡献方集合必须与来源一致，不能只使用模型所属的中心机构。

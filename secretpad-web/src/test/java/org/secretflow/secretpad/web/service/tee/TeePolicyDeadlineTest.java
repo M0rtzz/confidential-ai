@@ -147,4 +147,66 @@ class TeePolicyDeadlineTest {
         verifyNoInteractions(approvals);
         verify(policies, never()).save(any());
     }
+
+    @Test
+    void resultSourcePolicyRefreshesExpiredOriginalToCurrentDeadline() {
+        Instant until = Instant.parse("2099-09-29T16:00:00Z");
+        deadline(until);
+
+        TeePolicyDO result = service.resultSourcePolicy(policyId, "1");
+
+        assertEquals(policyId, result.getUpk().getPolicyId());
+        assertEquals("2", result.getUpk().getPolicyVersion());
+        assertEquals(until.toString(), result.getExpiresAt());
+        assertEquals("1", original.getUpk().getPolicyVersion());
+        assertEquals("2", asset.getPolicyVersion());
+        assertEquals(original.getColumnsJson(), result.getColumnsJson());
+        assertEquals(original.getOperatorsJson(), result.getOperatorsJson());
+        assertEquals(original.getReportKindsJson(), result.getReportKindsJson());
+    }
+
+    @Test
+    void resultSourcePolicyRejectsRevokedOriginalBeforeRefresh() {
+        original.setState("REVOKED");
+
+        assertThrows(TeeException.class, () -> service.resultSourcePolicy(policyId, "1"));
+
+        verifyNoInteractions(approvals);
+        verify(policies, never()).save(any());
+        assertEquals("1", asset.getPolicyVersion());
+    }
+
+    @Test
+    void resultSourcePolicyRejectsDifferentCurrentPolicyId() {
+        TeePolicyDO other = TeePolicyDO.builder().upk(new TeePolicyDO.UPK("other-policy", "1"))
+                .assetId("asset-1").assetVersion("1").ownerId("owner-1").sandboxId("sandbox-1")
+                .columnsJson("[\"age\"]").operatorsJson("[\"sql.query\",\"python.execute\"]")
+                .reportKindsJson("[]").approvalId("apr-1").state("ACTIVE")
+                .expiresAt(Instant.parse("2099-09-29T16:00:00Z").toString()).build();
+        versions.add(other);
+        asset.setPolicyId("other-policy");
+        asset.setPolicyVersion("1");
+
+        assertThrows(TeeException.class, () -> service.resultSourcePolicy(policyId, "1"));
+
+        verifyNoInteractions(approvals);
+        verify(policies, never()).save(any());
+    }
+
+    @Test
+    void resultSourcePolicyRejectsDifferentCurrentAuthorizationScope() {
+        TeePolicyDO current = TeePolicyDO.builder().upk(new TeePolicyDO.UPK(policyId, "2"))
+                .assetId("asset-1").assetVersion("1").ownerId("owner-1").sandboxId("sandbox-1")
+                .columnsJson("[\"income\"]").operatorsJson("[\"model.predict\"]")
+                .reportKindsJson("[\"TREE_STRUCTURE\"]").approvalId("apr-2").state("ACTIVE")
+                .expiresAt(Instant.parse("2099-09-29T16:00:00Z").toString()).build();
+        versions.add(current);
+        asset.setPolicyVersion("2");
+        deadline(Instant.parse("2099-09-29T16:00:00Z"));
+
+        assertThrows(TeeException.class, () -> service.resultSourcePolicy(policyId, "1"));
+
+        verify(policies, never()).save(any());
+        assertEquals("2", asset.getPolicyVersion());
+    }
 }

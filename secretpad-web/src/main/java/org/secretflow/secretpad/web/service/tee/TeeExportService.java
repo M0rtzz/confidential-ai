@@ -462,7 +462,7 @@ public class TeeExportService {
                 .orElseThrow(() -> TeeException.of(TeeContract.Error.POLICY_DENIED, "结果原任务不存在"));
         TeeTaskSpec spec = taskSpec(task.getTaskJws());
         for (TeeTaskSpec.Input input : spec.inputs()) {
-            TeePolicyDO policy = policies.require(input.policyId(), String.valueOf(input.policyVersion()));
+            TeePolicyDO policy = policies.resultSourcePolicy(input.policyId(), String.valueOf(input.policyVersion()));
             policies.requireAllows(policy, spec.columns(), spec.operatorId());
         }
     }
@@ -617,7 +617,7 @@ public class TeeExportService {
                 return new Deadline(until, "无法确认结果授权期限", viewUntil);
             }
             for (TeeTaskSpec.Input input : spec.inputs()) {
-                TeePolicyDO policy = policies.require(input.policyId(), String.valueOf(input.policyVersion()));
+                TeePolicyDO policy = policies.resultSourcePolicy(input.policyId(), String.valueOf(input.policyVersion()));
                 Instant policyUntil = TeeGuard.requireInstant(policy.getExpiresAt(), "policyExpiresAt");
                 until = earlier(until, policyUntil);
                 viewUntil = earlier(viewUntil, policyUntil);

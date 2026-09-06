@@ -175,6 +175,38 @@ public class TeePolicyService {
         return refreshed;
     }
 
+    /** 历史结果保留原训练版本，访问结果时只承接同一授权范围的自动期限修正。 */
+    @Transactional
+    public TeePolicyDO resultSourcePolicy(String policyId, String version) {
+        TeePolicyDO original = require(policyId, version);
+        if (!TeeContract.STATE_ACTIVE.equals(original.getState())) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "结果来源的原授权已失效");
+        }
+        if (!followsDataDeadline(original)) return original;
+        TeeAssetDO asset = assets.findById(new TeeAssetDO.UPK(original.getAssetId(), original.getAssetVersion()))
+                .orElseThrow(() -> TeeException.of(TeeContract.Error.POLICY_DENIED, "结果来源数据已失效"));
+        TeePolicyDO current = require(asset.getPolicyId(), asset.getPolicyVersion());
+        requireSameResultScope(original, current);
+        current = refreshForAsset(asset, original.getSandboxId());
+        requireSameResultScope(original, current);
+        return current;
+    }
+
+    private void requireSameResultScope(TeePolicyDO original, TeePolicyDO current) {
+        if (!TeeContract.STATE_ACTIVE.equals(current.getState())
+                || !original.getUpk().getPolicyId().equals(current.getUpk().getPolicyId())
+                || !java.util.Objects.equals(original.getAssetId(), current.getAssetId())
+                || !java.util.Objects.equals(original.getAssetVersion(), current.getAssetVersion())
+                || !java.util.Objects.equals(original.getOwnerId(), current.getOwnerId())
+                || !java.util.Objects.equals(original.getSandboxId(), current.getSandboxId())
+                || !java.util.Objects.equals(original.getApprovalId(), current.getApprovalId())
+                || !java.util.Objects.equals(original.getColumnsJson(), current.getColumnsJson())
+                || !java.util.Objects.equals(original.getOperatorsJson(), current.getOperatorsJson())
+                || !java.util.Objects.equals(original.getReportKindsJson(), current.getReportKindsJson())) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "结果来源授权范围已变化，不能沿用历史结果授权");
+        }
+    }
+
     /** 放行前复核规则状态、有效期与列范围；任一不满足即拒绝，不降级为粗粒度授权。 */
     public void requireAllows(TeePolicyDO policy, List<String> columns, String operator) {
         if (!TeeContract.STATE_ACTIVE.equals(policy.getState())) {

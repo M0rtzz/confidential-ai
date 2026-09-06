@@ -57,7 +57,7 @@ class TeeExportServiceTest {
             TeeRuntimeTaskDO.UPK key = invocation.getArgument(0);
             return Optional.of(task(key.getTaskId()));
         });
-        when(policies.require(anyString(), anyString())).thenReturn(TeePolicyDO.builder()
+        when(policies.resultSourcePolicy(anyString(), anyString())).thenReturn(TeePolicyDO.builder()
                 .state(TeeContract.STATE_ACTIVE).expiresAt("2099-01-01T00:00:00Z")
                 .columnsJson("[\"age\"]").operatorsJson("[\"operator-1\"]").build());
     }
