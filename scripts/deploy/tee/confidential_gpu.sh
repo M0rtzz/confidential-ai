@@ -198,6 +198,20 @@ start_sim_attestation() {
     log_error "模拟证明服务未达健康状态。"; exit 1; }
 }
 
+# 选一张空闲显存最多的卡。同机其他用户的训练任务与本平台共用这几张 A100，
+# 固定绑定某张卡会与他人负载抢显存和算力，表现为推理长时间不返回。
+# 显存相同时取利用率更低的一张；nvidia-smi 不可用则不设置，交由容器自行决定。
+select_gpu() {
+  if [ -n "${DATA_SANDBOX_DEV_CIPHERGPU_VISIBLE_DEVICES:-}" ]; then
+    printf '%s' "$DATA_SANDBOX_DEV_CIPHERGPU_VISIBLE_DEVICES"
+    return
+  fi
+  command -v nvidia-smi >/dev/null 2>&1 || return
+  nvidia-smi --query-gpu=index,memory.free,utilization.gpu \
+    --format=csv,noheader,nounits 2>/dev/null \
+    | tr -d ' ' | sort -t, -k2,2nr -k3,3n | head -n 1 | cut -d, -f1
+}
+
 start_ciphergpu() {
   if verify_managed_container "$CIPHERGPU_CONTAINER"; then
     docker rm -f "$CIPHERGPU_CONTAINER" >/dev/null
@@ -215,6 +229,14 @@ start_ciphergpu() {
   local gpu_args=()
   if [ "${DATA_SANDBOX_DEV_CIPHERGPU_GPUS:-all}" != none ]; then
     gpu_args+=(--gpus "${DATA_SANDBOX_DEV_CIPHERGPU_GPUS:-all}")
+  fi
+  local visible_devices
+  visible_devices="$(select_gpu)"
+  if [ -n "$visible_devices" ]; then
+    gpu_args+=(-e "CUDA_VISIBLE_DEVICES=${visible_devices}")
+    log "选定 GPU ${visible_devices}（空闲显存最多）"
+  else
+    log "未能读取 GPU 状态，不限定可见设备"
   fi
   log "启动 CipherGPU A100 仿真代理 ${CIPHERGPU_CONTAINER}"
   docker run -d --init --restart unless-stopped --read-only \
@@ -243,7 +265,6 @@ start_ciphergpu() {
     -e XDG_CACHE_HOME=/var/lib/ciphergpu/models/.cache \
     -e "CIPHERGPU_VLLM_GPU_MEMORY_UTILIZATION=${DATA_SANDBOX_DEV_VLLM_GPU_MEMORY_UTILIZATION:-0.10}" \
     -e "CIPHERGPU_VLLM_MAX_MODEL_LEN=${DATA_SANDBOX_DEV_VLLM_MAX_MODEL_LEN:-1024}" \
-    -e "CUDA_VISIBLE_DEVICES=${DATA_SANDBOX_DEV_CIPHERGPU_VISIBLE_DEVICES:-2}" \
     -v "${CIPHERGPU_SERVER_CERT_DIR}:/run/tls:ro" \
     -v "${CIPHERGPU_SIM_CLIENT_DIR}:/run/sim-client:ro" \
     -v "${CIPHERGPU_MODEL_RUNTIME_DIR}:/var/lib/ciphergpu/models:rw" \
