@@ -53,46 +53,6 @@ public final class CanvasOperatorRegistry {
     public static final String RENDER_SCRIPT = PYTHON_ASCII_OPEN_COMPAT
             + "import modeling_ops as mops\nmops.main()\n";
 
-    /**
-     * 链路脚本：按 {@code params.chain} 依次调用运行器内置的 {@code modeling_ops.run}。
-     *
-     * <p>可信执行模式下算子产物是密文对象、不落明文中间表，链上的中间结果因此只在本进程内
-     * 以临时文件传递，进程退出即随临时目录一并消失；写出的只有最后一步的结果。
-     * {@code chain} 缺省时退回单算子行为，与 {@link #RENDER_SCRIPT} 等价。</p>
-     */
-    public static final String CHAIN_RENDER_SCRIPT = PYTHON_ASCII_OPEN_COMPAT + """
-            import argparse, json, os, shutil, sys, tempfile
-            import modeling_ops as mops
-
-            parser = argparse.ArgumentParser()
-            parser.add_argument('--input', required=True)
-            parser.add_argument('--output', required=True)
-            parser.add_argument('--params', default='{}')
-            parser.add_argument('--input-table', dest='input_table', default='')
-            parser.add_argument('--jdbc-url', dest='jdbc_url', default='')
-            args = parser.parse_args()
-            params = json.loads(args.params or '{}')
-            chain = params.get('chain') or [{'op': params.get('op'), 'params': params}]
-
-            work = tempfile.mkdtemp(prefix='canvas-chain-')
-            try:
-                current = args.input
-                table = args.input_table
-                for index, step in enumerate(chain):
-                    last = index == len(chain) - 1
-                    step_params = dict(step.get('params') or {})
-                    step_params['op'] = step.get('op') or step_params.get('op')
-                    target = args.output if last else os.path.join(work, 'step-%d.csv' % index)
-                    rows, has_model = mops.run(step_params['op'], current, target, step_params,
-                                               table, args.jdbc_url)
-                    sys.stderr.write('[chain] step=%d op=%s rows=%d model=%s\\n'
-                                     % (index, step_params['op'], rows, has_model))
-                    current = target
-                    table = ''
-            finally:
-                shutil.rmtree(work, ignore_errors=True)
-            """;
-
     private static final String DEFAULT_CPU = "0.5";
     private static final String DEFAULT_MEMORY = "512Mi";
 
@@ -162,6 +122,61 @@ public final class CanvasOperatorRegistry {
             return task;
         }
         return "ml.linear_regression".equals(code) ? "regression" : "classification";
+    }
+
+    /**
+     * 算子输出列推导。
+     *
+     * <p>可信执行模式下算子产物是密文对象，平台读不到实际表头。派生密文资产的登记表结构与
+     * 节点配置态的可选列都取自这里，推导口径与运行器 {@code modeling_ops} 的实现逐一对应。</p>
+     *
+     * <p>{@code preprocessing.unique} 剔除哪些常量列取决于数据本身，无法静态判定，这里按输入列
+     * 原样返回。该结果是实际输出的超集，登记范围不会因此放宽，但下游若选中已被剔除的列，
+     * 会在可信运行时内报错。</p>
+     *
+     * @param code         算子标识
+     * @param params       节点参数
+     * @param inputColumns 输入表列，未知时传空
+     */
+    public static List<String> outputColumns(String code, Map<String, Object> params, List<String> inputColumns) {
+        List<String> input = inputColumns == null ? List.of() : List.copyOf(inputColumns);
+        if (byCode(code).isEmpty()) {
+            return input;
+        }
+        switch (code) {
+            case "preprocessing.psi":
+                return List.of("column", "psi");
+            case "preprocessing.feature_align":
+                return List.of("column", "alignment", "dtype_input", "dtype_reference",
+                        "rows_input", "rows_reference");
+            case "stats.correlation":
+                return List.of("column_a", "column_b", "value");
+            case "ml.binary_classification":
+            case "ml.regression_evaluation":
+                return List.of("metric", "value");
+            case "preprocessing.derive":
+                return append(input, string(params == null ? null : params.get("new_column")));
+            case "ml.kmeans":
+                return append(input, "cluster");
+            default:
+                break;
+        }
+        if (!isTrain(code)) {
+            // fillna / outlier / unique / binning / woe / standardize 均为原位改写，列集合不变
+            return input;
+        }
+        List<String> withPrediction = append(input, "pred");
+        return "regression".equals(metricType(code, params == null ? null : params.get("task")))
+                ? withPrediction : append(withPrediction, "pred_prob");
+    }
+
+    private static List<String> append(List<String> columns, String name) {
+        if (name == null || name.isBlank() || columns.contains(name)) {
+            return columns;
+        }
+        List<String> merged = new ArrayList<>(columns);
+        merged.add(name);
+        return List.copyOf(merged);
     }
 
 

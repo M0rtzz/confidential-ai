@@ -38,6 +38,9 @@ public class TeeApprovalPolicySource {
     /** 只有这两类审批会挂载数据集，其余类型不产生数据授权。 */
     private static final Set<String> MOUNT_APPROVAL_TYPES = Set.of("CREATE", "DATA_CHANGE");
 
+    /** 画布链路的派生层级上限，同时用于阻断 source_asset_id 成环时的无限递归。 */
+    private static final int MAX_DERIVED_DEPTH = 16;
+
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
     private final String nodeId;
@@ -80,6 +83,11 @@ public class TeeApprovalPolicySource {
     /** 读取期限本身，允许同步已过期的截止时间；是否仍可使用由执行入口判断。 */
     public Approved approvedScope(String ownerId, String sandboxId, String assetId,
                                   List<String> columns, List<String> operators) {
+        return approvedScope(ownerId, sandboxId, assetId, columns, operators, 0);
+    }
+
+    private Approved approvedScope(String ownerId, String sandboxId, String assetId,
+                                   List<String> columns, List<String> operators, int depth) {
         Map<String, Object> sandbox = single(
                 "select owner_id,project_id,expires_at from ds_sandbox where id=? and deleted=0", sandboxId);
         if (sandbox == null) {
@@ -88,6 +96,10 @@ public class TeeApprovalPolicySource {
         String sandboxOwner = text(sandbox.get("owner_id"));
         if (!sandboxOwner.equals(ownerId) && !sandboxOwner.equals(nodeId)) {
             throw TeeException.of(TeeContract.Error.POLICY_DENIED, "沙箱不属于该机构");
+        }
+        Map<String, Object> derived = derivedAsset(assetId);
+        if (derived != null) {
+            return derivedScope(ownerId, sandboxId, assetId, derived, columns, operators, depth);
         }
         Map<String, Object> mount = single("select asset_version,expires_at from ds_sandbox_dataset_mount "
                 + "where sandbox_id=? and asset_id=? and deleted=0 and status='READY'", sandboxId, assetId);
@@ -102,7 +114,11 @@ public class TeeApprovalPolicySource {
         }
         Approved approved = approval(sandboxId, assetId);
         // 请求的授权范围必须落在审批批准的范围内，任一越界即拒绝。
-        TeeGuard.requireSubset(columns, approved.columns(), "授权列");
+        // 空列集合只可能来自派生资产的内部回溯（该派生表与上游没有同名列），对外入口的列集合
+        // 由 TeeGuard.requireGrantSet 保证非空，不会走到这里。
+        if (!columns.isEmpty()) {
+            TeeGuard.requireSubset(columns, approved.columns(), "授权列");
+        }
         TeeGuard.requireSubset(operators, approved.operators(), "授权算子");
         Instant deadline = approved.expiresAt();
         deadline = earlier(deadline, instant(sandbox.get("expires_at")));
@@ -121,6 +137,51 @@ public class TeeApprovalPolicySource {
             throw TeeException.of(TeeContract.Error.POLICY_DENIED, "审批未给出使用截止时间");
         }
         return new Approved(approved.approvalId(), approved.columns(), approved.operators(), deadline);
+    }
+
+    /** 画布中间产物：本节点存在则该资产是派生资产，授权只能从上游输入继承。 */
+    private Map<String, Object> derivedAsset(String assetId) {
+        Map<String, Object> row = single("select source_asset_id,metadata_json from ds_data_asset "
+                + "where id=? and deleted=0 and status='ACTIVE' and ingestion_type='DERIVED'", assetId);
+        if (row == null || !payload(row.get("metadata_json")).path("derived").asBoolean(false)) {
+            return null;
+        }
+        return row;
+    }
+
+    /**
+     * 派生资产的授权继承。
+     *
+     * <p>画布中间产物由可信运行时在批准范围内算出，没有独立的挂载记录与审批单，授权范围只能来自
+     * 上游输入：算子集合与截止时间原样取上游，不作放宽；上游批准的列原样继承。派生过程新增的列
+     * （如训练算子的 {@code pred}）不在上游表结构里，随本资产一并放行——它们本身就是批准范围内
+     * 计算得到的结果，而不是新的原始数据。</p>
+     *
+     * <p>期限、挂载管控与「数据方已停止使用」的复核都在递归到根挂载资产时执行，因此供数方一旦
+     * 收回授权，链路上的派生资产同样立即不可用。</p>
+     */
+    private Approved derivedScope(String ownerId, String sandboxId, String assetId, Map<String, Object> derived,
+                                  List<String> columns, List<String> operators, int depth) {
+        if (depth >= MAX_DERIVED_DEPTH) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "派生资产的授权继承层级超出上限");
+        }
+        String sourceAssetId = text(derived.get("source_asset_id"));
+        if (sourceAssetId.isBlank()) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "派生资产未登记上游输入资产");
+        }
+        Set<String> upstreamColumns = new LinkedHashSet<>(assetColumns(sourceAssetId));
+        List<String> produced = assetColumns(assetId);
+        // 来自上游的那部分列按上游的批准范围复核，本次派生新增的列不参与该校验
+        List<String> inherited = produced.stream().filter(upstreamColumns::contains).toList();
+        Approved upstream = approvedScope(ownerId, sandboxId, sourceAssetId, inherited, operators, depth + 1);
+        // 批准范围就是本资产自身登记的表结构：来自上游的列已按上游批准范围复核通过，
+        // 其余列是可信运行时在该范围内算出的结果。上游批准但本表没有的列不在此放行。
+        List<String> granted = List.copyOf(new LinkedHashSet<>(produced));
+        if (granted.isEmpty()) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "派生资产没有登记表结构");
+        }
+        TeeGuard.requireSubset(columns, granted, "授权列");
+        return new Approved(upstream.approvalId(), granted, upstream.operators(), upstream.expiresAt());
     }
 
     /** 取该沙箱最近一份已完成、且确实包含该资产的挂载类审批。 */

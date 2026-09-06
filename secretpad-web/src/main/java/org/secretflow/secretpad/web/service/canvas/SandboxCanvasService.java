@@ -493,8 +493,8 @@ public class SandboxCanvasService {
         } else {
             table = latestOutputTable(sandboxId, canvasId, source.id);
             if (!sandboxDb.hasTable(sandboxId, table)) {
-                result.put("message", "上游组件尚未成功运行，暂无输入数据（请先执行上游节点）");
-                return result;
+                // 上游尚未运行时按算子语义推导预期列，使整条链在运行前就能完成配置
+                return predictedInput(result, graph, source, canvasId, sandboxId);
             }
         }
         try {
@@ -511,6 +511,67 @@ public class SandboxCanvasService {
         result.put("sourceNodeId", source.id);
         result.put("sourceComponentCode", source.componentCode);
         return result;
+    }
+
+    /**
+     * 上游尚未产出时的预期输入列。
+     *
+     * <p>沿边回溯到数据资源节点取挂载表结构，再按拓扑顺序逐个算子套用列变换推导，使整条链在运行
+     * 前就能完成配置。返回结果只有列名、没有数据行；实际运行仍以上游真实产出为准。</p>
+     */
+    private Map<String, Object> predictedInput(Map<String, Object> result, GraphModel graph, Node source,
+            String canvasId, String sandboxId) {
+        List<String> columns = predictedColumns(graph, source, canvasId, sandboxId, 0);
+        if (columns.isEmpty()) {
+            result.put("message", "上游组件尚未成功运行，暂无输入数据（请先执行上游节点）");
+            return result;
+        }
+        List<Map<String, Object>> schema = new ArrayList<>();
+        for (String column : columns) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("name", column);
+            item.put("type", "");
+            schema.add(item);
+        }
+        result.put("available", true);
+        result.put("predicted", true);
+        result.put("schema", schema);
+        result.put("rows", List.of());
+        result.put("totalRows", 0);
+        result.put("sourceNodeId", source.id);
+        result.put("sourceComponentCode", source.componentCode);
+        result.put("message", "上游组件尚未运行，以下为按算子推导的预期列");
+        return result;
+    }
+
+    /** 按算子语义回溯推导节点输出列：已有成功产出取实际表结构，否则由上游列套用列变换得到。 */
+    private List<String> predictedColumns(GraphModel graph, Node node, String canvasId, String sandboxId,
+            int depth) {
+        if (node == null || depth > MAX_PREDICT_DEPTH) {
+            return List.of();
+        }
+        if (CanvasOperatorRegistry.isVirtual(node.componentCode)) {
+            String table = string(node.params.get("table"));
+            return sandboxDb.hasTable(sandboxId, table) ? tableColumns(sandboxId, table) : List.of();
+        }
+        String produced = latestOutputTable(sandboxId, canvasId, node.id);
+        if (sandboxDb.hasTable(sandboxId, produced)) {
+            return tableColumns(sandboxId, produced);
+        }
+        Node upstream = null;
+        for (Edge edge : graph.edges) {
+            if (edge.target.equals(node.id)) {
+                if (upstream != null) {
+                    return List.of(); // 多输入算子的列语义依赖参考表，不作推导
+                }
+                upstream = graph.nodeById(edge.source);
+            }
+        }
+        List<String> inputColumns = predictedColumns(graph, upstream, canvasId, sandboxId, depth + 1);
+        if (inputColumns.isEmpty()) {
+            return List.of();
+        }
+        return CanvasOperatorRegistry.outputColumns(node.componentCode, node.params, inputColumns);
     }
 
     /* ============================== 画布数据资源（节点配置用） ============================== */
@@ -2318,28 +2379,20 @@ public class SandboxCanvasService {
                     now(), now(), runId);
             String failMessage = "";
             List<Node> pending = order.stream().filter(node -> included.contains(node.id)).toList();
-            if (devJobExecutor.teeEnabled() && pending.size() > 1) {
-                // 可信执行模式下算子产物是密文对象，不落明文中间表，逐个节点派发时下游取不到输入。
-                // 整条链渲染成一次任务，中间结果只在可信运行时的进程内传递。
+            // 可信执行模式下算子产物登记为派生密文资产，下游按表名即可解析到上游产出，
+            // 因此整图与单节点走同一条逐节点派发路径，两者行为一致。
+            for (Node node : pending) {
+                if (isCancelled(runId)) {
+                    markRemainingCancelled(runId, node.id);
+                    break;
+                }
                 try {
-                    executeTeeChain(pending, runId, canvasId, sandboxId, canvas, graph, nodeDomain);
+                    executeNode(node, runId, canvasId, sandboxId, canvas, graph, nodeDomain);
                 } catch (Exception e) {
                     failMessage = truncate(e.getMessage(), 1900);
-                    log.error("画布链路执行失败 runId={}: {}", runId, failMessage, e);
-                }
-            } else {
-                for (Node node : pending) {
-                    if (isCancelled(runId)) {
-                        markRemainingCancelled(runId, node.id);
-                        break;
-                    }
-                    try {
-                        executeNode(node, runId, canvasId, sandboxId, canvas, graph, nodeDomain);
-                    } catch (Exception e) {
-                        failMessage = truncate(e.getMessage(), 1900);
-                        log.error("画布节点 {} 执行失败: {}", node.id, failMessage, e);
-                        break;
-                    }
+                    log.error("画布节点 {} 执行失败: {}", node.id, failMessage, e);
+                    markRemainingSkipped(runId);
+                    break;
                 }
             }
             String status = isCancelled(runId) ? "CANCELLED"
@@ -2359,98 +2412,6 @@ public class SandboxCanvasService {
         } finally {
             UserContext.remove();
         }
-    }
-
-    /**
-     * 可信执行模式下把整条算子链渲染成一次任务。
-     *
-     * <p>算子产物是密文对象，不回填明文中间表，因此逐节点派发时下游按表名找不到输入。
-     * 这里按拓扑序把链上的算子串成一段脚本，依次调用运行器内置的 {@code modeling_ops.run}，
-     * 中间结果只在可信运行时的进程内以临时文件传递，落库的只有最后一步的密文产出与报告。
-     * 数据资源节点是虚拟节点，只负责指明输入表，不参与执行。</p>
-     */
-    private void executeTeeChain(List<Node> pending, String runId, String canvasId, String sandboxId,
-            Map<String, Object> canvas, GraphModel graph, String nodeDomain) {
-        List<Node> operators = pending.stream()
-                .filter(node -> !CanvasOperatorRegistry.isVirtual(node.componentCode)).toList();
-        if (operators.isEmpty()) {
-            for (Node node : pending) {
-                executeNode(node, runId, canvasId, sandboxId, canvas, graph, nodeDomain);
-            }
-            return;
-        }
-        // 数据资源节点先各自结算，同时确定整条链的输入表
-        String inputTable = "";
-        for (Node node : pending) {
-            if (CanvasOperatorRegistry.isVirtual(node.componentCode)) {
-                executeNode(node, runId, canvasId, sandboxId, canvas, graph, nodeDomain);
-                inputTable = string(node.params.get("table"));
-            }
-        }
-        if (!notBlank(inputTable)) {
-            inputTable = resolveInputTable(operators.get(0), graph, runId, canvasId, sandboxId);
-        }
-        dataControl.requireMountTableUsable(sandboxId, inputTable);
-
-        List<Map<String, Object>> steps = new ArrayList<>();
-        for (Node node : operators) {
-            Map<String, Object> params = new LinkedHashMap<>();
-            params.put("op", node.componentCode);
-            params.putAll(node.params);
-            if (CanvasOperatorRegistry.needsCompareTable(node.componentCode)) {
-                throw new IllegalArgumentException("双表算子暂不支持在可信执行模式下串联：" + node.name);
-            }
-            steps.add(Map.of("op", node.componentCode, "params", params));
-        }
-        Node last = operators.get(operators.size() - 1);
-        String outputTable = opTableName(runId, last.id);
-        Map<String, Object> chainParams = new LinkedHashMap<>();
-        chainParams.put("op", last.componentCode);
-        chainParams.put("chain", steps);
-        chainParams.putAll(last.params);
-
-        for (Node node : operators) {
-            jdbc.update("update ds_compute_node_run set status='RUNNING',started_at=?,updated_at=? "
-                            + "where run_id=? and node_id=? and deleted=0", now(), now(), runId, node.id);
-        }
-        String taskId = dataDevService.createCanvasTask(sandboxId, canvasId, last.id, last.componentCode,
-                CanvasOperatorRegistry.CHAIN_RENDER_SCRIPT, chainParams, List.of(), inputTable, outputTable);
-        dataDevService.claimCanvasTask(taskId);
-        devJobExecutor.submitSandboxChannel(taskId, nodeDomain, "", "PYTHON",
-                CanvasOperatorRegistry.CHAIN_RENDER_SCRIPT, chainParams, List.of(), sandboxId, inputTable,
-                outputTable, new LinkedHashSet<>(Set.of(inputTable)), "canvas");
-        Map<String, Object> result = devJobExecutor.runAndAwait(taskId);
-        if (!"SUCCEEDED".equals(string(result.get("status")))) {
-            String error = "链路执行失败: " + string(result.get("errorMessage"));
-            for (Node node : operators) {
-                jdbc.update("update ds_compute_node_run set status='FAILED',task_id=?,error_message=?,"
-                                + "finished_at=?,updated_at=? where run_id=? and node_id=? and deleted=0",
-                        taskId, truncate(error, 1900), now(), now(), runId, node.id);
-            }
-            throw new IllegalStateException(error);
-        }
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("runtimeMode", "SIMULATION");
-        summary.put("attestationVerified", false);
-        summary.put("reports", result.getOrDefault("reports", List.of()));
-        summary.put("encryptedOutputs", result.getOrDefault("encryptedOutputs", List.of()));
-        String summaryJson = json(summary);
-        for (Node node : operators) {
-            boolean tail = node.id.equals(last.id);
-            jdbc.update("update ds_compute_node_run set status='SUCCEEDED',task_id=?,input_table=?,output_table=?,"
-                            + "result_summary=?,model_b64='',fit_params='',finished_at=?,updated_at=? "
-                            + "where run_id=? and node_id=? and deleted=0",
-                    taskId, inputTable, tail ? outputTable : "", tail ? summaryJson : json(Map.of(
-                            "runtimeMode", "SIMULATION", "attestationVerified", false,
-                            "chained", true, "chainTaskId", taskId)),
-                    now(), now(), runId, node.id);
-        }
-        if (CanvasOperatorRegistry.isTrain(last.componentCode)) {
-            registerTeeModel(canvas, last, sandboxId, runId,
-                    modelObjectId(result.getOrDefault("encryptedOutputs", List.of())));
-        }
-        audit("CANVAS_TEE_CHAIN_SUCCEEDED", "COMPUTE_RUN", runId,
-                "canvas=" + canvasId + " steps=" + operators.size() + " task=" + taskId, true);
     }
 
     private void executeNode(Node node, String runId, String canvasId, String sandboxId,
@@ -2527,7 +2488,7 @@ public class SandboxCanvasService {
                         && registerTeeModel(canvas, node, sandboxId, runId,
                                 modelObjectId(result.getOrDefault("encryptedOutputs", List.of())));
                 // 数据类产物登记成派生密文资产并补一张同名空表，下游节点因此可以单独重跑
-                registerIntermediate(node, runId, sandboxId, inputTable, outputTable,
+                registerIntermediate(node, graph, runId, sandboxId, inputTable,
                         dataObjectId(result.getOrDefault("encryptedOutputs", List.of())));
                 audit("CANVAS_NODE_TEE_SUCCEEDED", "COMPUTE_NODE_RUN", nodeRunId,
                         "node=" + node.id + " op=" + node.componentCode + " encrypted=true"
@@ -2625,28 +2586,26 @@ public class SandboxCanvasService {
     /**
      * 把节点的密文数据产物登记成派生密文资产，并在沙箱库补一张同名空表。
      *
-     * <p>登记成功后，下游节点可以单独重跑：它按表名解析到这条派生资产，凭继承自上游的授权
-     * 向可信运行时申领密钥。登记失败不影响本次运行，只是下游仍需整图执行。</p>
+     * <p>登记成功后，下游节点既可以跟着整图一起跑，也可以单独重跑：它按表名解析到这条派生资产，
+     * 凭继承自上游的授权向可信运行时申领密钥。表结构按算子语义推导，不读取任何明文数据行。
+     * 登记失败不影响本次运行，只是下游会因为找不到输入而无法单独执行。</p>
      */
-    private void registerIntermediate(Node node, String runId, String sandboxId,
-            String inputTable, String outputTable, String objectId) {
+    private void registerIntermediate(Node node, GraphModel graph, String runId, String sandboxId,
+            String inputTable, String objectId) {
         if (!notBlank(objectId)) {
             return;
         }
         String sourceAssetId = jdbc.query(
                 "select asset_id from ds_sandbox_data_dir where sandbox_id=? and table_name=? and deleted=0 limit 1",
                 rs -> rs.next() ? rs.getString(1) : "", sandboxId, inputTable);
-        String derivedAssetId = "mid-" + shortId() + "-" + outputTable.hashCode();
-        if (!intermediateAssets.register(derivedAssetId, sandboxId, sourceAssetId, objectId)) {
+        List<String> columns = CanvasOperatorRegistry.outputColumns(node.componentCode, node.params,
+                tableColumns(sandboxId, inputTable));
+        String derivedAssetId = intermediateAssets.register(sandboxId, sourceAssetId, objectId, columns);
+        if (!notBlank(derivedAssetId)) {
             return;
         }
-        List<String> columns = jdbc.query(
-                "select columns_json from ds_sandbox_data_dir where sandbox_id=? and table_name=? and deleted=0 limit 1",
-                rs -> rs.next() ? columnsOf(rs.getString(1)) : List.<String>of(), sandboxId, inputTable);
         sandboxDb.registerCiphertextOperatorTable(sandboxId, runId, node.id,
-                operatorOutputName(node, parseGraph(string(requireCanvas(string(
-                        jdbc.queryForMap("select canvas_id from ds_compute_run where id=?", runId)
-                                .get("canvas_id"))).get("graph_json")))), columns, derivedAssetId);
+                operatorOutputName(node, graph), columns, derivedAssetId);
     }
 
     private List<String> columnsOf(String json) {
@@ -3168,6 +3127,16 @@ public class SandboxCanvasService {
                 now(), now(), runId);
     }
 
+    /**
+     * 某个节点失败后收口其余未启动节点，避免运行已结束而节点仍停在 PENDING。
+     * 沿用 CANCELLED 状态，前端已有对应展示；未执行的原因写入 error_message。
+     */
+    private void markRemainingSkipped(String runId) {
+        jdbc.update("update ds_compute_node_run set status='CANCELLED',error_message=?,finished_at=?,updated_at=? "
+                        + "where run_id=? and status='PENDING' and deleted=0",
+                "上游节点执行失败，本节点未执行", now(), now(), runId);
+    }
+
     private void stopTask(String taskId) {
         try {
             devJobExecutor.stop("dt-" + taskId, "Canvas run cancelled");
@@ -3487,6 +3456,9 @@ public class SandboxCanvasService {
     }
 
     private static final long MAX_INPUT_BYTES = 256 * 1024L;
+
+    /** 预期列回溯的层级上限，兼作断链保护。 */
+    private static final int MAX_PREDICT_DEPTH = 32;
     private static final String MODEL_MARKER = "MODELB64:";
     private static final String PREPROC_MARKER = "PREPROC:";
     /** 可复刻进 predict 脚本的预处理算子（拟合参数已在执行时回传）。 */
