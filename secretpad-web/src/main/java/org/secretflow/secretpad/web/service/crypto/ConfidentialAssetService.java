@@ -32,7 +32,7 @@ import java.util.UUID;
 /** Ciphertext-only registry shared by datasets, model weights and execution results. */
 @Service
 public class ConfidentialAssetService {
-    private static final int MAX_CHUNK_BYTES = 16 * 1024 * 1024 + 64;
+    private static final int MAX_CHUNK_BYTES = 32 * 1024 * 1024 + 64;
     private static final Set<String> TYPES = Set.of("DATA", "MODEL", "RESULT_DATA", "RESULT_MODEL");
     private static final Set<String> SOURCES = Set.of("UPLOAD", "AI_GENERATED", "COMPUTE_RESULT");
     private static final Set<String> ALGORITHMS = Set.of("AES-256-GCM", "AES-256-GCM-SIV",
@@ -62,6 +62,9 @@ public class ConfidentialAssetService {
     public record CommitRequest(JsonNode manifest, String manifestHash, String ownerSigningPublicKey,
             String ownerSignature, String sourceDataName, String sourceModelName, String taskId,
             String computeNode) {}
+    public record RuntimeOutputRequest(String assetType, String name, String description,
+            String sourceDataName, String sourceModelName, String taskId, String computeNode,
+            JsonNode manifest, List<String> objectUris, JsonNode producerReceipt) {}
     public record UseRequest(String assetVersionId, String applicant, String computeNode, String taskId,
             String taskName, String purpose, String validUntil) {}
     public record DecisionRequest(String action, String comment) {}
@@ -270,10 +273,10 @@ public class ConfidentialAssetService {
         jdbc.update("insert into ds_confidential_asset(asset_id,owner_id,asset_type,source_type,name,description,latest_version,status,created_at,updated_at) values(?,?,?,?,?,?,1,'ENCRYPTED',?,?)",
                 assetId, ownerId, session.get("asset_type"), session.get("source_type"), session.get("name"),
                 session.get("description"), now, now);
-        jdbc.update("insert into ds_confidential_asset_version(asset_version_id,asset_id,owner_id,upload_session_id,version_number,domain_id,algorithm,original_file_name,original_size,cipher_size,storage_node,manifest_json,manifest_hash,owner_signature,status,source_data_name,source_model_name,task_id,compute_node,created_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ENCRYPTED',?,?,?,?,?)",
+        jdbc.update("insert into ds_confidential_asset_version(asset_version_id,asset_id,owner_id,upload_session_id,version_number,domain_id,algorithm,original_file_name,original_size,cipher_size,storage_node,manifest_json,manifest_hash,owner_signature,owner_signing_public_key,status,source_data_name,source_model_name,task_id,compute_node,created_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ENCRYPTED',?,?,?,?,?)",
                 versionId, assetId, ownerId, sessionId, 1, session.get("domain_id"), session.get("algorithm"),
                 session.get("original_file_name"), session.get("original_size"), cipherSize, "受管密文存储节点",
-                write(manifest), manifestHash, request.ownerSignature(), request.sourceDataName(),
+                write(manifest), manifestHash, request.ownerSignature(), signingKey, request.sourceDataName(),
                 request.sourceModelName(), request.taskId(), request.computeNode(), now);
         jdbc.update("update ds_confidential_asset_upload set status='COMMITTED' where upload_session_id=?", sessionId);
         audit.audit(ownerId, "CONFIDENTIAL_ASSET_COMMITTED", versionId,
@@ -314,6 +317,19 @@ public class ConfidentialAssetService {
         Map<String, Object> value = ciphertext(ownerId, assetId);
         return Map.of("previewSessionId", id("preview"), "expiresAt", Instant.now().plus(5, ChronoUnit.MINUTES).toString(),
                 "ciphertextPackage", value);
+    }
+
+    public JsonNode downloadManifest(String ownerId, String assetId) {
+        return parse(text(row(ownerId, assetId).get("manifest_json")));
+    }
+
+    public InputStream openCiphertextChunk(String ownerId, String assetId, int index) {
+        Map<String, Object> value = row(ownerId, assetId);
+        List<String> uris = jdbc.queryForList("select object_uri from ds_confidential_asset_chunk "
+                        + "where upload_session_id=? and chunk_index=?", String.class,
+                value.get("upload_session_id"), index);
+        if (uris.size() != 1) throw invalid("密文分块不存在");
+        return storage.open(uris.get(0));
     }
 
     @Transactional
@@ -480,6 +496,50 @@ public class ConfidentialAssetService {
                 value.ownerSigningPublicKey(), value.ownerSignature(), value.sourceDataName(),
                 value.sourceModelName(), executionId, value.computeNode());
         return commit(ownerId, required(request.uploadSessionId(), "uploadSessionId"), bound);
+    }
+
+    @Transactional
+    public Map<String, Object> registerRuntimeOutput(String ownerId, RuntimeOutputRequest request) {
+        String type = member(request.assetType(), Set.of("RESULT_DATA", "RESULT_MODEL"), "assetType");
+        JsonNode manifest = request.manifest();
+        if (manifest == null || !manifest.isObject() || !"ds-envelope/v2".equals(manifest.path("format").asText())
+                || !manifest.path("chunks").isArray() || request.objectUris() == null
+                || request.objectUris().size() != manifest.path("chunks").size()) {
+            throw invalid("CipherGPU 结果清单或密文对象不完整");
+        }
+        String assetId = id("asset");
+        String versionId = id("assetv");
+        String runtimeUploadId = "runtime:" + request.taskId() + ":" + type;
+        String now = Instant.now().toString();
+        jdbc.update("insert into ds_confidential_asset(asset_id,owner_id,asset_type,source_type,name,description,"
+                        + "latest_version,status,created_at,updated_at) values(?,?,?,'COMPUTE_RESULT',?,?,1,'ENCRYPTED',?,?)",
+                assetId, ownerId, type, required(request.name(), "name"),
+                request.description() == null ? "" : request.description(), now, now);
+        jdbc.update("insert into ds_confidential_asset_version(asset_version_id,asset_id,owner_id,upload_session_id,"
+                        + "version_number,domain_id,algorithm,original_file_name,original_size,cipher_size,storage_node,"
+                        + "manifest_json,manifest_hash,owner_signature,status,source_data_name,source_model_name,task_id,"
+                        + "compute_node,created_at,producer_type,producer_node_id,producer_runtime_image_digest,"
+                        + "producer_signature,producer_receipt_json,owner_signing_public_key) values(?,?,?,?,1,?,?,?,?,?,'受管密文存储节点',"
+                        + "?,?,?,'ENCRYPTED',?,?,?,?,?,'CIPHERGPU',?,?,?,?,?)",
+                versionId, assetId, ownerId, runtimeUploadId, manifest.path("domainId").asText(),
+                manifest.path("algorithm").asText(), type.equals("RESULT_MODEL") ? "result-model.tar.gz" : "result-data.tar.gz",
+                manifest.path("originalSize").asLong(), manifest.path("cipherSize").asLong(), write(manifest),
+                ConfidentialCanonical.sha256(manifest), manifest.path("producerSignature").asText(),
+                request.sourceDataName(), request.sourceModelName(), request.taskId(), request.computeNode(), now,
+                manifest.path("producerNodeId").asText("ciphergpu"), "sha256:builtin-training-v1",
+                manifest.path("producerSignature").asText(), write(request.producerReceipt()), null);
+        int index = 0;
+        for (String uri : request.objectUris()) {
+            JsonNode chunk = manifest.path("chunks").get(index);
+            jdbc.update("insert into ds_confidential_asset_chunk(upload_session_id,chunk_index,object_uri,cipher_hash,"
+                            + "cipher_size,created_at) values(?,?,?,?,?,?)", runtimeUploadId, index, uri,
+                    chunk.path("sha256").asText(), chunk.path("plaintextLength").asLong() + 16, now);
+            index++;
+        }
+        audit.audit(ownerId, "CONFIDENTIAL_TRAINING_OUTPUT_COMMITTED", versionId,
+                mapper.valueToTree(Map.of("assetId", assetId, "taskId", request.taskId(),
+                        "producerType", "CIPHERGPU", "assetType", type)));
+        return asset(ownerId, assetId);
     }
 
     private void event(String ownerId, String requestId, String type, String status, JsonNode detail) {

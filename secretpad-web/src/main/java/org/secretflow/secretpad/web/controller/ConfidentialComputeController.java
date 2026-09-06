@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.secretflow.secretpad.common.util.UserContext;
 import org.secretflow.secretpad.service.model.common.SecretPadResponse;
 import org.secretflow.secretpad.web.service.crypto.ConfidentialComputeService;
+import org.secretflow.secretpad.web.service.tee.TeeContract;
+import org.secretflow.secretpad.web.service.tee.TeeException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -27,6 +29,7 @@ public class ConfidentialComputeController implements CryptoApi {
     @PostMapping("/identities")
     public SecretPadResponse<Map<String, Object>> identity(
             @RequestBody ConfidentialComputeService.IdentityRequest request) {
+        requireClient();
         return SecretPadResponse.success(service.registerIdentity(owner(), request));
     }
 
@@ -42,24 +45,28 @@ public class ConfidentialComputeController implements CryptoApi {
 
     @PostMapping("/trusted-domains/{domainId}/verify")
     public SecretPadResponse<Map<String, Object>> verify(@PathVariable String domainId) {
+        requireClient();
         return SecretPadResponse.success(service.verifyDomain(owner(), domainId));
     }
 
     @PostMapping("/tasks")
     public SecretPadResponse<Map<String, Object>> task(
             @RequestBody ConfidentialComputeService.CreateTaskRequest request) {
+        requireClient();
         return SecretPadResponse.success(service.createTask(owner(), request));
     }
 
     @PostMapping("/attestation-sessions")
     public SecretPadResponse<JsonNode> attestation(
             @RequestBody ConfidentialComputeService.AttestationRequest request) {
+        requireClient();
         return SecretPadResponse.success(service.createAttestation(owner(), request));
     }
 
     @PostMapping("/grants")
     public SecretPadResponse<Map<String, Object>> grant(
             @RequestBody ConfidentialComputeService.GrantRequest request) {
+        requireClient();
         return SecretPadResponse.success(service.saveGrant(owner(), request));
     }
 
@@ -68,20 +75,29 @@ public class ConfidentialComputeController implements CryptoApi {
 
     @PostMapping("/tasks/{taskId}/start")
     public SecretPadResponse<JsonNode> start(@PathVariable String taskId, @RequestBody StartRequest request) {
+        requireClient();
         return SecretPadResponse.success(service.start(owner(), taskId, request.grantId()));
     }
 
     @GetMapping("/tasks/{taskId}/outputs")
     public SecretPadResponse<JsonNode> output(@PathVariable String taskId) {
+        requireClient();
         return SecretPadResponse.success(service.output(owner(), taskId));
     }
 
     @GetMapping("/audit-events")
     public SecretPadResponse<List<JsonNode>> audits() {
+        requireClient();
         return SecretPadResponse.success(service.audits(owner()));
     }
 
     private static String owner() {
         return UserContext.getUser().getOwnerId();
+    }
+
+    private static void requireClient() {
+        if (!"CLIENT".equals(UserContext.getUser().getEndRole())) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "当前登录身份需要 CLIENT 端权限");
+        }
     }
 }

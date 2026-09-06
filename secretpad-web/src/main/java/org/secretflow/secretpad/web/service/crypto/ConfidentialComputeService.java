@@ -290,6 +290,39 @@ public class ConfidentialComputeService {
         return store.auditEvents(ownerId);
     }
 
+    public Map<String, Object> encryptionIdentity(String ownerId, String kid) {
+        return store.encryptionIdentity(ownerId, kid);
+    }
+
+    public JsonNode consumeTrainingGrant(String ownerId, String taskId, String grantId) {
+        ConfidentialMetadataStore.GrantRow grant = store.consumeGrant(ownerId, grantId);
+        if (!taskId.equals(grant.taskId()) || !ConfidentialContract.SIM_PROFILE.equals(grant.securityProfile())) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "训练 grant 与任务或安全档位不匹配");
+        }
+        return grant.payload();
+    }
+
+    public void verifyTrainingOutput(JsonNode manifest, String taskId, String recipientKid) {
+        if (simulationRootPublicKey.isBlank()
+                || !simulationRootPublicKey.equals(
+                        manifest.path("producerEvidenceSigningPublicKey").asText())) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "训练结果签名根不可信");
+        }
+        String signature = requireText(manifest.path("producerSignature").asText(),
+                "producerSignature");
+        ObjectNode signed = ((ObjectNode) requiredObject(manifest, "manifest")).deepCopy();
+        signed.remove("producerSignature");
+        ConfidentialCanonical.verifyEd25519(simulationRootPublicKey, signature, signed);
+        requireClaim(signed, "taskId", taskId);
+        requireClaim(signed, "recipientKid", recipientKid);
+        requireClaim(signed, "producerType", "CIPHERGPU");
+        requireText(signed.path("domainId").asText(), "domainId");
+        if (!"ds-envelope/v2".equals(signed.path("format").asText())
+                || !signed.path("chunks").isArray() || signed.path("chunks").isEmpty()) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "训练结果 manifest 无效");
+        }
+    }
+
     private void verifyEvidence(JsonNode response, String nonce, ConfidentialMetadataStore.TaskRow task) {
         if (simulationRootPublicKey.isBlank()) {
             throw TeeException.of(TeeContract.Error.KEY_SERVICE_UNAVAILABLE, "未配置独立 A100 模拟证明信任根");

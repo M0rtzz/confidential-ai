@@ -29,23 +29,48 @@ public class ConfidentialMetadataStore {
                 "select user_id,encryption_public_key,signing_public_key from ds_crypto_identity where kid=?", kid);
         if (!existing.isEmpty()) {
             Map<String, Object> row = existing.get(0);
-            if (!ownerId.equals(row.get("user_id")) || !encryptionKey.equals(row.get("encryption_public_key"))
-                    || !signingKey.equals(row.get("signing_public_key"))) {
-                throw TeeException.of(TeeContract.Error.REQUEST_ID_CONFLICT, "kid 已绑定其他身份或公钥");
+            if (!ownerId.equals(row.get("user_id")) || !encryptionKey.equals(row.get("encryption_public_key"))) {
+                throw TeeException.of(TeeContract.Error.REQUEST_ID_CONFLICT, "kid 已绑定其他用户或加密公钥");
             }
+            saveSigningIdentity(ownerId, kid, signingKey);
+            saveEncryptionIdentity(ownerId, kid, encryptionKey);
             return;
         }
         jdbc.update("insert into ds_crypto_identity(kid,tenant_id,user_id,encryption_public_key,signing_public_key,algorithm,status,created_at) values(?,?,?,?,?,?,?,?)",
                 kid, ownerId, ownerId, encryptionKey, signingKey, "X25519+Ed25519", "ACTIVE", Instant.now().toString());
+        saveSigningIdentity(ownerId, kid, signingKey);
+        saveEncryptionIdentity(ownerId, kid, encryptionKey);
     }
 
     public void requireSigningIdentity(String ownerId, String signingKey) {
         Integer count = jdbc.queryForObject(
-                "select count(*) from ds_crypto_identity where user_id=? and signing_public_key=? and status='ACTIVE'",
+                "select count(*) from ds_crypto_signing_identity where owner_id=? and signing_public_key=? and status='ACTIVE'",
                 Integer.class, ownerId, signingKey);
         if (count == null || count != 1) {
             throw TeeException.of(TeeContract.Error.TASK_SIGNATURE_INVALID, "签名公钥未登记或已撤销");
         }
+    }
+
+    private void saveSigningIdentity(String ownerId, String kid, String signingKey) {
+        Integer count = jdbc.queryForObject("select count(*) from ds_crypto_signing_identity where signing_public_key=?",
+                Integer.class, signingKey);
+        if (count != null && count == 1) return;
+        jdbc.update("insert into ds_crypto_signing_identity(signing_public_key,kid,owner_id,status,created_at) "
+                        + "values(?,?,?,'ACTIVE',?)", signingKey, kid, ownerId, Instant.now().toString());
+    }
+
+    private void saveEncryptionIdentity(String ownerId, String kid, String encryptionKey) {
+        Integer count = jdbc.queryForObject("select count(*) from ds_customer_encryption_key where kid=?",
+                Integer.class, kid);
+        if (count != null && count == 1) return;
+        Integer highest = jdbc.queryForObject(
+                "select coalesce(max(key_version),0) from ds_customer_encryption_key where tenant_id=? and subject_id=?",
+                Integer.class, ownerId, ownerId);
+        int version = (highest == null ? 0 : highest) + 1;
+        jdbc.update("insert into ds_customer_encryption_key(kid,tenant_id,subject_id,public_key,algorithm,key_version,"
+                        + "fingerprint,status,created_at) values(?,?,?,?,?,?,?,'ACTIVE',?)",
+                kid, ownerId, ownerId, encryptionKey, "X25519", version,
+                ConfidentialCanonical.sha256Bytes(ConfidentialCanonical.decode(encryptionKey)), Instant.now().toString());
     }
 
     public void requireEncryptionIdentity(String ownerId, String kid) {
@@ -55,6 +80,17 @@ public class ConfidentialMetadataStore {
         if (count == null || count != 1) {
             throw TeeException.of(TeeContract.Error.KEY_REVOKED, "加密接收公钥未登记、已撤销或不属于当前用户");
         }
+    }
+
+    public Map<String, Object> encryptionIdentity(String ownerId, String kid) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "select kid,encryption_public_key,signing_public_key,status from ds_crypto_identity "
+                        + "where user_id=? and kid=? and status='ACTIVE'", ownerId, kid);
+        if (rows.size() != 1) {
+            throw TeeException.of(TeeContract.Error.KEY_REVOKED,
+                    "加密接收公钥未登记、已撤销或不属于当前用户");
+        }
+        return rows.get(0);
     }
 
     public void saveTask(String ownerId, String taskId, JsonNode spec, String digest,
