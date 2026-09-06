@@ -88,6 +88,10 @@ ensure_credentials() {
   umask 077
   mkdir -p "$CONFIDENTIAL_CA_DIR" "$CIPHERGPU_SERVER_CERT_DIR" "$SIM_ATTESTATION_SERVER_CERT_DIR" \
     "$SECRETPAD_CIPHERGPU_CLIENT_DIR" "$CIPHERGPU_SIM_CLIENT_DIR" "$SIM_ATTESTATION_SECRET_DIR"
+  # umask 077 会把这些目录建成 0700，容器内 UID 10001 连目录都进不去。
+  # 上级 .dev-runtime/<实例> 仍为 0700，CA 私钥另以 0400 保护且该目录不参与挂载。
+  chmod 755 "$CONFIDENTIAL_CA_DIR" "$CIPHERGPU_SERVER_CERT_DIR" "$SIM_ATTESTATION_SERVER_CERT_DIR" \
+    "$SECRETPAD_CIPHERGPU_CLIENT_DIR" "$CIPHERGPU_SIM_CLIENT_DIR" "$SIM_ATTESTATION_SECRET_DIR"
   if [ ! -s "${CONFIDENTIAL_CA_DIR}/ca.key" ] || [ ! -s "${CONFIDENTIAL_CA_DIR}/ca.crt" ] \
       || ! openssl x509 -checkend 86400 -noout -in "${CONFIDENTIAL_CA_DIR}/ca.crt" >/dev/null 2>&1; then
     local ca_config="${CONFIDENTIAL_CA_DIR}/ca.cnf"
