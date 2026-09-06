@@ -98,9 +98,14 @@ public class TeeAssetRegistrarImpl implements TeeAssetRegistrar {
             log.info("资产 {} 缺少表结构，跳过密文资产登记", assetId);
             return;
         }
-        List<String> granted = values(payload.path("teeColumns"));
+        // 审批单的 teeColumns 是本次申请所选全部数据的列并集，登记前须收敛到本资产自身的表结构，
+        // 否则授权列不是登记表结构的子集，中心端登记与后续任务下发都会被拒。
+        List<String> approved = values(payload.path("teeColumns"));
+        List<String> granted = approved.isEmpty() ? schema
+                : approved.stream().filter(schema::contains).toList();
         if (granted.isEmpty()) {
-            granted = schema;
+            log.info("资产 {} 的表结构与审批批准的列没有交集，跳过密文资产登记", assetId);
+            return;
         }
         String owner = ownerOf(text(asset.get("provider_node_id")));
         if (owner.isBlank()) {
