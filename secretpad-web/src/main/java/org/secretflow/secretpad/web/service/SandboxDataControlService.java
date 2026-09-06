@@ -3,6 +3,7 @@ package org.secretflow.secretpad.web.service;
 
 import org.secretflow.secretpad.common.dto.UserContextDTO;
 import org.secretflow.secretpad.common.util.UserContext;
+import org.secretflow.secretpad.web.service.tee.TeeResultMetadataService;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,7 +39,7 @@ public class SandboxDataControlService {
     public List<Map<String, Object>> mountControls() {
         String node = nodeId();
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "select m.sandbox_id,m.asset_id,m.id mount_id,s.name sandbox_name,s.project_id," 
+                "select m.sandbox_id,m.asset_id,m.id mount_id,s.name sandbox_name,s.project_id,s.expires_at,"
                         + "a.name asset_name,a.provider_node_id,n.name provider_node_name," 
                         + "coalesce(c.allow_use,1) allow_use,c.use_until,coalesce(c.version,0) version,c.updated_at "
                         + "from ds_sandbox_dataset_mount m join ds_sandbox s on s.id=m.sandbox_id and s.deleted=0 "
@@ -48,6 +49,7 @@ public class SandboxDataControlService {
                         + "where m.deleted=0 and m.status='READY' and (s.owner_id=? or s.owner_id=?) and s.created_by=? "
                         + "order by s.created_at desc,a.name", node, ownerId(), actor());
         rows.forEach(row -> {
+            row.put("use_until", TeeResultMetadataService.earliest(row.get("use_until"), row.get("expires_at")));
             addMountState(row);
             applyAssetTimeWindow(row, string(row.get("asset_id")));
         });
@@ -81,20 +83,31 @@ public class SandboxDataControlService {
         }
         Map<String, Object> result = requireRow(
                 "select * from ds_sandbox_mount_control where sandbox_id=? and asset_id=?", sandboxId, assetId);
-        addMountState(result);
+        result.putAll(mountPolicy(sandboxId, assetId));
         return result;
     }
 
     public List<Map<String, Object>> resultControls(String sandboxId) {
         requireSandboxCreator(sandboxId);
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "select d.sandbox_id,d.table_name,d.name,d.row_count,t.id task_id,t.name task_name,t.finished_at," 
-                        + "c.view_until,c.allow_export,c.export_until,coalesce(c.version,0) version,c.updated_at "
+                "select d.sandbox_id,d.table_name,d.name,d.row_count,t.id task_id,t.name task_name,t.finished_at,t.result_view_until,d.created_at,"
+                        + "s.project_id,p.name project_name,s.name sandbox_name,c.view_until,c.allow_export,c.export_until,coalesce(c.version,0) version,c.updated_at "
                         + "from ds_sandbox_data_dir d left join ds_dev_task t on t.sandbox_id=d.sandbox_id "
                         + "and t.result_table_name=d.table_name and t.deleted=0 "
+                        + "left join ds_sandbox s on s.id=d.sandbox_id left join project p on p.project_id=s.project_id "
                         + "left join ds_sandbox_result_control c on c.sandbox_id=d.sandbox_id and c.table_name=d.table_name "
                         + "where d.sandbox_id=? and d.kind='RESULT' and d.deleted=0 order by d.created_at desc", sandboxId);
-        rows.forEach(this::addResultState);
+        String sandboxUntil = sandboxUntil(sandboxId);
+        rows.forEach(row -> {
+            row.put("projectId", row.get("project_id"));
+            row.put("projectName", row.get("project_name"));
+            row.put("sandboxName", row.get("sandbox_name"));
+            row.put("runId", row.get("task_id"));
+            row.put("createdAt", TeeResultMetadataService.earliest(
+                    string(row.get("finished_at")).isBlank() ? row.get("created_at") : row.get("finished_at")));
+            row.put("view_until", TeeResultMetadataService.earliest(row.get("view_until"), row.get("result_view_until"), sandboxUntil));
+            addResultState(row);
+        });
         appendTeeResults(sandboxId, rows);
         return rows;
     }
@@ -107,7 +120,7 @@ public class SandboxDataControlService {
      */
     private void appendTeeResults(String sandboxId, List<Map<String, Object>> rows) {
         List<Map<String, Object>> tasks = jdbc.queryForList(
-                "select id task_id,sandbox_id,name task_name,result_rows,finished_at,result_preview "
+                "select id task_id,sandbox_id,name task_name,result_rows,finished_at,result_preview,result_view_until,result_export_until "
                         + "from ds_dev_task where sandbox_id=? and run_mode='PROD' and status='SUCCEEDED' "
                         + "and deleted=0 and result_preview is not null and result_preview<>'' "
                         + "order by finished_at desc", sandboxId);
@@ -123,7 +136,9 @@ public class SandboxDataControlService {
                 Map<String, Object> row = teeBaseRow(task);
                 copyText(output, row, "kind", "resultId", "objectId", "keyId", "keyVersion",
                         "ciphertextSha256", "exportState");
-                row.put("name", output.path("kind").asText("DATA") + " 密文结果");
+                row.put("name", string(task.get("task_name")) + " · "
+                        + ("MODEL".equals(output.path("kind").asText()) ? "模型" : "数据") + " · "
+                        + output.path("resultId").asText(output.path("objectId").asText("unknown")));
                 row.put("table_name", "tee:" + output.path("resultId").asText(
                         output.path("objectId").asText("unknown")));
                 row.put("contributors", stringList(output.path("contributors")));
@@ -141,7 +156,7 @@ public class SandboxDataControlService {
                 row.put("table_name", "tee-report:" + task.get("task_id") + ":" + reportIndex++);
                 row.put("tee_report", true);
                 row.put("permission_mode", "RULE_AUTHORIZED");
-                row.put("canPreview", true);
+                row.put("canPreview", !expired(string(row.get("view_until"))));
                 row.put("canExport", false);
                 rows.add(row);
             }
@@ -156,6 +171,15 @@ public class SandboxDataControlService {
         row.put("row_count", task.get("result_rows"));
         row.put("finished_at", task.get("finished_at"));
         row.put("runtime_mode", "SIMULATION");
+        row.put("view_until", TeeResultMetadataService.earliest(task.get("result_view_until"),
+                sandboxUntil(string(task.get("sandbox_id")))));
+        row.put("export_until", TeeResultMetadataService.earliest(task.get("result_export_until"), row.get("view_until")));
+        row.put("use_until", row.get("view_until"));
+        row.put("serverTime", Instant.now().toString());
+        boolean available = !expired(string(row.get("view_until")));
+        row.put("canUse", available);
+        row.put("status", available ? "ACTIVE" : "EXPIRED");
+        row.put("disabledReason", available ? "" : "已超过查看截止时间");
         return row;
     }
 
@@ -195,6 +219,7 @@ public class SandboxDataControlService {
         }
         Map<String, Object> result = requireRow("select * from ds_sandbox_result_control where sandbox_id=? and table_name=?",
                 sandboxId, tableName);
+        result.put("view_until", TeeResultMetadataService.earliest(result.get("view_until"), sandboxUntil(sandboxId)));
         addResultState(result);
         return result;
     }
@@ -240,6 +265,7 @@ public class SandboxDataControlService {
     }
 
     public Map<String, Object> enrichDirectory(Map<String, Object> directory) {
+        directory.put("serverTime", Instant.now().toString());
         Object raw = directory.get("items");
         if (!(raw instanceof List<?> values)) return directory;
         String sandboxId = string(directory.get("sandboxId"));
@@ -262,6 +288,7 @@ public class SandboxDataControlService {
                 item.put("canPreview", true);
                 item.put("canExport", false);
             }
+            item.put("serverTime", directory.get("serverTime"));
             items.add(item);
         }
         directory.put("items", items);
@@ -282,7 +309,11 @@ public class SandboxDataControlService {
     public void requireMountTableUsable(String sandboxId, String tableName) {
         Map<String, Object> dir = dataDir(sandboxId, tableName);
         if ("MOUNT".equals(string(dir.get("kind"))) && !mountAllowed(sandboxId, string(dir.get("asset_id")))) {
-            throw new SecurityException("该挂载数据已被禁止使用");
+            throw new SecurityException("该挂载数据已被禁止使用或已超过使用截止时间");
+        }
+        if ("RESULT".equals(string(dir.get("kind")))
+                && !bool(resultPolicy(sandboxId, tableName).get("canUse"), false)) {
+            throw new SecurityException("开发结果已超过使用截止时间");
         }
     }
 
@@ -303,8 +334,9 @@ public class SandboxDataControlService {
     public void requireTaskResultView(Map<String, Object> task) {
         String sandboxId = string(task.get("sandbox_id"));
         String table = string(task.get("result_table_name"));
-        if (!sandboxId.isBlank() && !table.isBlank()
-                && !bool(resultPolicy(sandboxId, table).get("canPreview"), false)) {
+        String until = TeeResultMetadataService.earliest(task.get("result_view_until"), sandboxUntil(sandboxId));
+        if (expired(until) || (!sandboxId.isBlank() && !table.isBlank()
+                && !bool(resultPolicy(sandboxId, table).get("canPreview"), false))) {
             throw new SecurityException("开发结果已超过查看截止时间");
         }
     }
@@ -320,12 +352,19 @@ public class SandboxDataControlService {
         List<Map<String, Object>> rows = jdbc.queryForList("select * from ds_sandbox_result_control "
                 + "where sandbox_id=? and table_name=?", sandboxId, tableName);
         Map<String, Object> result = rows.isEmpty() ? new LinkedHashMap<>() : new LinkedHashMap<>(rows.get(0));
+        result.put("view_until", TeeResultMetadataService.earliest(result.get("view_until"), sandboxUntil(sandboxId)));
         addResultState(result);
         return result;
     }
 
     private void addResultState(Map<String, Object> row) {
+        row.put("view_until", TeeResultMetadataService.earliest(row.get("view_until")));
+        row.put("use_until", row.get("view_until"));
+        row.put("serverTime", Instant.now().toString());
         boolean canView = !expired(string(row.get("view_until")));
+        row.put("canUse", canView);
+        row.put("status", canView ? "ACTIVE" : "EXPIRED");
+        row.put("disabledReason", canView ? "" : "已超过查看截止时间");
         boolean canExport = canView && bool(row.get("allow_export"), false)
                 && !string(row.get("export_until")).isBlank() && !expired(string(row.get("export_until")));
         row.put("canPreview", canView);
@@ -334,6 +373,7 @@ public class SandboxDataControlService {
     }
 
     private void addMountState(Map<String, Object> row) {
+        row.put("serverTime", Instant.now().toString());
         boolean allowed = bool(row.get("allow_use"), true);
         String useUntil = string(row.get("use_until"));
         boolean canUse = allowed && !expired(useUntil);
@@ -348,6 +388,7 @@ public class SandboxDataControlService {
                 sandboxId, assetId);
         Map<String, Object> policy = rows.isEmpty() ? new LinkedHashMap<>() : new LinkedHashMap<>(rows.get(0));
         policy.putIfAbsent("allow_use", 1);
+        policy.put("use_until", TeeResultMetadataService.earliest(policy.get("use_until"), sandboxUntil(sandboxId)));
         addMountState(policy);
         applyAssetTimeWindow(policy, assetId);
         return policy;
@@ -369,19 +410,23 @@ public class SandboxDataControlService {
         List<Map<String, Object>> rows = jdbc.queryForList("select access_start,access_end,valid_from,valid_until "
                 + "from ds_asset_usage_control where asset_id=?", assetId);
         Map<String, Object> control = rows.isEmpty() ? syncedTimeWindow(assetId) : rows.get(0);
-        boolean canUse = bool(policy.get("canUse"), false);
+        policy.put("use_until", TeeResultMetadataService.earliest(policy.get("use_until"), control.get("valid_until")));
+        boolean canUse = bool(policy.get("canUse"), false) && !expired(string(policy.get("use_until")));
+        if (!canUse && bool(policy.get("allow_use"), true)) policy.put("disabledReason", "已超过使用截止时间");
         if (canUse && !AssetTimeWindow.within(control.get("valid_from"), control.get("valid_until"))) {
             canUse = false;
             policy.put("disabledReason", "已超过数据目录设置的使用截止时间");
         }
-        boolean canPreview = canUse && AssetTimeWindow.within(control.get("access_start"), control.get("access_end"));
+        String viewUntil = TeeResultMetadataService.earliest(control.get("access_end"), policy.get("use_until"));
+        boolean canPreview = canUse && !expired(viewUntil)
+                && AssetTimeWindow.within(control.get("access_start"), control.get("access_end"));
         if (canUse && !canPreview) {
             policy.put("disabledReason", "已超过数据目录设置的访问截止时间");
         }
         policy.put("canUse", canUse);
         policy.put("canPreview", canPreview);
-        String accessEnd = string(control.get("access_end"));
-        policy.put("view_until", accessEnd);
+        policy.put("view_until", viewUntil);
+        policy.put("status", canUse ? "ACTIVE" : expired(string(policy.get("use_until"))) ? "EXPIRED" : "DISABLED");
     }
 
     /**
@@ -471,7 +516,13 @@ public class SandboxDataControlService {
     }
 
     private boolean expired(String value) {
-        return !value.isBlank() && Instant.now().isAfter(instant(value, "截止时间"));
+        return !value.isBlank() && !Instant.now().isBefore(instant(value, "截止时间"));
+    }
+
+    private String sandboxUntil(String sandboxId) {
+        if (sandboxId.isBlank()) return "";
+        List<Map<String, Object>> rows = jdbc.queryForList("select expires_at from ds_sandbox where id=?", sandboxId);
+        return rows.isEmpty() ? "" : TeeResultMetadataService.earliest(rows.get(0).get("expires_at"));
     }
 
     private void requireSandboxCreator(String sandboxId) {

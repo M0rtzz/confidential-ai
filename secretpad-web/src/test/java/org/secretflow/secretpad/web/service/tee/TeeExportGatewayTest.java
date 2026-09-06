@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.secretflow.secretpad.web.service.DataSandboxMvpService;
 
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -35,7 +37,8 @@ class TeeExportGatewayTest {
         TeeExportGateway gateway = new TeeExportGateway(service, center, key, mvp, new ObjectMapper());
 
         gateway.create("inst-a", "alice", new TeeExportService.CreateRequest(
-                TeeContract.VERSION, "req-1", "result-1", ""));
+                TeeContract.VERSION, "req-1", "result-1", "",
+                "2099-01-01T00:00:00Z", "测试导出"));
 
         org.mockito.ArgumentCaptor<TeeExportService.CreateRequest> captured =
                 org.mockito.ArgumentCaptor.forClass(TeeExportService.CreateRequest.class);
@@ -57,7 +60,8 @@ class TeeExportGatewayTest {
         TeeExportGateway gateway = new TeeExportGateway(service, center, key, mvp, new ObjectMapper());
 
         gateway.create("inst-a", "alice", new TeeExportService.CreateRequest(
-                TeeContract.VERSION, "req-2", "result-2", null));
+                TeeContract.VERSION, "req-2", "result-2", null,
+                "2099-01-01T00:00:00Z", "测试导出"));
 
         verify(service).create(eq("inst-a"), eq("alice"), any());
         verify(center, never()).post(any(), any(), any());
@@ -107,9 +111,7 @@ class TeeExportGatewayTest {
         TeeInstitutionKey key = mock(TeeInstitutionKey.class);
         DataSandboxMvpService mvp = mock(DataSandboxMvpService.class);
         when(center.configured()).thenReturn(true);
-        TeeExportService.RequestView view = new TeeExportService.RequestView(
-                TeeContract.VERSION, "exp-1", "result-1", "object-1", "DATA", "task-1",
-                "0", "kd-1", "1", requester, "cert", status, "", false, false, java.util.List.of());
+        TeeExportService.RequestView view = requestView(requester, status, false);
         when(center.get(eq("/exports/exp-1"), eq(TeeExportService.RequestView.class))).thenReturn(view);
         return new TeeExportGateway(service, center, key, mvp, new ObjectMapper());
     }
@@ -122,17 +124,15 @@ class TeeExportGatewayTest {
         DataSandboxMvpService mvp = mock(DataSandboxMvpService.class);
         when(center.configured()).thenReturn(true);
         when(key.certificatePem()).thenReturn("managed-pem");
-        TeeExportService.RequestView view = new TeeExportService.RequestView(
-                TeeContract.VERSION, "exp-1", "result-1", "object-1", "DATA", "task-1",
-                "0", "kd-1", "1", "inst-a", "cert", "PENDING_APPROVAL", "", true, true,
-                java.util.List.of());
+        TeeExportService.RequestView view = requestView("inst-a", "PENDING_APPROVAL", true);
         when(center.post(eq("/exports"), any(), eq(TeeExportService.RequestView.class))).thenReturn(view);
         when(center.post(eq("/exports/exp-1/action"), any(), eq(TeeExportService.RequestView.class)))
                 .thenReturn(view);
         TeeExportGateway gateway = new TeeExportGateway(service, center, key, mvp, new ObjectMapper());
 
         gateway.create("inst-a", "alice", new TeeExportService.CreateRequest(
-                TeeContract.VERSION, "req-1", "result-1", ""));
+                TeeContract.VERSION, "req-1", "result-1", "",
+                "2099-01-01T00:00:00Z", "测试导出"));
         gateway.action("inst-a", "alice", "exp-1",
                 new TeeExportService.ActionRequest(TeeContract.VERSION, "REJECT", "不同意"));
 
@@ -143,5 +143,45 @@ class TeeExportGatewayTest {
         verify(mvp).auditAs(eq("TEE"), eq("INFO"), eq("alice"), eq("TEE_EXPORT_REJECT"),
                 eq("TEE_EXPORT"), eq("exp-1"), org.mockito.ArgumentMatchers.contains("delegated=true"),
                 eq(true));
+    }
+
+    private static TeeExportService.RequestView requestView(String requester, String status,
+                                                             boolean canDownload) {
+        return new ObjectMapper().convertValue(Map.ofEntries(
+                Map.entry("contractVersion", TeeContract.VERSION),
+                Map.entry("exportId", "exp-1"),
+                Map.entry("resultId", "result-1"),
+                Map.entry("objectId", "object-1"),
+                Map.entry("kind", "DATA"),
+                Map.entry("taskId", "task-1"),
+                Map.entry("ciphertextSha256", "0"),
+                Map.entry("keyId", "kd-1"),
+                Map.entry("keyVersion", "1"),
+                Map.entry("requesterOwnerId", requester),
+                Map.entry("recipientCertSha256", "cert"),
+                Map.entry("status", status),
+                Map.entry("approvedAt", ""),
+                Map.entry("canVote", false),
+                Map.entry("canCancel", false),
+                Map.entry("votes", java.util.List.of()),
+                Map.entry("resultName", "结果"),
+                Map.entry("projectId", "project-1"),
+                Map.entry("projectName", "项目"),
+                Map.entry("sandboxId", "sandbox-1"),
+                Map.entry("sandboxName", "沙箱"),
+                Map.entry("taskName", "任务"),
+                Map.entry("runId", "run-1"),
+                Map.entry("createdAt", "2098-01-01T00:00:00Z"),
+                Map.entry("viewUntil", "2099-01-01T00:00:00Z"),
+                Map.entry("maxExportUntil", "2099-01-01T00:00:00Z"),
+                Map.entry("requestedAt", "2098-01-01T00:00:00Z"),
+                Map.entry("exportUntil", "2099-01-01T00:00:00Z"),
+                Map.entry("effectiveExportUntil", "2099-01-01T00:00:00Z"),
+                Map.entry("purpose", "测试导出"),
+                Map.entry("accessStatus", "ACTIVE"),
+                Map.entry("canDownload", canDownload),
+                Map.entry("disabledReason", ""),
+                Map.entry("serverTime", "2098-01-01T00:00:00Z")),
+                TeeExportService.RequestView.class);
     }
 }

@@ -22,6 +22,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.security.cert.X509Certificate;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -40,7 +41,7 @@ public class TeeExportService {
     private static final List<String> EXPORTABLE_KINDS = List.of("DATA", "MODEL");
 
     public record CreateRequest(String contractVersion, String requestId, String resultId,
-                                String recipientCertPem) {
+                                String recipientCertPem, String exportUntil, String purpose) {
     }
 
     public record ActionRequest(String contractVersion, String action, String comment) {
@@ -49,7 +50,8 @@ public class TeeExportService {
     public record CancelRequest(String contractVersion) {
     }
 
-    public record ExportRequest(String contractVersion, String requestId, String recipientCertPem) {
+    public record ExportRequest(String contractVersion, String requestId, String recipientCertPem,
+                                String exportId) {
     }
 
     public record VoteView(String ownerId, String status, String voter, String comment, String votedAt) {
@@ -59,10 +61,18 @@ public class TeeExportService {
                               String kind, String taskId, String ciphertextSha256, String keyId,
                               String keyVersion, String requesterOwnerId, String recipientCertSha256,
                               String status, String approvedAt, boolean canVote, boolean canCancel,
-                              List<VoteView> votes) {
+                              List<VoteView> votes, String resultName, String projectId, String projectName,
+                              String sandboxId, String sandboxName, String taskName, String runId,
+                              String createdAt, String viewUntil, String maxExportUntil,
+                              String requestedAt, String exportUntil, String effectiveExportUntil,
+                              String purpose, String accessStatus, boolean canDownload,
+                              String disabledReason, String serverTime) {
     }
 
-    public record ListResult(String contractVersion, List<RequestView> items) {
+    public record ListResult(String contractVersion, List<RequestView> items, String serverTime) {
+        public ListResult(String contractVersion, List<RequestView> items) {
+            this(contractVersion, items, Instant.now().toString());
+        }
     }
 
     public record ExportResult(String contractVersion, String objectId,
@@ -72,10 +82,17 @@ public class TeeExportService {
     public record ExportableView(String resultId, String objectId, String kind, String taskId,
                                  String ciphertextSha256, String keyId, String keyVersion,
                                  Long sizeBytes, List<String> contributors, String exportState,
-                                 String latestExportId, String latestStatus) {
+                                 String latestExportId, String latestStatus, String latestAccessStatus,
+                                 String resultName, String projectId, String projectName,
+                                 String sandboxId, String sandboxName, String taskName, String runId,
+                                 String createdAt, String viewUntil, String maxExportUntil,
+                                 boolean canApply, String disabledReason, String serverTime) {
     }
 
-    public record ExportableResult(String contractVersion, List<ExportableView> items) {
+    public record ExportableResult(String contractVersion, List<ExportableView> items, String serverTime) {
+        public ExportableResult(String contractVersion, List<ExportableView> items) {
+            this(contractVersion, items, Instant.now().toString());
+        }
     }
 
     private final TeeExportRequestRepository requests;
@@ -90,13 +107,14 @@ public class TeeExportService {
     private final TeeIdempotency idempotency;
     private final DataSandboxMvpService mvp;
     private final ObjectMapper mapper;
+    private final TeeResultMetadataService metadata;
 
     public TeeExportService(TeeExportRequestRepository requests, TeeExportVoteRepository votes,
                             TeeObjectRepository objects, TeeRuntimeTaskRepository tasks,
                             TeeAssetService assets, TeePolicyService policies, TeeKeyService keys,
                             KeyAdapterClient adapter, TeeIdentityRegistry registry,
                             TeeIdempotency idempotency, DataSandboxMvpService mvp,
-                            ObjectMapper mapper) {
+                            ObjectMapper mapper, TeeResultMetadataService metadata) {
         this.requests = requests;
         this.votes = votes;
         this.objects = objects;
@@ -109,11 +127,12 @@ public class TeeExportService {
         this.idempotency = idempotency;
         this.mvp = mvp;
         this.mapper = mapper;
+        this.metadata = metadata;
     }
 
     /** 建单时冻结结果版本、贡献机构和接收者证书指纹；发起机构也必须投票。 */
     @Transactional
-    public RequestView create(String ownerId, String actor, CreateRequest request) {
+    public synchronized RequestView create(String ownerId, String actor, CreateRequest request) {
         TeeGuard.requireVersion(request.contractVersion());
         String requestId = TeeGuard.requireText(request.requestId(), "requestId");
         String resultId = TeeGuard.requireText(request.resultId(), "resultId");
@@ -123,18 +142,33 @@ public class TeeExportService {
         if (!contributors.contains(ownerId)) {
             throw TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "发起机构不是结果贡献方");
         }
+        String exportUntil = TeeGuard.requireInstant(request.exportUntil(), "exportUntil").toString();
+        String purpose = TeeGuard.requireText(request.purpose(), "purpose");
+        if (purpose.length() > 1000) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "申请用途不能超过 1000 个字符");
+        }
         X509Certificate recipient = registry.requireInstitutionCertificate(ownerId,
                 request.recipientCertPem());
         String certSha256 = TeeCrypto.certificateSha256(recipient);
         TeeExportRequestDO existing = requests.findByRequestId(requestId).orElse(null);
         if (existing != null) {
-            if (!sameFrozenRequest(existing, ownerId, object, certSha256)) {
+            if (!sameFrozenRequest(existing, ownerId, object, certSha256)
+                    || !exportUntil.equals(existing.getExportUntil()) || !purpose.equals(existing.getPurpose())) {
                 throw TeeException.of(TeeContract.Error.REQUEST_ID_CONFLICT,
                         "requestId 已绑定其他导出内容");
             }
             return view(existing, ownerId);
         }
         requireSucceededResult(object);
+        Deadline deadline = deadline(object);
+        requireDeadline(deadline);
+        Instant requestedUntil = Instant.parse(exportUntil);
+        if (!Instant.now().isBefore(requestedUntil) || requestedUntil.isAfter(deadline.until())) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "导出截止时间必须在当前时间之后且不超过授权上限");
+        }
+        if (activeRequest(ownerId, object) != null) {
+            throw TeeException.of(TeeContract.Error.REQUEST_ID_CONFLICT, "该结果已有有效导出工单，请查看已有申请");
+        }
         String exportId = "exp-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
         TeeExportRequestDO created = TeeExportRequestDO.builder()
                 .upk(new TeeExportRequestDO.UPK(exportId))
@@ -143,7 +177,8 @@ public class TeeExportService {
                 .ciphertextSha256(object.getCiphertextSha256())
                 .keyId(object.getKeyId()).keyVersion(object.getKeyVersion())
                 .requesterOwnerId(ownerId).recipientCertSha256(certSha256)
-                .requestId(requestId).status(PENDING).approvedAt("").build();
+                .requestId(requestId).status(PENDING).approvedAt("")
+                .exportUntil(exportUntil).purpose(purpose).build();
         requests.save(created);
         for (String contributor : contributors) {
             votes.save(TeeExportVoteDO.builder()
@@ -161,30 +196,57 @@ public class TeeExportService {
      * REPORT 按授权规则明文出域，不进这条流水线。
      */
     public ExportableResult exportable(String ownerId) {
+        return catalog(ownerId, false);
+    }
+
+    /** 中心端只读查看自己调度任务的产出，不获取数据方工单或解密能力。 */
+    public ExportableResult catalog(String ownerId) {
+        return catalog(ownerId, true);
+    }
+
+    private ExportableResult catalog(String ownerId, boolean centerReadOnly) {
         TeeGuard.requireText(ownerId, "ownerId");
         List<ExportableView> items = new ArrayList<>();
-        for (TeeObjectDO object : objects.findTop200ByKindInOrderByGmtCreateDesc(EXPORTABLE_KINDS)) {
+        for (TeeObjectDO object : objects.findByKindInOrderByGmtCreateDesc(EXPORTABLE_KINDS)) {
             List<String> contributors;
             try {
                 contributors = contributors(object);
+                if (!succeededResult(object) || (centerReadOnly
+                        ? !ownsTask(ownerId, object.getTaskId()) : !contributors.contains(ownerId))) {
+                    continue;
+                }
             } catch (TeeException damaged) {
-                // 单条记录损坏不应让整张列表不可用；该结果建单时仍会被拒绝。
+                // 损坏记录不阻断其他结果，所有写入口仍会重新核对权属和授权。
                 continue;
             }
-            if (!contributors.contains(ownerId) || !succeededResult(object)) {
-                continue;
-            }
-            List<TeeExportRequestDO> owned = requests
+            List<TeeExportRequestDO> owned = centerReadOnly ? List.of() : requests
                     .findByResultIdAndRequesterOwnerIdOrderByGmtCreateDesc(object.getResultId(), ownerId);
             TeeExportRequestDO latest = owned.isEmpty() ? null : owned.get(0);
+            Deadline limit = deadline(object);
+            TeeResultMetadataService.Metadata source = metadata.resolve(object);
+            boolean active = limit.available() && Instant.now().isBefore(limit.until());
+            boolean hasRequest = owned.stream().anyMatch(item -> activeRequest(item, limit));
+            String reason = centerReadOnly ? "请由贡献机构客户端申请导出" : !active ? limit.reason()
+                    : hasRequest ? "已有有效导出工单，请查看已有申请" : "";
             items.add(new ExportableView(object.getResultId(), object.getUpk().getObjectId(),
                     object.getKind(), object.getTaskId(), object.getCiphertextSha256(),
                     object.getKeyId(), object.getKeyVersion(), object.getSizeBytes(), contributors,
-                    object.getExportState(),
-                    latest == null ? "" : latest.getUpk().getExportId(),
-                    latest == null ? "" : latest.getStatus()));
+                    object.getExportState(), latest == null ? "" : latest.getUpk().getExportId(),
+                    latest == null ? "" : latest.getStatus(), latest == null ? "" : accessStatus(latest, limit),
+                    source.resultName(), source.projectId(), source.projectName(), source.sandboxId(),
+                    source.sandboxName(), source.taskName(), source.runId(), source.createdAt(),
+                    limit.viewText(), limit.text(),
+                    !centerReadOnly && active && !hasRequest, reason, Instant.now().toString()));
         }
         return new ExportableResult(TeeContract.VERSION, items);
+    }
+
+    private boolean ownsTask(String ownerId, String taskId) {
+        TeeRuntimeTaskDO task = tasks.findById(new TeeRuntimeTaskDO.UPK(taskId)).orElse(null);
+        if (task == null) return false;
+        String issuer = taskSpec(task.getTaskJws()).issuer();
+        String canonical = registry.canonicalInstitutionId(issuer);
+        return ownerId.equals(issuer) || ownerId.equals(canonical);
     }
 
     public ListResult mine(String ownerId) {
@@ -199,7 +261,19 @@ public class TeeExportService {
                 .map(vote -> requests.findById(new TeeExportRequestDO.UPK(vote.getUpk().getExportId()))
                         .orElse(null))
                 .filter(item -> item != null && PENDING.equals(item.getStatus()))
-                .map(item -> view(item, ownerId)).toList();
+                .map(item -> view(item, ownerId))
+                .filter(item -> "ACTIVE".equals(item.accessStatus())).toList();
+        return new ListResult(TeeContract.VERSION, items);
+    }
+
+    /** 已投票工单和不再可处理的工单保留在审批记录中。 */
+    public ListResult history(String ownerId) {
+        List<RequestView> items = votes.findByUpkVoterOwnerIdOrderByGmtCreateDesc(ownerId).stream()
+                .map(vote -> requests.findById(new TeeExportRequestDO.UPK(vote.getUpk().getExportId()))
+                        .map(item -> view(item, ownerId)).orElse(null))
+                .filter(item -> item != null && (!PENDING.equals(item.status())
+                        || !"ACTIVE".equals(item.accessStatus()) || item.votes().stream().anyMatch(vote ->
+                        ownerId.equals(vote.ownerId()) && !VOTE_PENDING.equals(vote.status())))).toList();
         return new ListResult(TeeContract.VERSION, items);
     }
 
@@ -236,6 +310,7 @@ public class TeeExportService {
         TeeExportVoteDO vote = votes.findById(new TeeExportVoteDO.UPK(exportId, ownerId))
                 .orElseThrow(() -> TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED,
                         "当前机构不是该结果贡献方"));
+        requireRequestActive(request);
         String target = "APPROVE".equals(normalized) ? APPROVED : REJECTED;
         if (!VOTE_PENDING.equals(vote.getStatus()) && !target.equals(vote.getStatus())) {
             throw TeeException.of(TeeContract.Error.REQUEST_ID_CONFLICT, "机构已经提交相反投票");
@@ -263,6 +338,7 @@ public class TeeExportService {
         if (!PENDING.equals(request.getStatus())) {
             throw TeeException.of(TeeContract.Error.EXPORT_NOT_APPROVED, "只有待审批工单可以撤回");
         }
+        requireRequestActive(request);
         request.setStatus(CANCELLED);
         requests.save(request);
         refreshObjectState(request.getObjectId());
@@ -276,7 +352,7 @@ public class TeeExportService {
                                             ExportRequest export) {
         TeeGuard.requireVersion(export.contractVersion());
         String requestId = TeeGuard.requireText(export.requestId(), "requestId");
-        TeeExportRequestDO request = approvedRequest(ownerId, resultId);
+        TeeExportRequestDO request = approvedRequest(ownerId, resultId, export.exportId());
         X509Certificate recipient = registry.requireInstitutionCertificate(ownerId,
                 export.recipientCertPem());
         String recipientSha256 = TeeCrypto.certificateSha256(recipient);
@@ -284,20 +360,43 @@ public class TeeExportService {
             throw TeeException.of(TeeContract.Error.ASSET_OWNER_MISMATCH,
                     "接收者证书与审批记录不符");
         }
+        // 幂等命中也必须重新判定业务期限、原授权及密钥状态。
+        Instant businessUntil = requireRequestActive(request);
+        requireFrozenAndActive(request);
         String fingerprint = TeeIdempotency.fingerprint(List.of(request.getUpk().getExportId(),
-                request.getCiphertextSha256(), recipientSha256));
-        return idempotency.execute(ownerId, "results/export", requestId, fingerprint,
+                request.getCiphertextSha256(), recipientSha256, request.getExportUntil()));
+        ExportResult issued = idempotency.execute(ownerId, "results/export", requestId, fingerprint,
                 ExportResult.class, () -> issueEnvelope(ownerId, actor, request, recipient),
-                issued -> issued == null ? null : issued.expiresAt());
+                value -> value == null ? null : value.expiresAt());
+        Instant effectiveUntil = earlier(TeeGuard.requireInstant(issued.expiresAt(), "expiresAt"),
+                earlier(businessUntil, requireRequestActive(request)));
+        if (!Instant.now().isBefore(effectiveUntil)) {
+            throw TeeException.of(TeeContract.Error.EXPORT_NOT_APPROVED, "导出信封或业务授权已过期");
+        }
+        return new ExportResult(issued.contractVersion(), issued.objectId(), issued.keyEnvelope(),
+                effectiveUntil.toString());
     }
 
     private ExportResult issueEnvelope(String ownerId, String actor, TeeExportRequestDO request,
                                        X509Certificate recipient) {
+        Instant businessUntil = requireRequestActive(request);
+        TeeKeyDO key = requireFrozenAndActive(request);
+        JsonNode sealed = adapter.call("/v1/keys/escrow-seal", Map.of(
+                "resourceUri", key.getResourceUri(),
+                "recipientCertPemB64", TeeKeyService.encodeCertificate(recipient)));
+        keys.countClaim(key);
+        String expiresAt = earlier(Instant.now().plusSeconds(TeeContract.EXPORT_TTL_SECONDS),
+                earlier(businessUntil, requireRequestActive(request))).toString();
+        event(actor, "TEE_RESULT_EGRESS", request, "expiresAt=" + expiresAt);
+        return new ExportResult(TeeContract.VERSION, request.getObjectId(), keys.envelope(key, sealed), expiresAt);
+    }
+
+    private TeeKeyDO requireFrozenAndActive(TeeExportRequestDO request) {
         TeeObjectDO object = resultObject(request.getResultId());
         if (!sameFrozenResult(request, object)) {
             throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "结果版本已变化");
         }
-        TeeCrypto.EncryptedObject stored = assets.readObject(ownerId, object.getUpk().getObjectId());
+        TeeCrypto.EncryptedObject stored = assets.readObject(request.getRequesterOwnerId(), object.getUpk().getObjectId());
         if (!request.getCiphertextSha256().equals(stored.ciphertextSha256())) {
             throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "密文对象摘要已变化");
         }
@@ -307,34 +406,37 @@ public class TeeExportService {
         if (!request.getResultId().equals(key.getAssetId()) || !"1".equals(key.getAssetVersion())) {
             throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "结果密钥绑定已变化");
         }
-        JsonNode sealed = adapter.call("/v1/keys/escrow-seal", Map.of(
-                "resourceUri", key.getResourceUri(),
-                "recipientCertPemB64", TeeKeyService.encodeCertificate(recipient)));
-        keys.countClaim(key);
-        String expiresAt = Instant.now().plusSeconds(TeeContract.EXPORT_TTL_SECONDS).toString();
-        event(actor, "TEE_RESULT_EGRESS", request, "expiresAt=" + expiresAt);
-        return new ExportResult(TeeContract.VERSION, request.getObjectId(), keys.envelope(key, sealed), expiresAt);
+        return key;
     }
 
-    private TeeExportRequestDO approvedRequest(String ownerId, String resultId) {
-        List<TeeExportRequestDO> approved = requests
-                .findByResultIdAndRequesterOwnerIdAndStatusOrderByGmtCreateDesc(
-                        TeeGuard.requireText(resultId, "resultId"), ownerId, APPROVED);
-        if (!approved.isEmpty()) {
-            return approved.get(0);
+    private TeeExportRequestDO approvedRequest(String ownerId, String resultId, String exportId) {
+        TeeGuard.requireText(resultId, "resultId");
+        if (exportId != null && !exportId.isBlank()) {
+            TeeExportRequestDO exact = requireRequest(exportId);
+            if (!ownerId.equals(exact.getRequesterOwnerId()) || !resultId.equals(exact.getResultId())) {
+                throw TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "工单与结果或接收机构不匹配");
+            }
+            requireRequestActive(exact);
+            if (PENDING.equals(exact.getStatus())) refreshStatus(exact);
+            if (APPROVED.equals(exact.getStatus())) return exact;
+            throw TeeException.of(TeeContract.Error.EXPORT_NOT_APPROVED, "导出工单尚未全票通过");
         }
-        // 并发投票时由取回路径再归并一次票面，避免两笔事务互相看不到而永久停在待审批。
+        for (TeeExportRequestDO approved : requests
+                .findByResultIdAndRequesterOwnerIdAndStatusOrderByGmtCreateDesc(resultId, ownerId, APPROVED)) {
+            if ("ACTIVE".equals(accessStatus(approved, deadline(resultObject(resultId))))) return approved;
+        }
+        // 取回时仅归并仍有效的待审批工单，过期工单不能被全票状态重新激活。
         for (TeeExportRequestDO candidate : requests
                 .findByResultIdAndRequesterOwnerIdAndStatusOrderByGmtCreateDesc(resultId, ownerId, PENDING)) {
+            if (!"ACTIVE".equals(accessStatus(candidate, deadline(resultObject(resultId))))) continue;
             refreshStatus(candidate);
-            if (APPROVED.equals(candidate.getStatus())) {
-                return candidate;
-            }
+            if (APPROVED.equals(candidate.getStatus())) return candidate;
         }
-        throw TeeException.of(TeeContract.Error.EXPORT_NOT_APPROVED, "导出工单尚未全票通过");
+        throw TeeException.of(TeeContract.Error.EXPORT_NOT_APPROVED, "没有仍在有效期内的已批准导出工单");
     }
 
     private void refreshStatus(TeeExportRequestDO request) {
+        requireRequestActive(request);
         List<TeeExportVoteDO> current = votes.findByUpkExportIdOrderByUpkVoterOwnerId(
                 request.getUpk().getExportId());
         if (current.stream().anyMatch(vote -> REJECTED.equals(vote.getStatus()))) {
@@ -458,16 +560,136 @@ public class TeeExportService {
                         request.getUpk().getExportId()).stream()
                 .map(vote -> new VoteView(vote.getUpk().getVoterOwnerId(), vote.getStatus(),
                         vote.getVoter(), vote.getComment(), vote.getVotedAt())).toList();
-        boolean canVote = PENDING.equals(request.getStatus()) && voteViews.stream()
+        TeeObjectDO object = objects.findById(new TeeObjectDO.UPK(request.getObjectId())).orElse(null);
+        TeeResultMetadataService.Metadata source = metadata.resolve(object == null
+                ? TeeObjectDO.builder().upk(new TeeObjectDO.UPK(request.getObjectId()))
+                .resultId(request.getResultId()).kind(request.getKind()).taskId(request.getTaskId()).build()
+                : object);
+        Deadline limit = object == null ? new Deadline(null, "结果对象已不可用") : deadline(object);
+        String accessStatus = accessStatus(request, limit);
+        boolean active = "ACTIVE".equals(accessStatus);
+        boolean canVote = active && PENDING.equals(request.getStatus()) && voteViews.stream()
                 .anyMatch(vote -> ownerId.equals(vote.ownerId()) && VOTE_PENDING.equals(vote.status()));
-        boolean canCancel = PENDING.equals(request.getStatus())
+        boolean canCancel = active && PENDING.equals(request.getStatus())
                 && ownerId.equals(request.getRequesterOwnerId());
+        boolean canDownload = active && APPROVED.equals(request.getStatus())
+                && ownerId.equals(request.getRequesterOwnerId());
+        String reason = active ? "" : "DEADLINE_REQUIRED".equals(accessStatus)
+                ? "历史工单未约定导出期限，请重新申请" : "EXPIRED".equals(accessStatus)
+                ? "已超过导出截止时间" : limit.reason();
         return new RequestView(TeeContract.VERSION, request.getUpk().getExportId(),
                 request.getResultId(), request.getObjectId(), request.getKind(), request.getTaskId(),
                 request.getCiphertextSha256(), request.getKeyId(), request.getKeyVersion(),
                 request.getRequesterOwnerId(), request.getRecipientCertSha256(), request.getStatus(),
-                request.getApprovedAt(), canVote, canCancel, voteViews);
+                request.getApprovedAt(), canVote, canCancel, voteViews,
+                source.resultName(), source.projectId(), source.projectName(), source.sandboxId(),
+                source.sandboxName(), source.taskName(), source.runId(), source.createdAt(),
+                limit.viewText(), limit.text(),
+                request.getGmtCreate() == null ? "" : request.getGmtCreate().toInstant(ZoneOffset.UTC).toString(),
+                text(request.getExportUntil()), effectiveDeadline(request, limit), text(request.getPurpose()),
+                accessStatus, canDownload, reason, Instant.now().toString());
     }
+
+    private record Deadline(Instant until, String reason, Instant viewUntil) {
+        Deadline(Instant until, String reason) { this(until, reason, until); }
+        boolean available() { return until != null && reason.isBlank(); }
+        String text() { return until == null ? "" : until.toString(); }
+        String viewText() { return viewUntil == null ? "" : viewUntil.toString(); }
+    }
+
+    /** 原任务的授权期限与结果期限取交集，不把五分钟的任务执行凭据当作结果有效期。 */
+    private Deadline deadline(TeeObjectDO object) {
+        Instant until = null;
+        Instant viewUntil = null;
+        try {
+            TeeResultMetadataService.Metadata source = metadata.resolve(object);
+            until = source.maxExportUntil().isBlank() ? null
+                    : TeeGuard.requireInstant(source.maxExportUntil(), "maxExportUntil");
+            viewUntil = source.viewUntil().isBlank() ? null
+                    : TeeGuard.requireInstant(source.viewUntil(), "viewUntil");
+            TeeRuntimeTaskDO task = tasks.findById(new TeeRuntimeTaskDO.UPK(object.getTaskId()))
+                    .orElseThrow(() -> TeeException.of(TeeContract.Error.POLICY_DENIED, "结果原任务不存在"));
+            if (!"SUCCEEDED".equals(task.getStatus()) || !Boolean.TRUE.equals(task.getReceiptVerified())) {
+                return new Deadline(until, "结果原任务尚未通过回执核验", viewUntil);
+            }
+            TeeTaskSpec spec = taskSpec(task.getTaskJws());
+            if (spec.inputs() == null || spec.inputs().isEmpty()) {
+                return new Deadline(until, "无法确认结果授权期限", viewUntil);
+            }
+            for (TeeTaskSpec.Input input : spec.inputs()) {
+                TeePolicyDO policy = policies.require(input.policyId(), String.valueOf(input.policyVersion()));
+                Instant policyUntil = TeeGuard.requireInstant(policy.getExpiresAt(), "policyExpiresAt");
+                until = earlier(until, policyUntil);
+                viewUntil = earlier(viewUntil, policyUntil);
+                if (!TeeContract.STATE_ACTIVE.equals(policy.getState())) {
+                    return new Deadline(until, "结果授权已撤销", viewUntil);
+                }
+                // 业务期限按截止时刻严格失效，不沿用任务凭据的时钟宽限。
+                if (Instant.now().isBefore(policyUntil)) {
+                    policies.requireAllows(policy, spec.columns(), spec.operatorId());
+                }
+            }
+            if (until == null) return new Deadline(null, "无法确认结果授权期限", viewUntil);
+            if (!Instant.now().isBefore(until)) return new Deadline(until, "已超过结果授权期限", viewUntil);
+            keys.requireActive(keys.require(object.getKeyId(), object.getKeyVersion()));
+            return new Deadline(until, "", viewUntil);
+        } catch (TeeException invalid) {
+            return new Deadline(until, "结果授权或密钥已失效，无法继续导出", viewUntil);
+        }
+    }
+
+    private void requireDeadline(Deadline limit) {
+        if (!limit.available() || !Instant.now().isBefore(limit.until())) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED,
+                    limit.reason().isBlank() ? "结果授权已过期" : limit.reason());
+        }
+    }
+
+    private Instant requireRequestActive(TeeExportRequestDO request) {
+        Deadline limit = deadline(resultObject(request.getResultId()));
+        if (!"ACTIVE".equals(accessStatus(request, limit))) {
+            throw TeeException.of(TeeContract.Error.EXPORT_NOT_APPROVED,
+                    text(request.getExportUntil()).isBlank() ? "历史工单未约定导出期限，请重新申请"
+                            : "导出工单或结果授权已失效，请查看有效期");
+        }
+        return Instant.parse(effectiveDeadline(request, limit));
+    }
+
+    private static String effectiveDeadline(TeeExportRequestDO request, Deadline limit) {
+        if (text(request.getExportUntil()).isBlank()) return "";
+        try {
+            return earlier(Instant.parse(request.getExportUntil()), limit.until()).toString();
+        } catch (RuntimeException invalid) {
+            return "";
+        }
+    }
+
+    private static String accessStatus(TeeExportRequestDO request, Deadline limit) {
+        if (text(request.getExportUntil()).isBlank()) return "DEADLINE_REQUIRED";
+        String effective = effectiveDeadline(request, limit);
+        if (effective.isBlank()) return "UNAVAILABLE";
+        if (!Instant.now().isBefore(Instant.parse(effective))) return "EXPIRED";
+        return limit.available() ? "ACTIVE" : "UNAVAILABLE";
+    }
+
+    private TeeExportRequestDO activeRequest(String ownerId, TeeObjectDO object) {
+        Deadline limit = deadline(object);
+        return requests.findByResultIdAndRequesterOwnerIdOrderByGmtCreateDesc(object.getResultId(), ownerId)
+                .stream().filter(item -> activeRequest(item, limit)).findFirst().orElse(null);
+    }
+
+    private static boolean activeRequest(TeeExportRequestDO request, Deadline limit) {
+        return (PENDING.equals(request.getStatus()) || APPROVED.equals(request.getStatus()))
+                && "ACTIVE".equals(accessStatus(request, limit));
+    }
+
+    private static Instant earlier(Instant first, Instant second) {
+        if (first == null) return second;
+        if (second == null) return first;
+        return first.isBefore(second) ? first : second;
+    }
+
+    private static String text(String value) { return value == null ? "" : value; }
 
     private void event(String actor, String action, TeeExportRequestDO request, String detail) {
         mvp.auditAs("TEE", "INFO", actor, action, "TEE_EXPORT",

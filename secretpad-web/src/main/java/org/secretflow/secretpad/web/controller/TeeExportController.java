@@ -41,6 +41,17 @@ public class TeeExportController implements TeeApi {
         return SecretPadResponse.success(gateway.exportable(owner()));
     }
 
+    /** 中心端产出只读入口；写操作继续由 CLIENT 端角色守卫约束。 */
+    @GetMapping("/exports/catalog")
+    public SecretPadResponse<TeeExportService.ExportableResult> catalog() {
+        return SecretPadResponse.success(gateway.catalog(owner()));
+    }
+
+    @GetMapping("/exports/history")
+    public SecretPadResponse<TeeExportService.ListResult> history() {
+        return SecretPadResponse.success(gateway.history(owner()));
+    }
+
     @GetMapping("/exports/mine")
     public SecretPadResponse<TeeExportService.ListResult> mine() {
         return SecretPadResponse.success(gateway.mine(owner()));

@@ -240,6 +240,18 @@ public class SandboxCanvasService {
         }
         String resolvedRunId = string(nodeRun.get("run_id"));
         String table = string(nodeRun.get("output_table"));
+        String taskId = string(nodeRun.get("task_id"));
+        if (!taskId.isBlank()) {
+            List<Map<String, Object>> tasks = jdbc.queryForList(
+                    "select * from ds_dev_task where id=? and deleted=0", taskId);
+            if (!tasks.isEmpty()) {
+                try {
+                    dataControl.requireTaskResultView(tasks.get(0));
+                } catch (SecurityException expired) {
+                    return unavailableOutput(table, resolvedRunId, nodeId, expired.getMessage());
+                }
+            }
+        }
         // TEE 运行必须先于物理表和历史任务预览判定，禁止遗留表形成明文旁路。
         Map<String, Object> teeOutput = teeTaskOutput(nodeRun, table, nodeId, resolvedRunId);
         if (teeOutput != null) return teeOutput;

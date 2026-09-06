@@ -15,6 +15,8 @@ public interface TeeExportVoteRepository extends BaseRepository<TeeExportVoteDO,
 
     List<TeeExportVoteDO> findByUpkExportIdOrderByUpkVoterOwnerId(String exportId);
 
+    List<TeeExportVoteDO> findByUpkVoterOwnerIdOrderByGmtCreateDesc(String voterOwnerId);
+
     List<TeeExportVoteDO> findByUpkVoterOwnerIdAndStatusOrderByGmtCreateDesc(
             String voterOwnerId, String status);
 }

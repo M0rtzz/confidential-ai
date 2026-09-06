@@ -34,6 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -68,6 +69,8 @@ class SandboxCanvasServiceResultTest {
                 "output_table", "op_canvas_1_node_1",
                 "task_id", "task-old",
                 "result_summary", "{\"rowCount\":2}"));
+        when(jdbc.queryForList("select * from ds_dev_task where id=? and deleted=0", "task-old"))
+                .thenReturn(List.of(Map.of("id", "task-old", "result_view_until", "2099-01-01T00:00:00Z")));
         when(jdbc.queryForList(
                 "select id from ds_compute_node_run where canvas_id=? and node_id=? "
                         + "and status='SUCCEEDED' and deleted=0 order by finished_at desc,created_at desc limit 1",
@@ -99,6 +102,8 @@ class SandboxCanvasServiceResultTest {
                 "component_code", "stats.describe",
                 "output_table", "op_canvas_1_node_1",
                 "task_id", "task-old"));
+        when(jdbc.queryForList("select * from ds_dev_task where id=? and deleted=0", "task-old"))
+                .thenReturn(List.of(Map.of("id", "task-old", "result_view_until", "2099-01-01T00:00:00Z")));
         when(jdbc.queryForList(
                 "select id from ds_compute_node_run where canvas_id=? and node_id=? "
                         + "and status='SUCCEEDED' and deleted=0 order by finished_at desc,created_at desc limit 1",
@@ -136,6 +141,21 @@ class SandboxCanvasServiceResultTest {
         assertThat(result.get("encryptedOutputs")).asList().hasSize(1);
         verify(sandboxDb, never()).hasTable(anyString(), anyString());
         verify(sandboxDb, never()).previewTable(anyString(), anyString(), ArgumentMatchers.anyInt());
+    }
+
+    @Test
+    void shouldHideExpiredTeeReportsBeforeReadingOutputSnapshot() {
+        stubCommonRows(Map.of("id", "nr-tee", "run_id", "run-old", "task_id", "task-tee",
+                "result_summary", "{\"runtimeMode\":\"SIMULATION\",\"reports\":[{\"secret\":123}]}"));
+        Map<String, Object> task = Map.of("id", "task-tee", "result_view_until", "2020-01-01T00:00:00Z");
+        when(jdbc.queryForList("select * from ds_dev_task where id=? and deleted=0", "task-tee"))
+                .thenReturn(List.of(task));
+        doThrow(new SecurityException("开发结果已超过查看截止时间")).when(dataControl).requireTaskResultView(task);
+        Map<String, Object> result = service.nodeOutput("canvas-1", "node-1", "run-old", 50);
+        assertThat(result).containsEntry("available", false)
+                .containsEntry("message", "开发结果已超过查看截止时间")
+                .doesNotContainKey("reports");
+        verify(sandboxDb, never()).hasTable(anyString(), anyString());
     }
 
     private void stubCommonRows(Map<String, Object> nodeRun) {

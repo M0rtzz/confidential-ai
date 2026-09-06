@@ -1008,7 +1008,17 @@ public class DataDevService {
         // 详情需要它们才能说清这次运行到底产出了什么，明文数据行仍然不下发。
         result.put("runtimeMode", preview.getOrDefault("runtimeMode", ""));
         result.put("attestationVerified", preview.getOrDefault("attestationVerified", false));
-        result.put("reports", preview.getOrDefault("reports", List.of()));
+        boolean resultViewAllowed = true;
+        String disabledReason = "";
+        try {
+            dataControl.requireTaskResultView(task);
+        } catch (SecurityException expired) {
+            resultViewAllowed = false;
+            disabledReason = expired.getMessage();
+        }
+        result.put("resultViewAllowed", resultViewAllowed);
+        result.put("disabledReason", disabledReason);
+        result.put("reports", resultViewAllowed ? preview.getOrDefault("reports", List.of()) : List.of());
         result.put("encryptedOutputs", preview.getOrDefault("encryptedOutputs", List.of()));
         result.put("lineage", lineage);
         result.put("runLogs", runLogs);

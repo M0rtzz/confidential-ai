@@ -263,6 +263,12 @@ public class DataComputeService {
                         + "from ds_dev_task t left join ds_compute_node_run nr on nr.task_id=t.id and nr.deleted=0 "
                         + "where t.sandbox_id=? and t.status='SUCCEEDED' and t.deleted=0 order by t.finished_at desc",
                 sandboxId)) {
+            try {
+                dataControl.requireTaskResultView(task);
+            } catch (SecurityException expired) {
+                // 期限失效的任务仅保留结果目录元信息，不再向报告页返回内容。
+                continue;
+            }
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("execType", task.get("exec_type"));
             payload.put("runMode", task.get("run_mode"));

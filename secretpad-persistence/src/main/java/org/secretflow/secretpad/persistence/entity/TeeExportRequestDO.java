@@ -71,6 +71,13 @@ public class TeeExportRequestDO extends BaseAggregationRoot<TeeExportRequestDO> 
     @Column(name = "approved_at", length = 64)
     private String approvedAt;
 
+    /** 建单时固定的业务导出截止时间；历史空值必须重新申请。 */
+    @Column(name = "export_until", length = 64)
+    private String exportUntil;
+
+    @Column(name = "purpose", length = 1000)
+    private String purpose;
+
     @Getter
     @Setter
     @ToString

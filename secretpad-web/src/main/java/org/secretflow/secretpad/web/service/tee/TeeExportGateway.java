@@ -9,6 +9,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.secretflow.secretpad.web.service.DataSandboxMvpService;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -44,11 +46,19 @@ public class TeeExportGateway {
                 : service.exportable(ownerId);
     }
 
+    public TeeExportService.ExportableResult catalog(String ownerId) {
+        if (center.configured()) {
+            throw TeeException.of(TeeContract.Error.END_ROLE_DENIED, "仅中心端可查看计算产出目录");
+        }
+        return service.catalog(ownerId);
+    }
+
     public TeeExportService.RequestView create(String ownerId, String actor,
                                                TeeExportService.CreateRequest request) {
         TeeExportService.CreateRequest secured = new TeeExportService.CreateRequest(
                 request.contractVersion(), request.requestId(), request.resultId(),
-                center.configured() ? institutionKey.certificatePem() : request.recipientCertPem());
+                center.configured() ? institutionKey.certificatePem() : request.recipientCertPem(),
+                request.exportUntil(), request.purpose());
         if (!center.configured()) {
             return service.create(ownerId, actor, secured);
         }
@@ -65,6 +75,10 @@ public class TeeExportGateway {
 
     public TeeExportService.ListResult pending(String ownerId) {
         return center.configured() ? list(center.get("/exports/pending", JsonNode.class)) : service.pending(ownerId);
+    }
+
+    public TeeExportService.ListResult history(String ownerId) {
+        return center.configured() ? list(center.get("/exports/history", JsonNode.class)) : service.history(ownerId);
     }
 
     public TeeExportService.RequestView detail(String ownerId, String exportId) {
@@ -101,7 +115,7 @@ public class TeeExportGateway {
                                                 TeeExportService.ExportRequest request) {
         TeeExportService.ExportRequest secured = new TeeExportService.ExportRequest(
                 request.contractVersion(), request.requestId(),
-                center.configured() ? institutionKey.certificatePem() : request.recipientCertPem());
+                center.configured() ? institutionKey.certificatePem() : request.recipientCertPem(), request.exportId());
         return center.configured()
                 ? center.post("/results/" + path(resultId) + "/export", secured,
                         TeeExportService.ExportResult.class)
@@ -129,12 +143,23 @@ public class TeeExportGateway {
         if (!"APPROVED".equals(view.status())) {
             throw TeeException.of(TeeContract.Error.EXPORT_NOT_APPROVED, "导出工单尚未全票通过");
         }
+        if (!view.canDownload() || !"ACTIVE".equals(view.accessStatus())
+                || view.effectiveExportUntil() == null
+                || !Instant.now().isBefore(TeeGuard.requireInstant(view.effectiveExportUntil(), "effectiveExportUntil"))) {
+            throw TeeException.of(TeeContract.Error.EXPORT_NOT_APPROVED, "导出工单已过期或缺少有效期限，请重新申请");
+        }
         TeeExportService.ExportResult exported = export(ownerId, actor, view.resultId(),
                 new TeeExportService.ExportRequest(TeeContract.VERSION,
-                        "egress-" + UUID.randomUUID().toString().replace("-", ""), null));
+                        "egress-" + UUID.randomUUID().toString().replace("-", ""), null, exportId));
         TeeCrypto.EncryptedObject object = center.get(
                 "/objects/" + path(exported.objectId()), TeeCrypto.EncryptedObject.class);
         byte[] plaintext = institutionKey.decryptExport(exported, object, mapper);
+        // 下载过程跨越截止时刻时，不向浏览器交付已解密的内容。
+        if (!Instant.now().isBefore(TeeGuard.requireInstant(exported.expiresAt(), "expiresAt"))
+                || !Instant.now().isBefore(Instant.parse(view.effectiveExportUntil()))) {
+            Arrays.fill(plaintext, (byte) 0);
+            throw TeeException.of(TeeContract.Error.EXPORT_NOT_APPROVED, "导出有效期已结束");
+        }
         mvp.auditAs("TEE", "INFO", actor, "TEE_RESULT_DOWNLOAD", "TEE_EXPORT",
                 view.exportId(), "stage=EGRESS resultId=" + view.resultId()
                         + " kind=" + view.kind() + " bytes=" + plaintext.length, true);
@@ -176,7 +201,7 @@ public class TeeExportGateway {
                 throw TeeException.of(TeeContract.Error.KEY_SERVICE_UNAVAILABLE, "中心端可导出结果结构不符");
             }
         }
-        return new TeeExportService.ExportableResult(TeeContract.VERSION, items);
+        return new TeeExportService.ExportableResult(TeeContract.VERSION, items, data.path("serverTime").asText());
     }
 
     private TeeExportService.ListResult list(JsonNode data) {
@@ -188,7 +213,7 @@ public class TeeExportGateway {
                 throw TeeException.of(TeeContract.Error.KEY_SERVICE_UNAVAILABLE, "中心端导出工单结构不符");
             }
         }
-        return new TeeExportService.ListResult(TeeContract.VERSION, items);
+        return new TeeExportService.ListResult(TeeContract.VERSION, items, data.path("serverTime").asText());
     }
 
     private static String path(String value) {

@@ -23,6 +23,9 @@ public interface TeeObjectRepository extends BaseRepository<TeeObjectDO, TeeObje
     /** 最近产出的密文结果对象；贡献方过滤在服务层按机构标识精确比对完成，不用字符串匹配。 */
     List<TeeObjectDO> findTop200ByKindInOrderByGmtCreateDesc(Collection<String> kinds);
 
+    /** 结果管理在贡献方鉴权后返回完整集合，避免先截断导致较早结果无法查询。 */
+    List<TeeObjectDO> findByKindInOrderByGmtCreateDesc(Collection<String> kinds);
+
     /** 信任链看板：中心端全量视图，按创建时间倒序，上限 200 条。 */
     List<TeeObjectDO> findTop200ByOrderByGmtCreateDesc();
 
