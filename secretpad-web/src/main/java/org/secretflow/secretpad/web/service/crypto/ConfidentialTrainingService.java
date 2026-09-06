@@ -193,7 +193,9 @@ public class ConfidentialTrainingService {
         return task(ownerId, taskId);
     }
 
-    @Transactional
+    // staging 要把模型包与数据包的密文块逐块推给 CipherGPU，属分钟级 I/O。
+    // SQLite 数据源只有一条连接，置于事务内会独占该连接使平台整体不可访问，故不加事务；
+    // 失败分支已有 markFailed 收口。
     public Map<String, Object> start(String ownerId, String taskId) {
         Map<String, Object> row = taskRow(ownerId, taskId);
         if (!"READY_TO_STAGE".equals(text(row.get("status")))) throw invalid("训练密钥尚未全部释放");
@@ -252,7 +254,7 @@ public class ConfidentialTrainingService {
         }
     }
 
-    @Transactional
+    // 收集结果同样是流式 I/O：从 CipherGPU 取回结果密文并写入 MinIO，理由同 start。
     public Map<String, Object> collectOutputs(String ownerId, String taskId) {
         Map<String, Object> row = sync(ownerId, taskRow(ownerId, taskId));
         if (!"OUTPUT_READY".equals(text(row.get("status")))) throw invalid("训练结果尚未加密完成");

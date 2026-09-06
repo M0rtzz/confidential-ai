@@ -499,7 +499,12 @@ public class ConfidentialModelService {
         return deploymentView(deployment(ownerId, deploymentId));
     }
 
-    @Transactional
+    /**
+     * 本地权重的授权要把模型密文逐块推给 CipherGPU、解包并等待运行时健康检查，是分钟级 I/O。
+     * SQLite 数据源只有一条连接，若整段过程置于事务内会独占该连接，平台所有请求排队至超时，
+     * 表现为整站不可访问。因此这里不加事务：读取与推送都不持连接，结果落库时才逐条写入。
+     * 中途失败留下的 AUTHORIZATION_REQUIRED 由 {@code reconcileRuntimeState} 收口。
+     */
     public Map<String, Object> authorizeDeployment(String ownerId, String deploymentId,
                                                    AuthorizeDeploymentRequest request) {
         Map<String, Object> deployment = deployment(ownerId, deploymentId);
