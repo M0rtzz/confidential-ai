@@ -58,6 +58,9 @@ import java.util.Set;
  */
 @Service
 public class TrustChainService {
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.secretflow.secretpad.web.service.tee.TeeModelReportAccess modelReportAccess;
+
 
     private static final int MAX_TASK_LIMIT = 200;
     private static final int DEFAULT_TASK_LIMIT = 50;
@@ -294,6 +297,7 @@ public class TrustChainService {
     }
 
     public TeeRuntimeService.ReceiptResult receipt(String taskId) {
+        modelReportAccess.requireReportRead(taskId);
         TeeRuntimeTaskDO task = taskRepository.findById(new TeeRuntimeTaskDO.UPK(taskId))
                 .orElseThrow(() -> TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED, "任务不存在"));
         if (!Boolean.TRUE.equals(task.getReceiptVerified()) || task.getReceiptJws() == null) {

@@ -121,9 +121,14 @@ public class SandboxCanvasController {
     @PostMapping("/models/tree-structure")
     public SecretPadResponse<Map<String, Object>> treeStructure(@RequestBody Map<String, Object> request) {
         Object treeIndex = request.get("treeIndex");
+        if (treeIndex != null && (!(treeIndex instanceof Number number)
+                || number.doubleValue() != number.intValue())) {
+            throw new IllegalArgumentException("树索引必须为整数");
+        }
         return SecretPadResponse.success(service.computeTreeStructure(
                 String.valueOf(request.get("canvasModelId")),
-                treeIndex instanceof Number number ? number.intValue() : 0));
+                treeIndex instanceof Number number ? number.intValue() : 0,
+                Boolean.TRUE.equals(request.get("retry"))));
     }
 
     @GetMapping("/models/candidates")

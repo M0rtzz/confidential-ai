@@ -70,6 +70,11 @@ public class SandboxCanvasService {
     /** 画布自动注册产物的来源标记：开发制品/任务列表据此隔离。 */
     private static final String ARTIFACT_SOURCE_CANVAS = "CANVAS";
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private TeeTreeReportService treeReports;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.secretflow.secretpad.web.service.tee.TeeModelReportAccess modelReportAccess;
+
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
     private final DataDevService dataDevService;
@@ -666,9 +671,9 @@ public class SandboxCanvasService {
             List<Map<String, Object>> legacyRuns = jdbc.queryForList(
                     "select run_id,task_id,node_id,input_table,output_table from ds_compute_node_run "
                             + "where canvas_id=? and model_id=? and status='SUCCEEDED' and deleted=0 "
-                            + "order by finished_at desc,created_at desc limit 1",
+                            + "order by finished_at desc,created_at desc limit 2",
                     canvasModel.get("canvas_id"), canvasModel.get("model_id"));
-            if (!legacyRuns.isEmpty()) {
+            if (legacyRuns.size() == 1) {
                 sourceRunId = string(legacyRuns.get(0).get("run_id"));
                 inferredRun = true;
             }
@@ -890,9 +895,9 @@ public class SandboxCanvasService {
             throw new IllegalArgumentException("当前模型没有绑定训练运行批次，无法计算特征重要性");
         }
         List<Map<String, Object>> runs = jdbc.queryForList(
-                "select * from ds_compute_node_run where run_id=? and model_id=? and status='SUCCEEDED' and deleted=0 "
+                "select * from ds_compute_node_run where run_id=? and model_id=? and canvas_id=? and status='SUCCEEDED' and deleted=0 "
                         + "order by finished_at desc limit 1",
-                sourceRunId, modelId);
+                sourceRunId, modelId, canvasModel.get("canvas_id"));
         if (runs.isEmpty()) {
             throw new IllegalArgumentException("未找到该模型对应的训练运行记录");
         }
@@ -900,8 +905,10 @@ public class SandboxCanvasService {
         GraphModel graph = parseGraph(string(canvasModel.get("graph_json")));
         Node trainNode = graph.nodeById(string(trainRun.get("node_id")));
         if (trainNode == null) {
-            throw new IllegalArgumentException("工作流快照中没有找到对应的训练节点");
+            GraphModel historical = legacyTrainingGraph(canvasModel, string(trainRun.get("node_id")));
+            trainNode = historical == null ? null : historical.nodeById(string(trainRun.get("node_id")));
         }
+        if (trainNode == null) throw new IllegalArgumentException("工作流快照中没有找到对应的训练节点");
         if (!supportsFeatureImportance(trainNode.componentCode)) {
             return cachedFeatureImportance(trainRun, trainNode);
         }
@@ -971,6 +978,13 @@ public class SandboxCanvasService {
 
     /** 树结构缓存：与特征重要性同样只读已落库结果，未计算时返回 NOT_COMPUTED。 */
     private Map<String, Object> cachedTreeStructure(Map<String, Object> trainRun, Node trainNode) {
+        if (!notBlank(string(trainRun.get("model_b64"))) && supportsTreeStructure(trainNode.componentCode)) {
+            String objectId = historicalModelObject(trainRun);
+            if (notBlank(objectId)) {
+                String sandboxId = string(requireCanvas(string(trainRun.get("canvas_id"))).get("sandbox_id"));
+                return treeReports.cached(objectId, sandboxId, reportFeatures(objectId, trainNode), 0);
+            }
+        }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("componentCode", trainNode.componentCode);
         result.put("supported", supportsTreeStructure(trainNode.componentCode));
@@ -996,6 +1010,11 @@ public class SandboxCanvasService {
      * 结果写入 {@code ds_compute_node_run.tree_structure} 供报告复用。重复导出同一棵树直接返回缓存。
      */
     public Map<String, Object> computeTreeStructure(String canvasModelId, int treeIndex) {
+        return computeTreeStructure(canvasModelId, treeIndex, false);
+    }
+
+    public Map<String, Object> computeTreeStructure(String canvasModelId, int treeIndex, boolean retry) {
+        if (treeIndex < 0 || treeIndex > 100000) throw new IllegalArgumentException("树索引必须是范围内非负整数");
         Map<String, Object> context = requireTrainingContext(canvasModelId);
         @SuppressWarnings("unchecked")
         Map<String, Object> trainRun = (Map<String, Object>) context.get("trainRun");
@@ -1004,6 +1023,12 @@ public class SandboxCanvasService {
         String canvasId = string(context.get("canvasId"));
         if (!supportsTreeStructure(trainNode.componentCode)) {
             return cachedTreeStructure(trainRun, trainNode);
+        }
+        if (!notBlank(string(trainRun.get("model_b64")))) {
+            String objectId = historicalModelObject(trainRun);
+            if (!notBlank(objectId)) throw new IllegalArgumentException("历史模型缺少可核实的密文产物引用");
+            return treeReports.request(objectId, sandboxId, canvasId, trainNode.id,
+                    trainNode.componentCode.replace("ml.", ""), reportFeatures(objectId, trainNode), treeIndex, retry);
         }
         Map<String, Object> cached = parseMapOrEmpty(string(trainRun.get("tree_structure")));
         if (!cached.isEmpty() && intValue(cached.get("treeIndex"), -1) == treeIndex) {
@@ -1081,8 +1106,14 @@ public class SandboxCanvasService {
         requireUsableSandbox(sandboxId, false);
         String sourceRunId = string(canvasModel.get("source_run_id"));
         String modelId = string(canvasModel.get("model_id"));
+        if (!notBlank(sourceRunId) && notBlank(modelId)) {
+            List<Map<String, Object>> historical = jdbc.queryForList(
+                    "select distinct run_id from ds_compute_node_run where canvas_id=? and model_id=? "
+                            + "and status='SUCCEEDED' and deleted=0 limit 2", canvasModel.get("canvas_id"), modelId);
+            if (historical.size() == 1) sourceRunId = string(historical.get(0).get("run_id"));
+        }
         if (!notBlank(sourceRunId) || !notBlank(modelId)) {
-            throw new IllegalArgumentException("当前模型没有绑定训练运行批次，无法解析模型产物");
+            throw new IllegalArgumentException("历史模型无法唯一定位成功训练批次，请核对模型来源");
         }
         List<Map<String, Object>> runs = jdbc.queryForList(
                 "select * from ds_compute_node_run where run_id=? and model_id=? and status='SUCCEEDED' and deleted=0 "
@@ -1104,6 +1135,22 @@ public class SandboxCanvasService {
         context.put("trainRun", trainRun);
         context.put("trainNode", trainNode);
         return context;
+    }
+
+    /** 历史产物优先采用该次训练的密文结果；绑定表仅作严格同任务回退。 */
+    private String historicalModelObject(Map<String, Object> trainRun) {
+        Map<String, Object> summary = parseMapOrEmpty(string(trainRun.get("result_summary")));
+        String objectId = modelObjectId(summary.get("encryptedOutputs"));
+        if (notBlank(objectId)) return objectId;
+        List<Map<String, Object>> bindings = jdbc.queryForList(
+                "select object_id from ds_model_tee_binding where model_id=? and source_task_id=? and status='ACTIVE'",
+                string(trainRun.get("model_id")), string(trainRun.get("task_id")));
+        return bindings.size() == 1 ? string(bindings.get(0).get("object_id")) : "";
+    }
+
+    private List<String> reportFeatures(String objectId, Node node) {
+        List<String> features = stringList(node.params.get("features"));
+        return features.isEmpty() ? modelReportAccess.features(objectId, string(node.params.get("label"))) : features;
     }
 
     private Map<String, Object> featureImportancePayload(List<String> header, List<List<String>> rows) {
@@ -2635,6 +2682,14 @@ public class SandboxCanvasService {
                     modelId, now(), runId, node.id);
             audit("CANVAS_TEE_MODEL_REGISTERED", "MODEL", modelId,
                     "canvas=" + string(canvas.get("id")) + " object=" + objectId, true);
+            if (supportsTreeStructure(node.componentCode)) {
+                try {
+                    treeReports.request(objectId, sandboxId, string(canvas.get("id")), node.id, kind,
+                            reportFeatures(objectId, node), 0, false);
+                } catch (Exception reportError) {
+                    log.warn("可信树报告未生成 model={} reason={}", modelId, reportError.getMessage());
+                }
+            }
             return true;
         } catch (Exception e) {
             log.warn("密文模型登记失败 node={} op={}: {}", node.id, node.componentCode, e.getMessage());

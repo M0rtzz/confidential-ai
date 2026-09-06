@@ -59,6 +59,9 @@ public class TeeDevTaskDispatcher {
             "report.feature_importance", "FEATURE_IMPORTANCE",
             "report.tree_structure", "TREE_STRUCTURE");
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.secretflow.secretpad.web.service.tee.TeeModelReportAccess modelReports;
+
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
     private final TeeAssetRepository assets;
@@ -250,6 +253,40 @@ public class TeeDevTaskDispatcher {
             }
             compact = winner;
         }
+        return new Submission(compact, runtimeAppImage, nodeId);
+    }
+
+    /** 固定 v2 MODEL 输入；来源与授权均从已核实训练任务读取。 */
+    @Transactional
+    public Submission prepareModelReport(String taskId, String sandboxId, String objectId,
+                                         List<String> features, String modelKind, int treeIndex) {
+        requireCenterConfiguration();
+        var authorized = modelReports.authorize(objectId, sandboxId, features);
+        Map<String, Object> parameters = new LinkedHashMap<>();
+        parameters.put("op", org.secretflow.secretpad.web.service.tee.TeeModelReportAccess.OPERATOR);
+        parameters.put("inputKinds", List.of("MODEL"));
+        parameters.put("features", features);
+        parameters.put("modelKind", modelKind);
+        parameters.put("treeIndex", treeIndex);
+        parameters.put("sourceTaskId", authorized.object().getTaskId());
+        parameters.put("policyFingerprint", authorized.policyFingerprint());
+        parameters.put("parserVersion", org.secretflow.secretpad.web.service.tee.TeeModelReportAccess.PARSER_VERSION);
+        Instant issued = Instant.now();
+        String requestId = UUID.randomUUID().toString();
+        String nonce = UUID.randomUUID().toString();
+        TeeTaskSpec spec = new TeeTaskSpec(org.secretflow.secretpad.web.service.tee.TeeModelReportAccess.VERSION,
+                taskId, requestId, nodeId, audience, sandboxId,
+                org.secretflow.secretpad.web.service.tee.TeeModelReportAccess.OPERATOR, features,
+                List.of(modelReports.input(authorized)), builtinProgram(parameters), issued.toString(),
+                issued.plusSeconds(Math.min(Math.max(lifetimeSeconds, 1), TeeContract.MAX_TASK_LIFETIME_SECONDS)).toString(),
+                nonce, new TeeTaskSpec.OutputPolicy(List.of("TREE_STRUCTURE"), true, true, true), runtimeImageDigest);
+        modelReports.validate(spec);
+        String compact = compactJws(mapper, spec, readPrivateKey(Path.of(signerKey)), signerKid);
+        int updated = jdbc.update("update ds_dev_task set tee_task_jws=?,tee_request_id=?,tee_nonce=?,"
+                        + "tee_runtime_image_digest=?,tee_dispatch_status='PREPARED',updated_at=? "
+                        + "where id=? and deleted=0 and coalesce(tee_task_jws,'')=''",
+                compact, requestId, nonce, runtimeImageDigest, java.time.LocalDateTime.now().toString(), taskId);
+        if (updated != 1) throw contract("报告任务已提交，禁止重复签发");
         return new Submission(compact, runtimeAppImage, nodeId);
     }
 

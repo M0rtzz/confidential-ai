@@ -47,7 +47,8 @@ public final class SandboxApprovalOperators {
     private static Map<String, Object> operator(String code, String name, String category) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("code", code);
-        row.put("name", name);
+        row.put("name", List.of("ml.decision_tree", "ml.xgboost", "ml.lightgbm").contains(code)
+                ? name + "（含标准树结构报告）" : name);
         row.put("category", category);
         return row;
     }

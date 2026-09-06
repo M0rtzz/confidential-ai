@@ -29,6 +29,9 @@ public class TeeRuntimeGrantService {
     public record ResultBinding(String kind, String keyId, String keyVersion) {
     }
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private TeeModelReportAccess modelReports;
+
     private final TeeRuntimeTaskRepository tasks;
     private final TeeAssetRepository assets;
     private final ObjectMapper mapper;
@@ -45,7 +48,11 @@ public class TeeRuntimeGrantService {
                                String workloadCertSha256) {
         LinkedHashSet<String> objectIds = new LinkedHashSet<>();
         LinkedHashSet<String> contributors = new LinkedHashSet<>();
-        for (TeeTaskSpec.Input input : task.inputs()) {
+        if (TeeModelReportAccess.isModelReport(task)) {
+            TeeModelReportAccess.Authorized authorized = modelReports.validate(task);
+            objectIds.add(authorized.object().getUpk().getObjectId());
+            contributors.addAll(authorized.contributors());
+        } else for (TeeTaskSpec.Input input : task.inputs()) {
             TeeAssetDO asset = assets.findById(new TeeAssetDO.UPK(
                             input.assetId(), String.valueOf(input.assetVersion())))
                     .orElseThrow(() -> TeeException.of(TeeContract.Error.CONTRACT_INVALID,
@@ -83,6 +90,8 @@ public class TeeRuntimeGrantService {
 
     public void requireObjectRead(String callerId, String taskId, String objectId) {
         TeeRuntimeTaskDO task = requireActive(callerId, taskId);
+        TeeTaskSpec spec = modelReports == null ? null : modelReports.readTask(task.getTaskJws());
+        if (spec != null && TeeModelReportAccess.isModelReport(spec)) modelReports.validate(spec);
         if (!readStrings(task.getObjectIdsJson()).contains(objectId)) {
             throw TeeException.of(TeeContract.Error.AUDIT_ACCESS_DENIED,
                     "对象不在该运行时任务的签名输入范围内");

@@ -256,6 +256,16 @@ public class DevJobExecutor {
         submitPreparedTee(taskId, "api", submission);
     }
 
+    /** 模型报告使用固定可信算子，无普通执行器回退。 */
+    public void submitTeeModelReport(String taskId, String sandboxId, String objectId,
+                                      List<String> features, String modelKind, int treeIndex) {
+        if (!kusciaEnabled || !teeDispatcher.enabled()) {
+            throw new IllegalStateException("TEE 运行时未启用，无法解析密文模型");
+        }
+        submitPreparedTee(taskId, "canvas", teeDispatcher.prepareModelReport(
+                taskId, sandboxId, objectId, features, modelKind, treeIndex));
+    }
+
     private void doSubmit(String taskId, String nodeId, String inputB64, String execType,
             String jarB64OrScript, Map<String, Object> params, List<String> allowedImports, String channel,
             Map<String, Object> extraConfig) {

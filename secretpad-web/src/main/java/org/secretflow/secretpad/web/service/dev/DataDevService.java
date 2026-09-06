@@ -66,6 +66,9 @@ import java.util.UUID;
 @Slf4j
 @Service
 public class DataDevService {
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.secretflow.secretpad.web.service.tee.TeeModelReportAccess modelReportAccess;
+
 
     private static final String STATUS_PENDING = "PENDING";
     private static final String STATUS_RUNNING = "RUNNING";
@@ -985,6 +988,7 @@ public class DataDevService {
 
     public Map<String, Object> taskDetail(String id) {
         Map<String, Object> task = requireTask(id);
+        modelReportAccess.requireReportRead(id);
         // Z-05 血缘由任务行派生（source_* -> result_*），无需独立血缘表
         List<Map<String, Object>> lineage = new ArrayList<>();
         if (notBlank(string(task.get("source_node_id")))) {
@@ -1310,6 +1314,7 @@ public class DataDevService {
     /** 查看任务结果：仅创建人 + SUCCEEDED，返回结果预览（DEV 调试预览 / PROD 前 N 行）。 */
     public Map<String, Object> viewResult(String taskId) {
         Map<String, Object> task = requireTask(taskId);
+        modelReportAccess.requireReportRead(taskId);
         requireCreator(task, "结果");
         dataControl.requireTaskResultView(task);
         if (!STATUS_SUCCEEDED.equals(string(task.get("status"))) || !notBlank(string(task.get("result_preview")))) {

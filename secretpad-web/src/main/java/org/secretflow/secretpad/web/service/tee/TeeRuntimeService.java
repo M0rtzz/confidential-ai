@@ -43,6 +43,9 @@ import java.util.stream.Collectors;
 @Service
 public class TeeRuntimeService {
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private TeeModelReportAccess modelReports;
+
     private final TeeNonceRepository nonces;
     private final TeeKeyService keyService;
     private final TeePolicyService policyService;
@@ -119,6 +122,24 @@ public class TeeRuntimeService {
 
     private TeeKeyService.KeyEnvelope releaseOne(TeeTaskSpec task, TeeTaskSpec.Input input,
                                                  X509Certificate recipient) {
+        if (TeeModelReportAccess.isModelReport(task)) {
+            TeeModelReportAccess.Authorized authorized = modelReports.validate(task);
+            TeeKeyDO key = keyService.require(input.keyId(), String.valueOf(input.keyVersion()));
+            keyService.requireActive(key);
+            TeeCrypto.EncryptedObject stored = assetService.readObject(
+                    authorized.object().getOwnerId(), input.objectId());
+            if (!stored.ciphertextSha256().equals(input.ciphertextSha256())
+                    || !stored.assetId().equals(input.assetId())
+                    || !stored.keyId().equals(input.keyId())
+                    || !stored.keyVersion().equals(String.valueOf(input.keyVersion()))) {
+                throw TeeException.of(TeeContract.Error.DATA_INTEGRITY_FAILED, "模型密文与签名输入不符");
+            }
+            JsonNode sealed = adapter.call("/v1/keys/escrow-seal", Map.of(
+                    "resourceUri", key.getResourceUri(),
+                    "recipientCertPemB64", TeeKeyService.encodeCertificate(recipient)));
+            keyService.countRelease(key);
+            return keyService.envelope(key, sealed);
+        }
         if (input.assetVersion() <= 0 || input.keyVersion() <= 0
                 || input.policyVersion() <= 0 || input.plaintextBytes() < 0) {
             throw TeeException.of(TeeContract.Error.CONTRACT_INVALID,
@@ -224,8 +245,15 @@ public class TeeRuntimeService {
         });
     }
 
+    public Map<String, Object> authorizeReport(String callerId, String taskId) {
+        TeeRuntimeTaskDO accepted = grants.requireActiveTask(callerId, taskId);
+        modelReports.validate(storedTask(accepted.getTaskJws()));
+        return Map.of("contractVersion", TeeContract.VERSION, "taskId", taskId, "authorized", true);
+    }
+
     public ReceiptResult receipt(String callerId, String taskId) {
         TeeRuntimeTaskDO task = grants.receipt(callerId, taskId);
+        modelReports.requireReportRead(taskId);
         return new ReceiptResult(TeeContract.VERSION, task.getUpk().getTaskId(),
                 task.getReceiptJws(), true);
     }
@@ -255,7 +283,8 @@ public class TeeRuntimeService {
                 throw TeeException.of(TeeContract.Error.TASK_SIGNATURE_INVALID, "回执签名校验失败");
             }
             byte[] body = TeeCrypto.decodeUrl(parts[1]);
-            TeeGuard.requireSize(body.length, TeeContract.MAX_TASK_JSON_BYTES);
+            TeeGuard.requireSize(body.length, TeeModelReportAccess.isModelReport(storedTask(accepted.getTaskJws()))
+                    ? TeeContract.MAX_REPORT_BYTES + 65536 : TeeContract.MAX_TASK_JSON_BYTES);
             return mapper.readTree(body);
         } catch (TeeException rejected) {
             throw rejected;
@@ -265,7 +294,10 @@ public class TeeRuntimeService {
     }
 
     private void validateReceipt(TeeRuntimeTaskDO accepted, JsonNode receipt) {
-        TeeGuard.requireVersion(receipt.path("contractVersion").asText());
+        TeeTaskSpec receiptTask = storedTask(accepted.getTaskJws());
+        if (!receiptTask.contractVersion().equals(receipt.path("contractVersion").asText())) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "回执契约版本与任务不符");
+        }
         String taskId = accepted.getUpk().getTaskId();
         if (!taskId.equals(receipt.path("taskId").asText())
                 || !accepted.getRequestId().equals(receipt.path("requestId").asText())) {
@@ -304,6 +336,7 @@ public class TeeRuntimeService {
         if (errorCode != null && !errorCode.isNull()) {
             throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "成功回执不得携带错误码");
         }
+        if (TeeModelReportAccess.isModelReport(task)) modelReports.validate(task);
         validateSucceededOutputs(accepted.getCallerId(), task, outputs);
     }
 
@@ -330,6 +363,11 @@ public class TeeRuntimeService {
     }
 
     private void validateSucceededOutputs(String callerId, TeeTaskSpec task, JsonNode outputs) {
+        if (TeeModelReportAccess.isModelReport(task) && (outputs.size() != 1
+                || !"REPORT".equals(outputs.path(0).path("kind").asText())
+                || !"TREE_STRUCTURE".equals(outputs.path(0).path("reportKind").asText()))) {
+            throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "树报告任务只能输出一份 TREE_STRUCTURE 报告");
+        }
         Map<String, org.secretflow.secretpad.persistence.entity.TeeObjectDO> stored =
                 assetService.taskObjects(task.taskId()).stream().collect(Collectors.toMap(
                         org.secretflow.secretpad.persistence.entity.TeeObjectDO::getResultId,
@@ -384,6 +422,10 @@ public class TeeRuntimeService {
             throw rejected;
         } catch (Exception failure) {
             throw TeeException.of(TeeContract.Error.CONTRACT_INVALID, "报告内容无法序列化");
+        }
+        if (TeeModelReportAccess.isModelReport(task)) {
+            TeeTreeReportValidator.validate(content, task.columns(),
+                    ((Number) task.program().parameters().get("treeIndex")).intValue());
         }
         if ("MODEL_API_PREDICTION".equals(reportKind)) {
             validatePredictionReport(content);
@@ -489,7 +531,7 @@ public class TeeRuntimeService {
     }
 
     private void requireTiming(TeeTaskSpec task) {
-        TeeGuard.requireVersion(task.contractVersion());
+        if (!TeeModelReportAccess.isModelReport(task)) TeeGuard.requireVersion(task.contractVersion());
         TeeGuard.requireText(task.taskId(), "taskId");
         TeeGuard.requireText(task.issuer(), "issuer");
         TeeGuard.requireText(task.audience(), "audience");

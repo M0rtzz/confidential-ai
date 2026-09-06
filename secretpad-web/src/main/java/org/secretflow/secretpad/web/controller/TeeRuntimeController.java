@@ -42,6 +42,11 @@ public class TeeRuntimeController implements TeeApi {
         return SecretPadResponse.success(runtimeService.receipt(caller(), taskId, request));
     }
 
+    @GetMapping("/runtime/tasks/{taskId}/report-authorization")
+    public SecretPadResponse<java.util.Map<String, Object>> reportAuthorization(@PathVariable String taskId) {
+        return SecretPadResponse.success(runtimeService.authorizeReport(caller(), taskId));
+    }
+
     @GetMapping("/tasks/{taskId}/receipt")
     public SecretPadResponse<TeeRuntimeService.ReceiptResult> receipt(@PathVariable String taskId) {
         return SecretPadResponse.success(runtimeService.receipt(caller(), taskId));

@@ -16,6 +16,7 @@ import org.secretflow.secretpad.web.service.dev.DataDevService;
 import org.secretflow.secretpad.web.service.dev.DevJobExecutor;
 import org.secretflow.secretpad.web.service.model.ModelApprovalService;
 import org.secretflow.secretpad.web.service.storage.SandboxDbService;
+import org.secretflow.secretpad.web.service.tee.TeeIntermediateAssets;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -43,6 +44,7 @@ class SandboxCanvasServiceResultTest {
     @Mock private DataDevService dataDevService;
     @Mock private DevJobExecutor devJobExecutor;
     @Mock private SandboxDbService sandboxDb;
+    @Mock private TeeIntermediateAssets intermediateAssets;
     @Mock private DataSandboxMvpService mvp;
     @Mock private ModelApprovalService modelApprovalService;
     @Mock private SandboxDataControlService dataControl;
@@ -52,7 +54,7 @@ class SandboxCanvasServiceResultTest {
     @BeforeEach
     void setUp() {
         service = new SandboxCanvasService(jdbc, new ObjectMapper(), dataDevService, devJobExecutor,
-                sandboxDb, mvp, modelApprovalService, dataControl);
+                sandboxDb, intermediateAssets, mvp, modelApprovalService, dataControl);
         when(jdbc.queryForObject(anyString(), eq(Long.class), eq("project-1"), eq("kuscia-system")))
                 .thenReturn(1L);
     }
