@@ -840,7 +840,7 @@ public class SandboxCanvasService {
         try {
             List<String> features = reportFeatures(objectId, trainNode);
             Map<String, Object> report = treeReports.request(objectId, string(canvas.get("sandbox_id")),
-                    string(canvas.get("id")), trainNode.id, trainNode.componentCode, features, 0, false);
+                    string(canvas.get("id")), trainNode.id, trainNode.componentCode, features, 0, true);
             if (!"AVAILABLE".equals(report.get("status"))) {
                 return Map.of("status", report.getOrDefault("status", "RUNNING"), "message",
                         "RUNNING".equals(report.get("status")) ? "正在生成模型评估指标"

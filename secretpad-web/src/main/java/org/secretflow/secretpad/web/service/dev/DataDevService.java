@@ -1055,8 +1055,17 @@ public class DataDevService {
             throw new IllegalStateException(DevErrors.DEV_STATE_CONFLICT + ": 仅 FAILED 任务可重试");
         }
         int retries = intValue(task.get("retry_count"), 0);
-        if (retries >= maxRetries && (!devJobExecutor.teeEnabled() || notBlank(string(task.get("tee_task_jws"))))) {
+        // 运行时尚未接纳的提交失败不消耗计算重试额度，配置修复后可继续提交原任务。
+        boolean runtimeAccepted = !devJobExecutor.teeEnabled() || Integer.valueOf(1).equals(jdbc.queryForObject(
+                "select count(*) from tee_runtime_task where task_id=?", Integer.class, id));
+        if (retries >= maxRetries && runtimeAccepted) {
             throw new IllegalStateException(DevErrors.DEV_STATE_CONFLICT + ": 重试次数已达上限 " + maxRetries);
+        }
+        if (!runtimeAccepted && notBlank(string(task.get("tee_task_jws")))) {
+            // 未被运行时接纳的旧签名可重新生成，以绑定修复后的策略、镜像和有效时间。
+            jdbc.update("update ds_dev_task set tee_task_jws='',tee_request_id='',tee_nonce='',"
+                            + "tee_dispatch_status='' where id=? and status=? and tee_task_jws=?",
+                    id, STATUS_FAILED, task.get("tee_task_jws"));
         }
         if ("JAR".equals(string(task.get("exec_type")))
                 && (!notBlank(string(task.get("artifact_id"))) || intValue(task.get("version"), 0) <= 0)) {
