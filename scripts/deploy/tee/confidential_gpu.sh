@@ -238,13 +238,19 @@ start_ciphergpu() {
   else
     log "未能读取 GPU 状态，不限定可见设备"
   fi
+  # tokenizer 的 Rust 实现按 CPU 核数初始化 rayon 线程池，本机 72 核，叠加 vLLM 与 CUDA
+  # 的线程后会顶到容器 pids 上限，建线程返回 EAGAIN 并在工作线程内 panic，
+  # 表现为 /v1/models 正常而 /v1/chat/completions 永不返回。放宽上限并收敛分词线程数。
   log "启动 CipherGPU A100 仿真代理 ${CIPHERGPU_CONTAINER}"
   docker run -d --init --restart unless-stopped --read-only \
     --name "$CIPHERGPU_CONTAINER" --network "$DEV_NETWORK" \
     --add-host host.docker.internal:host-gateway \
     --cap-drop ALL --security-opt no-new-privileges \
-    --pids-limit 256 --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+    --pids-limit "${DATA_SANDBOX_DEV_CIPHERGPU_PIDS_LIMIT:-4096}" \
+    --tmpfs /tmp:rw,noexec,nosuid,size=32m \
     "${gpu_args[@]}" \
+    -e "RAYON_NUM_THREADS=${DATA_SANDBOX_DEV_CIPHERGPU_RAYON_THREADS:-8}" \
+    -e TOKENIZERS_PARALLELISM=false \
     --label "${managed_label}=true" \
     --label "${owner_label}=$(id -un)" \
     --label "${workspace_label}=${WORKSPACE_DIR}" \
