@@ -165,35 +165,62 @@ public class JpaSyncDataService {
 
     @SuppressWarnings(value = {"rawtypes"})
     public synchronized void syncDataP2p(SyncDataDTO dto) {
+        if (rejectStaleProjectAssetSnapshot(dto)) {
+            return;
+        }
         UserContext.setBaseUser(UserContextDTO.builder().name("admin").build());
+        try {
+            String action = dto.getAction();
+            Object data = dto.getData();
+            BaseRepository baseRepository = doAndRepository.get(dto.getTableName());
+            // todo check last update version
+            if (!(data instanceof VoteRequestDO || data instanceof VoteInviteDO || data instanceof ProjectApprovalConfigDO)) {
+                DataSyncConsumerContext.setConsumerSync();
+            }
+            if (data instanceof ProjectJobDO projectJobDO) {
+                Optional<ProjectJobDO> byJobId = projectJobRepository.findByJobId(projectJobDO.getUpk().getJobId());
+                if (byJobId.isPresent()) {
+                    if (byJobId.get().isFinished()) {
+                        log.info("ignore sync by local job is finished {}", byJobId.get().getUpk().getJobId());
+                        return;
+                    }
+                }
+            }
+            switch (action) {
+                case "create" -> baseRepository.save(data);
+                case "update" -> {
+                    if (!syncSoftDeletedProjectRelation(data)) {
+                        baseRepository.save(data);
+                    }
+                }
+                case "remove" -> baseRepository.delete(data);
+                default -> log.warn("can not find action:{}", action);
+            }
+        } finally {
+            UserContext.remove();
+            DataSyncConsumerContext.remove();
+        }
+    }
+
+    private boolean rejectStaleProjectAssetSnapshot(SyncDataDTO dto) {
         String action = dto.getAction();
-        Object data = dto.getData();
-        BaseRepository baseRepository = doAndRepository.get(dto.getTableName());
-        // todo check last update version
-        if (!(data instanceof VoteRequestDO || data instanceof VoteInviteDO || data instanceof ProjectApprovalConfigDO)) {
-            DataSyncConsumerContext.setConsumerSync();
+        if (!("create".equalsIgnoreCase(action) || "update".equalsIgnoreCase(action))) {
+            return false;
         }
-        if (data instanceof ProjectJobDO projectJobDO) {
-            Optional<ProjectJobDO> byJobId = projectJobRepository.findByJobId(projectJobDO.getUpk().getJobId());
-            if (byJobId.isPresent()) {
-                if (byJobId.get().isFinished()) {
-                    log.info("ignore sync by local job is finished {}", byJobId.get().getUpk().getJobId());
-                    return;
-                }
-            }
+        if (!(dto.getData() instanceof ProjectAssetDO incoming)) {
+            return false;
         }
-        switch (action) {
-            case "create" -> baseRepository.save(data);
-            case "update" -> {
-                if (!syncSoftDeletedProjectRelation(data)) {
-                    baseRepository.save(data);
-                }
-            }
-            case "remove" -> baseRepository.delete(data);
-            default -> log.warn("can not find action:{}", action);
+        ProjectAssetDO.UPK upk = incoming.getUpk();
+        if (upk == null) {
+            return false;
         }
-        UserContext.remove();
-        DataSyncConsumerContext.remove();
+        Optional<ProjectAssetDO> existing = projectAssetRepository.findById(upk);
+        boolean reject = existing.map(current -> ProjectAssetUsageSnapshotGuard.reject(current, incoming)).orElse(false);
+        if (reject) {
+            log.info("ignore stale project asset usage snapshot projectId={}, assetId={}, action={}",
+                    upk.getProjectId(), upk.getAssetId(), action);
+        }
+        return reject;
     }
 
     /**

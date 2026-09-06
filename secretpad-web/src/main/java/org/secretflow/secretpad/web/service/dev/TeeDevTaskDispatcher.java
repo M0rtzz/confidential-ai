@@ -164,7 +164,7 @@ public class TeeDevTaskDispatcher {
         }
         programParameters.remove("tee_operator");
 
-        TeePolicyDO policy = policyService.require(asset.getPolicyId(), asset.getPolicyVersion());
+        TeePolicyDO policy = policyService.refreshForAsset(asset, sandboxId);
         if (!assetId.equals(policy.getAssetId())
                 || !asset.getUpk().getAssetVersion().equals(policy.getAssetVersion())
                 || !sandboxId.equals(policy.getSandboxId())) {
@@ -189,8 +189,8 @@ public class TeeDevTaskDispatcher {
                 sandboxId, operatorId, columns,
                 List.of(new TeeTaskSpec.Input(assetId,
                         positive(asset.getUpk().getAssetVersion(), "assetVersion"), asset.getKeyId(),
-                        positive(asset.getKeyVersion(), "keyVersion"), asset.getPolicyId(),
-                        positive(asset.getPolicyVersion(), "policyVersion"), asset.getObjectId(),
+                        positive(asset.getKeyVersion(), "keyVersion"), policy.getUpk().getPolicyId(),
+                        positive(policy.getUpk().getPolicyVersion(), "policyVersion"), asset.getObjectId(),
                         object.getCiphertextSha256(), plaintextBytes(assetId))),
                 program, issuedAt.toString(), issuedAt.plusSeconds(lifetime).toString(), nonce,
                 new TeeTaskSpec.OutputPolicy(reportKinds, true, true, true), runtimeImageDigest);

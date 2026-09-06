@@ -1486,8 +1486,13 @@ public class DataDevService {
         else if (notBlank(assetId)) { sql.append(" and m.asset_id=?"); args.add(assetId); }
         else throw new IllegalArgumentException(DevErrors.DEV_PARAM_INVALID + ": 缺少 mountId/assetId");
         Map<String, Object> mount = requireRow(sql.toString(), args.toArray());
-        String expires = string(mount.get("expires_at"));
-        if (notBlank(expires) && expires.compareTo(now()) < 0) throw new IllegalStateException("挂载数据已过期");
+        org.secretflow.secretpad.web.service.AssetUsageDeadline.Deadline usage =
+                org.secretflow.secretpad.web.service.AssetUsageDeadline.resolve(jdbc, objectMapper,
+                        string(mount.get("project_id")), string(mount.get("asset_id")));
+        Object expires = usage.found() ? usage.value() : mount.get("expires_at");
+        if (!org.secretflow.secretpad.web.service.AssetTimeWindow.within(null, expires)) {
+            throw new IllegalStateException("挂载数据已过期");
+        }
         return mount;
     }
 

@@ -17,12 +17,19 @@ public final class AssetTimeWindow {
     private AssetTimeWindow() {
     }
 
-    /** 当前时间落在窗口内返回 true；边界为空表示不限制，取值无法解析时按不限制处理。 */
+    /** 当前时间落在窗口内返回 true；截止瞬间起禁止使用，非法的截止值不放行。 */
     public static boolean within(Object start, Object end) {
-        Instant now = Instant.now();
-        Instant from = parse(start);
-        Instant until = parse(end);
-        return (from == null || !now.isBefore(from)) && (until == null || !now.isAfter(until));
+        return within(start, end, Instant.now());
+    }
+
+    static boolean within(Object start, Object end, Instant now) {
+        try {
+            Instant from = parse(start);
+            Instant until = AssetUsageDeadline.parse(end);
+            return (from == null || !now.isBefore(from)) && (until == null || now.isBefore(until));
+        } catch (IllegalArgumentException invalid) {
+            return false;
+        }
     }
 
     private static Instant parse(Object value) {

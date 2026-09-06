@@ -84,8 +84,9 @@ public class DataComputeService {
         result.put("availableAssets", assets.projectAssets(projectId).stream()
                 .filter(asset -> "ACTIVE".equals(string(asset.get("status"))))
                 .filter(asset -> "PROCESSED".equals(string(asset.get("data_stage"))))
-                .filter(asset -> string(asset.get("valid_until")).isBlank()
-                        || string(asset.get("valid_until")).compareTo(now()) >= 0)
+                .filter(asset -> AssetTimeWindow.within(
+                        asset.getOrDefault("control_valid_from", asset.get("valid_from")),
+                        asset.getOrDefault("control_valid_until", asset.get("valid_until"))))
                 .toList());
         result.put("canUse", !"EXPIRED".equals(string(sandbox.get("status")))
                 && matchesNode(string(sandbox.get("owner_id")))

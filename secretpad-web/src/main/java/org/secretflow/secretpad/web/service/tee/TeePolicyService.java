@@ -6,6 +6,8 @@ package org.secretflow.secretpad.web.service.tee;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.secretflow.secretpad.persistence.entity.TeeKeyDO;
+import org.secretflow.secretpad.persistence.entity.TeeAssetDO;
+import org.secretflow.secretpad.persistence.repository.TeeAssetRepository;
 import org.secretflow.secretpad.persistence.entity.TeePolicyDO;
 import org.secretflow.secretpad.persistence.repository.TeePolicyRepository;
 import org.springframework.stereotype.Service;
@@ -28,6 +30,7 @@ import java.util.UUID;
 public class TeePolicyService {
 
     private final TeePolicyRepository policies;
+    private final TeeAssetRepository assets;
     private final TeeKeyService keyService;
     private final TeeApprovalPolicySource approvals;
     private final KeyAdapterClient adapter;
@@ -37,8 +40,10 @@ public class TeePolicyService {
 
     public TeePolicyService(TeePolicyRepository policies, TeeKeyService keyService,
                             TeeApprovalPolicySource approvals, KeyAdapterClient adapter,
-                            TeeIdentityRegistry registry, TeeIdempotency idempotency, ObjectMapper mapper) {
+                            TeeIdentityRegistry registry, TeeIdempotency idempotency, ObjectMapper mapper,
+                            TeeAssetRepository assets) {
         this.policies = policies;
+        this.assets = assets;
         this.keyService = keyService;
         this.approvals = approvals;
         this.adapter = adapter;
@@ -120,13 +125,70 @@ public class TeePolicyService {
                 .orElseThrow(() -> TeeException.of(TeeContract.Error.POLICY_DENIED, "授权规则不存在"));
     }
 
+    /** 自动登记策略才随数据期限更新；人工指定期限和模型 API 的短期策略保留各自契约。 */
+    static boolean followsDataDeadline(TeePolicyDO policy) {
+        String expected = "pl-" + TeeCrypto.sha256Hex((policy.getAssetId() + "|" + policy.getSandboxId())
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8)).substring(0, 12);
+        return expected.equals(policy.getUpk().getPolicyId())
+                && policy.getApprovalId() != null && !policy.getApprovalId().isBlank();
+    }
+
+    /**
+     * 在当前审批与供数方期限内生成新版本，原版本保留供已签名任务审计。
+     * 这里只改变平台检查的截止时间；密钥服务中的 scope、列和算子保持一致，无需重建其规则。
+     */
+    @Transactional
+    public synchronized TeePolicyDO refreshForAsset(TeeAssetDO input, String sandboxId) {
+        TeeAssetDO asset = assets.findById(input.getUpk()).orElseThrow(
+                () -> TeeException.of(TeeContract.Error.POLICY_DENIED, "密文资产已失效"));
+        TeePolicyDO policy = require(asset.getPolicyId(), asset.getPolicyVersion());
+        if (!asset.getUpk().getAssetId().equals(policy.getAssetId())
+                || !asset.getUpk().getAssetVersion().equals(policy.getAssetVersion())
+                || !asset.getOwnerId().equals(policy.getOwnerId())) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "授权规则与密文资产绑定不符");
+        }
+        if (!sandboxId.equals(policy.getSandboxId())) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "密文资产的授权规则未覆盖当前沙箱");
+        }
+        if (!followsDataDeadline(policy) || !TeeContract.STATE_ACTIVE.equals(policy.getState())) {
+            return policy;
+        }
+        TeeApprovalPolicySource.Approved approved = approvals.approvedScope(policy.getOwnerId(),
+                sandboxId, policy.getAssetId(), columns(policy), read(policy.getOperatorsJson()));
+        if (approved.expiresAt().equals(Instant.parse(policy.getExpiresAt()))) {
+            return policy;
+        }
+        TeeKeyDO key = keyService.require(asset.getKeyId(), asset.getKeyVersion());
+        keyService.requireActive(key);
+        TeeGuard.requireOwner(key.getOwnerId(), policy.getOwnerId());
+        String version = nextVersion(policy.getAssetId(), policy.getAssetVersion());
+        TeePolicyDO refreshed = TeePolicyDO.builder()
+                .upk(new TeePolicyDO.UPK(policy.getUpk().getPolicyId(), version))
+                .assetId(policy.getAssetId()).assetVersion(policy.getAssetVersion())
+                .ownerId(policy.getOwnerId()).sandboxId(sandboxId).approvalId(approved.approvalId())
+                .columnsJson(policy.getColumnsJson()).operatorsJson(policy.getOperatorsJson())
+                .reportKindsJson(policy.getReportKindsJson()).expiresAt(approved.expiresAt().toString())
+                .state(TeeContract.STATE_ACTIVE).build();
+        policies.save(refreshed);
+        asset.setPolicyVersion(version);
+        assets.save(asset);
+        return refreshed;
+    }
+
     /** 放行前复核规则状态、有效期与列范围；任一不满足即拒绝，不降级为粗粒度授权。 */
     public void requireAllows(TeePolicyDO policy, List<String> columns, String operator) {
         if (!TeeContract.STATE_ACTIVE.equals(policy.getState())) {
             throw TeeException.of(TeeContract.Error.POLICY_DENIED, "授权规则已失效");
         }
-        TeeGuard.requireNotExpired(Instant.parse(policy.getExpiresAt()),
-                TeeContract.Error.POLICY_DENIED, "授权有效期已过");
+        if (followsDataDeadline(policy)) {
+            // 旧任务仍绑定旧策略版本；期限缩短、挂载解除或停止使用后，必须按最新管控立即拒绝。
+            approvals.resolveApproved(policy.getOwnerId(), policy.getSandboxId(), policy.getAssetId(),
+                    columns, List.of(TeeGuard.requireText(operator, "operatorId")));
+        }
+        if (!Instant.now().isBefore(Instant.parse(policy.getExpiresAt()))) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED,
+                    "数据计算授权已到期，请核对数据使用截止时间");
+        }
         TeeGuard.requireSubset(columns, read(policy.getColumnsJson()), "列");
         TeeGuard.requireSubset(List.of(TeeGuard.requireText(operator, "operatorId")),
                 read(policy.getOperatorsJson()), "算子");

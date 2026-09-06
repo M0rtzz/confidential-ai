@@ -10,6 +10,7 @@
 package org.secretflow.secretpad.web.service.tee;
 
 import org.secretflow.secretpad.web.service.MinioAssetStorage;
+import org.secretflow.secretpad.web.service.AssetUsageDeadline;
 import org.secretflow.secretpad.web.service.sandbox.TeeAssetRegistrar;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,9 +23,6 @@ import org.springframework.stereotype.Service;
 
 import java.io.InputStream;
 import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneId;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -42,7 +40,6 @@ public class TeeAssetRegistrarImpl implements TeeAssetRegistrar {
 
     private static final Logger log = LoggerFactory.getLogger(TeeAssetRegistrarImpl.class);
     private static final Set<String> MOUNT_TYPES = Set.of("CREATE", "DATA_CHANGE");
-    private static final ZoneId PLATFORM_ZONE = ZoneId.of("Asia/Shanghai");
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
@@ -70,10 +67,9 @@ public class TeeAssetRegistrarImpl implements TeeAssetRegistrar {
             log.info("申请单 {} 未批准任何可信计算算子，跳过密文资产登记", approval.get("id"));
             return;
         }
-        String expiresAt = expiry(payload, sandboxId);
         for (String assetId : values(payload.path("datasetAssetIds"))) {
             try {
-                registerOne(assetId, sandboxId, payload, operators, expiresAt);
+                registerOne(assetId, sandboxId, payload, operators);
             } catch (RuntimeException failure) {
                 log.warn("密文资产 {} 登记失败: {}", assetId, failure.getMessage());
             }
@@ -81,7 +77,7 @@ public class TeeAssetRegistrarImpl implements TeeAssetRegistrar {
     }
 
     private void registerOne(String assetId, String sandboxId, JsonNode payload,
-                             List<String> operators, String expiresAt) {
+                             List<String> operators) {
         Map<String, Object> asset = single(
                 "select storage_uri,metadata_json,provider_node_id from ds_data_asset where id=? and deleted=0",
                 assetId);
@@ -111,35 +107,50 @@ public class TeeAssetRegistrarImpl implements TeeAssetRegistrar {
             log.info("资产 {} 的供数节点没有对应机构，跳过密文资产登记", assetId);
             return;
         }
-        // 标识按资产与沙箱推导，重复登记复用同一条策略与同一次幂等请求，不会越登越多
+        String expiresAt = expiry(payload, sandboxId, assetId);
+        // 策略标识沿用资产与沙箱绑定；幂等请求还绑定资产版本、批准范围和期限，避免期限变更冲突。
         String digest = digest(assetId + "|" + sandboxId);
+        String requestDigest = digest(digest + "|" + object.assetVersion() + "|" + granted
+                + "|" + operators + "|" + expiresAt);
         TeePolicyService.RegisterResult policy = keyGateway.registerPolicy(owner,
-                new TeePolicyService.RegisterRequest(TeeContract.VERSION, "pol-" + digest,
+                new TeePolicyService.RegisterRequest(TeeContract.VERSION, "pol-" + requestDigest,
                         new TeePolicyService.Policy(TeeContract.VERSION, "pl-" + digest, "1", assetId,
                                 object.assetVersion(), owner, sandboxId, granted, operators, expiresAt,
                                 List.of("EVALUATION_METRICS"))));
         keyGateway.registerAsset(owner, new TeeAssetService.RegisterRequest(TeeContract.VERSION,
-                "ast-" + digest, owner, schema, object,
+                "ast-" + requestDigest, owner, schema, object,
                 policy.policyId(), policy.policyVersion()));
         log.info("密文资产 {} 已按审批登记，沙箱 {}，授权算子 {}", assetId, sandboxId, operators);
     }
 
-    /** 授权期限：审批单显式给出的优先，否则取沙箱到期时间，都没有则给一天。 */
-    private String expiry(JsonNode payload, String sandboxId) {
-        String declared = payload.path("teeExpiresAt").asText("");
-        if (!declared.isBlank()) {
-            return declared;
+    /** 按供数方的数据期限与已批准的沙箱期限取交集；跨节点无本地沙箱时读取审批快照。 */
+    String expiry(JsonNode payload, String sandboxId, String assetId) {
+        Map<String, Object> sandbox = single(
+                "select project_id,expires_at from ds_sandbox where id=? and deleted=0", sandboxId);
+        String projectId = sandbox == null ? payload.path("projectId").asText("")
+                : text(sandbox.get("project_id"));
+        AssetUsageDeadline.Deadline usage = AssetUsageDeadline.resolve(jdbc, mapper, projectId, assetId);
+        Instant deadline = usage.expiresAt();
+        deadline = AssetUsageDeadline.earlier(deadline,
+                AssetUsageDeadline.parse(payload.path("teeExpiresAt").asText("")));
+        Instant sandboxDeadline = sandbox == null ? null : AssetUsageDeadline.parse(sandbox.get("expires_at"));
+        if (sandboxDeadline == null) {
+            sandboxDeadline = AssetUsageDeadline.parse(payload.path("expiresAt").asText(""));
         }
-        Map<String, Object> sandbox = single("select expires_at from ds_sandbox where id=? and deleted=0", sandboxId);
-        String sandboxExpiry = sandbox == null ? "" : text(sandbox.get("expires_at"));
-        Instant deadline = Instant.now().plus(1, ChronoUnit.DAYS);
-        if (!sandboxExpiry.isBlank()) {
-            try {
-                deadline = LocalDateTime.parse(sandboxExpiry).atZone(PLATFORM_ZONE).toInstant();
-            } catch (RuntimeException notLocal) {
-                log.debug("沙箱 {} 到期时间无法解析: {}", sandboxId, sandboxExpiry);
+        if (sandboxDeadline == null) {
+            for (Map<String, Object> row : jdbc.queryForList(
+                    "select payload_json from ds_sandbox_approval where sandbox_id=? and deleted=0 "
+                            + "and status='COMPLETED' and approval_type in ('CREATE','RENEW') order by updated_at desc",
+                    sandboxId)) {
+                sandboxDeadline = AssetUsageDeadline.parse(payload(row.get("payload_json")).path("expiresAt").asText(""));
+                if (sandboxDeadline != null) break;
             }
         }
+        deadline = AssetUsageDeadline.earlier(deadline, sandboxDeadline);
+        if (deadline == null) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "数据与审批未同步有效的使用截止时间");
+        }
+        TeeGuard.requireNotExpired(deadline, TeeContract.Error.POLICY_DENIED, "数据使用截止时间已过");
         return deadline.toString();
     }
 

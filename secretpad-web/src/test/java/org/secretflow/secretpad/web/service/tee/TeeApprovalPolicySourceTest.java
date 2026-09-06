@@ -164,4 +164,42 @@ class TeeApprovalPolicySourceTest {
         assertEquals(TeeContract.Error.POLICY_DENIED, assertThrows(TeeException.class,
                 () -> check(rows, List.of("age"), List.of("ml.xgboost"), 3600)).error());
     }
+    @Test
+    void latestUsageSnapshotReplacesAnExpiredMountCopy() {
+        Rows rows = complete(List.of("age"), List.of("ml.xgboost"));
+        rows.tables.put("ds_sandbox ", List.of(Map.of("owner_id", OWNER, "project_id", "project-1",
+                "expires_at", platformTime(4))));
+        rows.tables.put("ds_sandbox_dataset_mount", List.of(Map.of("asset_version", 1,
+                "expires_at", platformTime(-1))));
+        Instant deadline = Instant.now().plusSeconds(3600).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        rows.put("ds_project_asset", Map.of("asset_json", "{\"control_valid_until\":\"" + deadline + "\"}",
+                "expires_at", platformTime(-1)));
+        assertEquals(deadline, source(rows).resolveApproved(OWNER, SANDBOX, ASSET,
+                List.of("age"), List.of("ml.xgboost")).expiresAt());
+    }
+
+    @Test
+    void expiredUsageSnapshotRejectsEvenWhenMountAndPolicyAreStillValid() {
+        Rows rows = complete(List.of("age"), List.of("ml.xgboost"));
+        rows.put("ds_asset_usage_control", Map.of("valid_until", platformTime(-1)));
+        assertThrows(TeeException.class, () -> check(rows, List.of("age"), List.of("ml.xgboost"), 60));
+    }
+
+    @Test
+    void tighterMountControlStillLimitsNewUsageDeadline() {
+        Rows rows = complete(List.of("age"), List.of("ml.xgboost"));
+        rows.put("ds_asset_usage_control", Map.of("valid_until", platformTime(5)));
+        Instant control = Instant.now().plusSeconds(1800).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        rows.tables.put("ds_sandbox_mount_control", List.of(Map.of("allow_use", 1, "use_until", control.toString())));
+        assertEquals(control, source(rows).resolveApproved(OWNER, SANDBOX, ASSET,
+                List.of("age"), List.of("ml.xgboost")).expiresAt());
+    }
+
+    @Test
+    void malformedNonemptyDeadlineIsNotTreatedAsUnlimited() {
+        Rows rows = complete(List.of("age"), List.of("ml.xgboost"));
+        rows.put("ds_asset_usage_control", Map.of("valid_until", "broken"));
+        assertThrows(TeeException.class, () -> check(rows, List.of("age"), List.of("ml.xgboost"), 60));
+    }
+
 }

@@ -4,6 +4,8 @@
  */
 package org.secretflow.secretpad.web.service.tee;
 
+import org.secretflow.secretpad.web.service.AssetUsageDeadline;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -12,9 +14,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.OffsetDateTime;
-import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -35,9 +34,6 @@ import java.util.Set;
  */
 @Component
 public class TeeApprovalPolicySource {
-
-    /** 平台既有时间列写的是本地时间，与契约的 UTC RFC3339 并存，按同一时区约定解析。 */
-    private static final ZoneId PLATFORM_ZONE = ZoneId.of("Asia/Shanghai");
 
     /** 只有这两类审批会挂载数据集，其余类型不产生数据授权。 */
     private static final Set<String> MOUNT_APPROVAL_TYPES = Set.of("CREATE", "DATA_CHANGE");
@@ -64,8 +60,28 @@ public class TeeApprovalPolicySource {
      */
     public Approved requireApproved(String ownerId, String sandboxId, String assetId,
                                     List<String> columns, List<String> operators, Instant expiresAt) {
+        Approved approved = resolveApproved(ownerId, sandboxId, assetId, columns, operators);
+        if (expiresAt.isAfter(approved.expiresAt())) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "授权有效期超过审批批准的期限");
+        }
+        return approved;
+    }
+
+    /** 读取当前批准范围，用于登记、期限变更后的策略更新，以及每次执行前复核。 */
+    public Approved resolveApproved(String ownerId, String sandboxId, String assetId,
+                                    List<String> columns, List<String> operators) {
+        Approved approved = approvedScope(ownerId, sandboxId, assetId, columns, operators);
+        if (!Instant.now().isBefore(approved.expiresAt())) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "数据使用截止时间已过");
+        }
+        return approved;
+    }
+
+    /** 读取期限本身，允许同步已过期的截止时间；是否仍可使用由执行入口判断。 */
+    public Approved approvedScope(String ownerId, String sandboxId, String assetId,
+                                  List<String> columns, List<String> operators) {
         Map<String, Object> sandbox = single(
-                "select owner_id,expires_at from ds_sandbox where id=? and deleted=0", sandboxId);
+                "select owner_id,project_id,expires_at from ds_sandbox where id=? and deleted=0", sandboxId);
         if (sandbox == null) {
             throw TeeException.of(TeeContract.Error.POLICY_DENIED, "授权规则引用的沙箱不存在");
         }
@@ -90,18 +106,19 @@ public class TeeApprovalPolicySource {
         TeeGuard.requireSubset(operators, approved.operators(), "授权算子");
         Instant deadline = approved.expiresAt();
         deadline = earlier(deadline, instant(sandbox.get("expires_at")));
-        deadline = earlier(deadline, instant(mount.get("expires_at")));
+        // 挂载表是首次挂载时的副本。存在当前供数方快照时，用它替换旧副本，避免延期后仍被旧值拦截。
+        AssetUsageDeadline.Deadline usage;
+        try {
+            usage = AssetUsageDeadline.resolve(jdbc, mapper, text(sandbox.get("project_id")), assetId);
+        } catch (IllegalArgumentException invalid) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, invalid.getMessage());
+        }
+        deadline = earlier(deadline, usage.found() ? usage.expiresAt() : instant(mount.get("expires_at")));
         if (control != null) {
             deadline = earlier(deadline, instant(control.get("use_until")));
         }
         if (deadline == null) {
             throw TeeException.of(TeeContract.Error.POLICY_DENIED, "审批未给出使用截止时间");
-        }
-        if (Instant.now().isAfter(deadline)) {
-            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "审批批准的使用期限已过");
-        }
-        if (expiresAt.isAfter(deadline)) {
-            throw TeeException.of(TeeContract.Error.POLICY_DENIED, "授权有效期超过审批批准的期限");
         }
         return new Approved(approved.approvalId(), approved.columns(), approved.operators(), deadline);
     }
@@ -206,20 +223,12 @@ public class TeeApprovalPolicySource {
         return right == null || left.isBefore(right) ? left : right;
     }
 
-    /** 平台既有时间列没有时区，按平台时区解析；契约字段本身带偏移量。 */
+    /** 无法解析的非空期限不能被当作无限期，否则会放宽供数方的限制。 */
     private static Instant instant(Object value) {
-        String text = text(value);
-        if (text.isBlank()) {
-            return null;
-        }
         try {
-            return OffsetDateTime.parse(text).toInstant();
-        } catch (Exception notOffset) {
-            try {
-                return LocalDateTime.parse(text).atZone(PLATFORM_ZONE).toInstant();
-            } catch (Exception invalid) {
-                return null;
-            }
+            return AssetUsageDeadline.parse(value);
+        } catch (IllegalArgumentException invalid) {
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED, invalid.getMessage());
         }
     }
 }

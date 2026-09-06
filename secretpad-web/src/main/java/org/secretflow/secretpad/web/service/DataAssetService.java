@@ -435,7 +435,7 @@ public class DataAssetService {
                     .assetJson(json(snapshot))
                     .attachedBy(actor())
                     .attachedAt(beijingNow())
-                    .expiresAt(String.valueOf(asset.getOrDefault("valid_until", "")))
+                    .expiresAt(Objects.toString(asset.getOrDefault("control_valid_until", asset.get("valid_until")), ""))
                     .build());
             attached.add(assetId);
         }
@@ -474,7 +474,7 @@ public class DataAssetService {
                 .assetJson(json(snapshot))
                 .attachedBy(actor())
                 .attachedAt(beijingNow())
-                .expiresAt(String.valueOf(asset.getOrDefault("valid_until", "")))
+                .expiresAt(Objects.toString(asset.getOrDefault("control_valid_until", asset.get("valid_until")), ""))
                 .build());
         try {
             assetSyncService.ensureSynced(projectId, assetId);
@@ -580,7 +580,7 @@ public class DataAssetService {
      */
     private void decorateUsageControl(Map<String, Object> asset, String assetId) {
         List<Map<String, Object>> controls = jdbc.queryForList(
-                "select valid_from,valid_until,allow_export,access_start,access_end "
+                "select valid_from,valid_until,allow_export,access_start,access_end,version,updated_at "
                         + "from ds_asset_usage_control where asset_id=?", assetId);
         if (controls.isEmpty()) return;
         Map<String, Object> control = controls.get(0);
@@ -589,6 +589,8 @@ public class DataAssetService {
         asset.put("allow_export", control.get("allow_export"));
         asset.put("access_start", control.get("access_start"));
         asset.put("access_end", control.get("access_end"));
+        asset.put("usage_control_version", control.get("version"));
+        asset.put("usage_control_updated_at", control.get("updated_at"));
     }
 
     /** Resolve both local catalog assets and metadata snapshots for project-shared assets. */
@@ -710,10 +712,24 @@ public class DataAssetService {
         for (Map<String, Object> attachment : attachments) {
             String projectId = String.valueOf(attachment.get("project_id"));
             projectAssetRepository.findById(new ProjectAssetDO.UPK(projectId, assetId)).ifPresent(row -> {
-                row.setAssetJson(snapshot);
-                row.setExpiresAt("null".equals(validUntil) ? "" : validUntil);
-                projectAssetRepository.save(row);
+                String expiresAt = "null".equals(validUntil) ? "" : validUntil;
+                if (!parseMap(row.getAssetJson()).equals(parseMap(snapshot))
+                        || !Objects.equals(row.getExpiresAt(), expiresAt)) {
+                    row.setAssetJson(snapshot);
+                    row.setExpiresAt(expiresAt);
+                    projectAssetRepository.save(row);
+                }
             });
+        }
+    }
+
+    /** 补齐历史控制快照并重试尚未传播的变更；无变化不发布同步事件。 */
+    @Transactional
+    public void reconcileUsageSnapshots() {
+        for (Map<String, Object> row : jdbc.queryForList(
+                "select c.asset_id from ds_asset_usage_control c join ds_data_asset a "
+                        + "on a.id=c.asset_id and a.deleted=0")) {
+            refreshProjectSnapshots(String.valueOf(row.get("asset_id")));
         }
     }
 
