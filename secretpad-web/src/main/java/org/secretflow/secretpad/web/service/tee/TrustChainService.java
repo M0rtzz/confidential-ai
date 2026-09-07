@@ -453,7 +453,7 @@ public class TrustChainService {
         List<TeeRuntimeTaskDO> items = taskRepository.findTop200ByOrderByGmtCreateDesc();
         long verified = items.stream().filter(t -> Boolean.TRUE.equals(t.getReceiptVerified())).count();
         return new Segment("TEE_EXEC", "TEE 执行", items.isEmpty() ? "EMPTY" : "OK",
-                List.of(new Metric("已核实回执", verified), new Metric("总任务", items.size())));
+                List.of(new Metric("已核实", verified), new Metric("总任务", items.size())));
     }
 
     private Segment egressSegment(String ownerId, boolean isCenter) {
@@ -505,7 +505,7 @@ public class TrustChainService {
                 emptyIfNull(object.getResultId()), object.getKeyId(), object.getKeyVersion(),
                 object.getCiphertextSha256(), object.getSizeBytes() == null ? 0 : object.getSizeBytes(),
                 readStrings(object.getContributorsJson()), object.getExportState(),
-                object.getGmtCreate() == null ? "" : object.getGmtCreate().toString());
+                utc(object.getGmtCreate()));
     }
 
     private PolicyItem toPolicyItem(TeePolicyDO policy) {
@@ -520,8 +520,7 @@ public class TrustChainService {
         return new TaskItem(task.getUpk().getTaskId(), task.getRequestId(), task.getCallerId(),
                 readStrings(task.getContributorsJson()), task.getStatus(), operatorOf(task.getTaskJws()),
                 task.getExpiresAt(), Boolean.TRUE.equals(task.getReceiptVerified()),
-                task.getGmtCreate() == null ? "" : task.getGmtCreate().toString(),
-                task.getGmtModified() == null ? "" : task.getGmtModified().toString());
+                utc(task.getGmtCreate()), utc(task.getGmtModified()));
     }
 
     /** 签名任务的 operatorId 只用于展示，解析失败不影响列表其余字段。 */
@@ -551,7 +550,7 @@ public class TrustChainService {
         return new ExportItem(request.getUpk().getExportId(), request.getResultId(), request.getObjectId(),
                 request.getKind(), request.getTaskId(), request.getRequesterOwnerId(), request.getStatus(),
                 request.getApprovedAt(),
-                request.getGmtCreate() == null ? "" : request.getGmtCreate().toString(), votes);
+                utc(request.getGmtCreate()), votes);
     }
 
     private ExportItem toExportItem(TeeExportService.RequestView view) {
@@ -562,6 +561,16 @@ public class TrustChainService {
     }
 
     /** 统一日志中 TEE 相关动作最近 20 条，成功与拒绝都保留。 */
+    /**
+     * 审计列的时间是以 UTC 取值、按无时区的 {@code LocalDateTime} 落库的
+     * （见 {@code BaseAggregationRoot.parseNow}）。直接 {@code toString()} 输出不带时区，
+     * 界面会当作本地时间原样显示，比其他带 {@code Z} 的字段早 8 小时。
+     * 统一补上 UTC 偏移，交由界面换算成北京时间。
+     */
+    private static String utc(java.time.LocalDateTime value) {
+        return value == null ? "" : value.toInstant(java.time.ZoneOffset.UTC).toString();
+    }
+
     private List<LogItem> recentTeeLogs() {
         return mvp.listLogs("TEE", null, null, null, null, null, RECENT_LOG_LIMIT).stream()
                 .map(row -> new LogItem(String.valueOf(row.get("created_at")), String.valueOf(row.get("actor")),
