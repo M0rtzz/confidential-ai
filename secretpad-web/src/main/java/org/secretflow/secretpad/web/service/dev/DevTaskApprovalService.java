@@ -231,9 +231,9 @@ public class DevTaskApprovalService {
 
     public List<Map<String, Object>> listPending(String keyword) {
         sandboxApprovals.applySyncedApprovals();
-        StringBuilder sql = new StringBuilder("select a.* from ds_sandbox_approval a join ds_sandbox_approval_vote v "
-                + "on v.approval_id=a.id where a.deleted=0 and a.approval_type=? "
-                + "and a.status='DATA_PROVIDER_REVIEW' and v.voter_node_id=? and v.status='PENDING'");
+        StringBuilder sql = new StringBuilder("select distinct a.*, v.status as my_vote_status, v.comment as my_vote_comment "
+                + "from ds_sandbox_approval a join ds_sandbox_approval_vote v "
+                + "on v.approval_id=a.id where a.deleted=0 and a.approval_type=? and v.voter_node_id=?");
         List<Object> args = new ArrayList<>(List.of(TYPE, effectiveNode()));
         if (notBlank(keyword)) {
             sql.append(" and (lower(a.id) like ? or lower(a.payload_json) like ?)");
@@ -248,10 +248,16 @@ public class DevTaskApprovalService {
         Map<String, Object> approval = requireApproval(approvalId);
         assertVisible(approval);
         Map<String, Object> result = enrichOne(approval);
-        result.put("votes", jdbc.queryForList("select * from ds_sandbox_approval_vote where approval_id=? order by voter_node_id", approvalId));
+        List<Map<String, Object>> votes = jdbc.queryForList("select * from ds_sandbox_approval_vote where approval_id=? order by voter_node_id", approvalId);
+        result.put("votes", votes);
         result.put("history", jdbc.queryForList("select * from ds_sandbox_approval_history where approval_id=? order by id", approvalId));
         result.put("canApprove", canApprove(approval));
         result.put("canCancel", canCancel(approval));
+        for (Map<String, Object> v : votes) {
+            if (notBlank(text(v.get("comment"))) && !notBlank(text(result.get("review_comment")))) {
+                result.put("review_comment", v.get("comment"));
+            }
+        }
         return result;
     }
 
