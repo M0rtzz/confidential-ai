@@ -28,3 +28,10 @@ create unique index if not exists idx_dev_task_review_approval
     on ds_dev_task_review(approval_id);
 create index if not exists idx_dev_task_review_status
     on ds_dev_task_review(ai_status, updated_at);
+
+/* Persist the bounded tail before CipherGPU removes terminal job state. */
+alter table ds_confidential_training_task add column terminal_log_snapshot text;
+alter table ds_confidential_training_task add column terminal_log_saved_at varchar(64);
+alter table ds_confidential_training_task add column terminal_log_truncated integer not null default 0;
+alter table ds_confidential_training_task add column terminal_log_status varchar(32) not null default 'NOT_SAVED';
+alter table ds_confidential_training_task add column terminal_log_error varchar(512) not null default '';
