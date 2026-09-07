@@ -73,7 +73,7 @@ public class TeeModelReportAccess {
         }
         boolean evaluation = "DATA".equals(object.getKind());
         if (evaluation && !List.of("ml.xgboost", "ml.lightgbm", "ml.decision_tree", "ml.logistic_regression",
-                "ml.linear_regression", "ml.knn", "ml.dnn").contains(source.operatorId())) {
+                "ml.linear_regression", "ml.knn", "ml.dnn", "ml.cnn", "ml.rnn", "ml.lstm").contains(source.operatorId())) {
             throw denied("评估报告只接受已核实的模型训练预测结果");
         }
         boolean found = false;

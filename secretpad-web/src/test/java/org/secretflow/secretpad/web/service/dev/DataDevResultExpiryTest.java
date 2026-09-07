@@ -22,7 +22,7 @@ class DataDevResultExpiryTest {
     void expiredTaskDetailHidesReportsAndKeepsEncryptedMetadata() {
         JdbcTemplate jdbc = mock(JdbcTemplate.class);
         SandboxDataControlService control = mock(SandboxDataControlService.class);
-        DataDevService service = new DataDevService(jdbc, new ObjectMapper(), null, null, null, null, null, null, control);
+        DataDevService service = new DataDevService(jdbc, new ObjectMapper(), null, null, null, null, null, null, control, null);
         TeeModelReportAccess reportAccess = mock(TeeModelReportAccess.class);
         ReflectionTestUtils.setField(service, "modelReportAccess", reportAccess);
         Map<String, Object> task = Map.of("id", "task-1", "result_preview",

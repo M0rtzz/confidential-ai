@@ -52,6 +52,23 @@ class IsolationTests(unittest.TestCase):
             self.assertEqual(values['MINIO_ROOT_USER'], 'keep-user')
             self.assertEqual(credentials.stat().st_mode & 0o777, 0o600)
 
+    def test_test_profile_does_not_start_shared_demo_databases(self):
+        with patch.object(deploy, 'TEST_PROFILE', 'deep-learning'), patch.object(deploy.subprocess, 'run') as run:
+            deploy.ensure_demo_databases()
+            run.assert_not_called()
+
+    def test_test_profile_rejects_main_workspace(self):
+        with patch.object(deploy, 'TEST_PROFILE', 'deep-learning'), \
+                patch.object(deploy, 'WORKSPACE', Path('/data/collab/Projects/gpu')):
+            with self.assertRaises(RuntimeError):
+                deploy.guard()
+
+    def test_bootstrap_is_forbidden_without_test_profile(self):
+        with patch.object(deploy, 'TEST_PROFILE', ''), patch.object(deploy, 'run') as run:
+            with self.assertRaises(RuntimeError):
+                deploy.bootstrap_test()
+            run.assert_not_called()
+
     def test_invalid_migrated_domain_is_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             runtime = Path(folder)
@@ -534,7 +551,7 @@ class CrossInstanceChannelTests(unittest.TestCase):
 
     def test_only_the_center_publishes_the_contract_entry(self):
         source = Path(deploy.__file__).read_text()
-        self.assertIn("TEE_CONTRACT_PORT_ARGS='-p 19686:8443' if name == 'center' else ''", source)
+        self.assertIn("TEE_CONTRACT_PORT_ARGS=f'-p {CONTRACT_PORT}:8443' if name == 'center' else ''", source)
         self.assertIn("TEE_CONTRACT_CENTER_URL='' if name == 'center' else CONTRACT_CENTER_URL", source)
         # 三个实例都要挂载本机构私钥与调用方证书，中心端另挂服务端证书。
         for mount in ['/app/tee-contract-client:ro', '/app/tee-identity-key:ro',
