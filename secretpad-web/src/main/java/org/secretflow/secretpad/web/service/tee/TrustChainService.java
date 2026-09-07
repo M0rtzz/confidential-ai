@@ -576,11 +576,20 @@ public class TrustChainService {
     }
 
     private List<LogItem> recentTeeLogs() {
-        return mvp.listLogs("TEE", null, null, null, null, null, RECENT_LOG_LIMIT).stream()
+        List<LogItem> records = new ArrayList<>(mvp.listLogs("TEE_POLICY", null, null, null, null, null, RECENT_LOG_LIMIT).stream()
                 .map(row -> new LogItem(String.valueOf(row.get("created_at")), String.valueOf(row.get("actor")),
                         String.valueOf(row.get("action")), truthy(row.get("success")),
-                        String.valueOf(row.get("detail"))))
-                .toList();
+                        "关联标识：" + row.get("resource_id") + "；" + row.get("detail")))
+                .toList());
+        // 历史执行日志保留原有证据含义，不补造当时未记录的逐项校验结果。
+        mvp.listLogs("OPERATION", null, null, "DEV_TASK_TEE_SUCCEEDED", null, null, RECENT_LOG_LIMIT).stream()
+                .filter(row -> "DEV_TASK_TEE_SUCCEEDED".equals(row.get("action")))
+                .map(row -> new LogItem(String.valueOf(row.get("created_at")), String.valueOf(row.get("actor")),
+                        "可信任务执行成功（执行记录）", truthy(row.get("success")),
+                        "任务：" + row.get("resource_id") + "；" + row.get("detail")))
+                .forEach(records::add);
+        return records.stream().sorted(java.util.Comparator.comparing(LogItem::at).reversed())
+                .limit(RECENT_LOG_LIMIT).toList();
     }
 
     /**

@@ -134,4 +134,27 @@ class TrustChainServiceTest {
 
         assertEquals(TeeContract.Error.AUDIT_ACCESS_DENIED, refused.error());
     }
+    @Test
+    void policyAuditIncludesRealDecisionsAndClearlyLabelsExistingExecutionLogs() {
+        TrustChainService service = newService(mock(TeeCenterClient.class), mock(TeeObjectRepository.class),
+                mock(TeeObjectStore.class), mock(TeeKeyGateway.class), mock(TeeExportGateway.class));
+        DataSandboxMvpService logs = (DataSandboxMvpService) ReflectionTestUtils.getField(service, "mvp");
+        when(logs.listLogs(org.mockito.ArgumentMatchers.eq("TEE_POLICY"), org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(List.of(java.util.Map.of("created_at", "2026-09-08T02:30:00", "actor", "owner",
+                        "action", "任务授权校验与密钥放行", "success", 0, "resource_id", "task-new", "detail", "POLICY_DENIED")));
+        when(logs.listLogs(org.mockito.ArgumentMatchers.eq("OPERATION"), org.mockito.ArgumentMatchers.isNull(),
+                org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.eq("DEV_TASK_TEE_SUCCEEDED"),
+                org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(List.of(java.util.Map.of("created_at", "2026-09-08T02:20:00", "actor", "owner",
+                        "action", "DEV_TASK_TEE_SUCCEEDED", "success", 1, "resource_id", "task-old", "detail", "完成")));
+        var records = service.policies().recent();
+        assertEquals(2, records.size());
+        assertFalse(records.get(0).allowed());
+        assertTrue(records.get(0).detail().contains("task-new"));
+        assertEquals("可信任务执行成功（执行记录）", records.get(1).action());
+        assertTrue(records.get(1).detail().contains("task-old"));
+    }
+
 }
