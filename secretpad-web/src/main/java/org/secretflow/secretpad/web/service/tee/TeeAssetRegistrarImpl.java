@@ -76,6 +76,41 @@ public class TeeAssetRegistrarImpl implements TeeAssetRegistrar {
         }
     }
 
+    @Override
+    public void ensureRegistered(String assetId, String sandboxId) {
+        Map<String, Object> approval = single(
+                "select a.* from ds_sandbox_approval a where a.sandbox_id=? and a.deleted=0 "
+                        + "and a.status='COMPLETED' and a.approval_type in ('CREATE','DATA_CHANGE') "
+                        + "and exists(select 1 from json_each(a.payload_json,'$.datasetAssetIds') j where j.value=?) "
+                        + "order by a.completed_at desc,a.updated_at desc limit 1", sandboxId, assetId);
+        if (approval == null) throw TeeException.of(TeeContract.Error.POLICY_DENIED, "资产缺少已完成的挂载审批");
+        JsonNode approved = payload(approval.get("payload_json"));
+        List<String> operators = values(approved.path("teeOperators"));
+        if (operators.isEmpty()) throw TeeException.of(TeeContract.Error.POLICY_DENIED, "审批未批准可信计算算子");
+        registerOne(assetId, sandboxId, approved, operators);
+    }
+
+    @org.springframework.beans.factory.annotation.Value("${secretpad.data-sandbox.tee.dispatch-enabled:false}")
+    private boolean dispatchEnabled;
+
+    /** 补齐中心端历史审批完成后遗漏的本方密文资产登记。 */
+    @org.springframework.scheduling.annotation.Scheduled(initialDelay = 10000, fixedDelay = 60000)
+    public void reconcileMissing() {
+        if (!dispatchEnabled) return;
+        List<Map<String, Object>> missing = jdbc.queryForList(
+                "select distinct m.sandbox_id,m.asset_id from ds_sandbox_dataset_mount m "
+                        + "join ds_data_asset a on a.id=m.asset_id and a.deleted=0 "
+                        + "where m.deleted=0 and m.status='READY' and json_extract(a.metadata_json,'$.encrypted')=1 "
+                        + "and not exists(select 1 from tee_asset t where t.asset_id=m.asset_id "
+                        + "and t.asset_version=cast(m.asset_version as text) and t.is_deleted=0) limit 20");
+        for (Map<String, Object> row : missing) {
+            try { ensureRegistered(text(row.get("asset_id")), text(row.get("sandbox_id"))); }
+            catch (RuntimeException failure) {
+                log.warn("挂载资产 {} 登记补齐失败: {}", row.get("asset_id"), failure.getMessage());
+            }
+        }
+    }
+
     private void registerOne(String assetId, String sandboxId, JsonNode payload,
                              List<String> operators) {
         Map<String, Object> asset = single(

@@ -71,6 +71,9 @@ public class TeeDevTaskDispatcher {
     private final TeePolicyService policyService;
     private final TeeModelApiAssets modelApiAssets;
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.secretflow.secretpad.web.service.sandbox.TeeAssetRegistrar assetRegistrar;
+
     @Value("${secretpad.data-sandbox.tee.dispatch-enabled:false}")
     private boolean enabled;
     @Value("${TEE_END_ROLES:CLIENT}")
@@ -371,8 +374,11 @@ public class TeeDevTaskDispatcher {
         }
         if (!requestedVersion.isBlank()) {
             String version = requestedVersion;
-            return assets.findById(new TeeAssetDO.UPK(assetId, version))
-                    .orElseThrow(() -> contract("挂载版本未登记为密文资产"));
+            TeeAssetDO.UPK key = new TeeAssetDO.UPK(assetId, version);
+            return assets.findById(key).orElseGet(() -> {
+                assetRegistrar.ensureRegistered(assetId, sandboxId);
+                return assets.findById(key).orElseThrow(() -> contract("挂载版本未登记为密文资产"));
+            });
         }
         return assets.findByUpkAssetId(assetId).stream()
                 .max(Comparator.comparingLong(item -> positive(item.getUpk().getAssetVersion(), "assetVersion")))

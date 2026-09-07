@@ -25,4 +25,7 @@ public interface TeeAssetRegistrar {
      * @param approval 申请单行，需含 {@code payload_json}、{@code sandbox_id} 与 {@code approval_type}
      */
     void registerApproved(Map<String, Object> approval);
+
+    /** 按该资产最新的已完成审批补齐登记，不改变审批范围。 */
+    void ensureRegistered(String assetId, String sandboxId);
 }
