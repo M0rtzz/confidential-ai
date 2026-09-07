@@ -13,7 +13,8 @@ import time
 import urllib.request
 
 from platform_deploy import (ROOT, CACHE, RUNTIME, INSTANCES, SOURCES, LABEL, CONTRACT_HOST, run, atomic, utc,
-                manifest, save_manifest, checked_image, image_info, managed, kube, domain_id)
+                manifest, save_manifest, checked_image, image_info, managed, kube, domain_id,
+                CONTAINER_PREFIX, CAPSULE_PORT, TEST_PROFILE)
 
 CENTER = RUNTIME / 'center/tee'
 PKI = CENTER / 'pki'
@@ -162,7 +163,7 @@ def certificates():
     # 中心签名任务的身份；P6 用它签发 tee_task_jws，本阶段只登记受信证书。
     issue(PKI / 'external-ca', CENTER / 'task-signer', 'tee-a-task-signer')
     issue(PKI / 'adapter-ca', CENTER / 'adapter-server',
-          'data-sandbox-dev-center-key-adapter', server=True)
+          CONTAINER_PREFIX + 'center-key-adapter', server=True)
     for name in INSTANCES:
         issue(PKI / 'adapter-ca', RUNTIME / name / 'tee/adapter-client', 'platform-' + name)
     # 平台之间的契约调用使用第三个信任域：客户端实例凭它向中心端申请密钥，
@@ -353,7 +354,7 @@ def platform_login(name, end_role=None):
     if end_role:
         payload['endRole'] = end_role
     request = urllib.request.Request(
-        f'http://127.0.0.1:{INSTANCES[name] * 100 + 88}/api/login',
+        f'http://127.0.0.1:{INSTANCES[name] * 100 + 87}/api/login',
         data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(request, timeout=15) as response:
         body = json.load(response)
@@ -410,7 +411,7 @@ def kube_labels_owned_or_migrated(existing, repair_startup=False):
 
 def import_image(name, key):
     ref = checked_image(key)
-    ctr = f'data-sandbox-dev-{name}-kuscia'
+    ctr = f'{CONTAINER_PREFIX}{name}-kuscia'
     managed(ctr) or (_ for _ in ()).throw(RuntimeError('Kuscia 未启动'))
     image_id = manifest()['images'][key]['id']
     if '@sha256:' in ref:
@@ -457,7 +458,7 @@ def runtime_image(key):
 
 def pod_exec(pod, container, *command):
     """Kuscia 未提供标准 kubelet 日志代理时，按精确 Pod 归属执行 CRI 同步命令。"""
-    ctr = 'data-sandbox-dev-center-kuscia'
+    ctr = CONTAINER_PREFIX + 'center-kuscia'
     managed(ctr) or (_ for _ in ()).throw(RuntimeError('中心 Kuscia 不存在'))
     values = json.loads(run('docker', 'exec', ctr, '/home/kuscia/bin/crictl', 'ps', '-o', 'json', capture=True))['containers']
     matched = [item for item in values if item.get('metadata', {}).get('name') == container
@@ -590,7 +591,7 @@ http {
         'spec': {'type': 'ClusterIP', 'selector': {'app': 'tee-a-capsule'},
                  'ports': [{'port': 8443, 'targetPort': 8443, 'protocol': 'TCP'}]}}
     atomic(CENTER / 'resources.json', {'apiVersion': 'v1', 'kind': 'List', 'items': [deployment, service]})
-    print('中心模板已渲染；CM 原端口与 MySQL 不发布，外部只有19685的mTLS网关。')
+    print(f'中心模板已渲染；CM 原端口与 MySQL 不发布，mTLS 网关端口为 {CAPSULE_PORT}。')
 
 
 def base_up(repair_startup=False):
@@ -643,12 +644,12 @@ def base_up(repair_startup=False):
 def adapter_up():
     """中心密钥适配服务；复用已验证的探测镜像与 SDK，只挂载脚本与证书。"""
     ref = checked_image('probe')
-    ctr = 'data-sandbox-dev-center-key-adapter'
+    ctr = CONTAINER_PREFIX + 'center-key-adapter'
     current = managed(ctr)
     if current:
         if current['Image'] == image_info(ref)['Id'] and current['State']['Running']: return
         raise RuntimeError('适配服务已存在且状态不同，需单独授权替换')
-    network = 'data-sandbox-dev-center'
+    network = CONTAINER_PREFIX + 'center'
     managed(network, 'network') or (_ for _ in ()).throw(RuntimeError('中心网络不存在'))
     script = ROOT / 'scripts/deploy/tee/key_adapter.py'
     command = ['docker', 'run', '-d', '--pull=never', '--name', ctr, '--network', network,
@@ -656,7 +657,7 @@ def adapter_up():
                '--restart', 'unless-stopped', '--read-only', '--cap-drop=ALL', '--security-opt', 'no-new-privileges',
                '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
                '--add-host', f'capsule.tee-a.test:{CONTRACT_HOST}',
-               '-e', 'TEE_CAPSULE_ENDPOINT=capsule.tee-a.test:19685',
+               '-e', f'TEE_CAPSULE_ENDPOINT=capsule.tee-a.test:{CAPSULE_PORT}',
                '-v', str(CENTER / 'adapter-identity') + ':/certs:ro',
                '-v', str(CENTER / 'adapter-server') + ':/server:ro',
                '-v', str(script) + ':/opt/p4/key_adapter.py:ro']
@@ -666,18 +667,18 @@ def adapter_up():
 
 def probe_up(name):
     ref = checked_image('probe')
-    ctr = f'data-sandbox-dev-{name}-tee-probe'
+    ctr = f'{CONTAINER_PREFIX}{name}-tee-probe'
     current = managed(ctr)
     if current:
         if current['Image'] == image_info(ref)['Id'] and current['State']['Running']: return
         raise RuntimeError('探测器已存在且状态不同，需单独授权替换')
-    network = f'data-sandbox-dev-{name}'
+    network = f'{CONTAINER_PREFIX}{name}'
     managed(network, 'network') or (_ for _ in ()).throw(RuntimeError('实例网络未创建'))
     command = ['docker', 'run', '-d', '--pull=never', '--name', ctr, '--network', network,
                '--user', f'{os.getuid()}:{os.getgid()}',
                '--restart', 'unless-stopped', '--read-only', '--cap-drop=ALL', '--security-opt', 'no-new-privileges',
                '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
-               '-e', f'TEE_CAPSULE_ENDPOINT={CONTRACT_HOST}:19685',
+               '-e', f'TEE_CAPSULE_ENDPOINT={CONTRACT_HOST}:{CAPSULE_PORT}',
                '-v', str(RUNTIME / name / 'tee/probe-cert') + ':/certs:ro']
     for k, v in labels().items(): command += ['--label', f'{k}={v}']
     run(*command, ref, 'python', '/opt/p3/probe.py', '--serve')
@@ -700,7 +701,7 @@ def appimage(name, key, command):
                  'deployTemplates': [{'name': 'main', 'replicas': 1, 'spec': {'restartPolicy': 'Never',
                     'containers': [{'name': 'main', 'command': command, 'workingDir': '/tmp', 'imagePullPolicy': 'Never',
                        'envFrom': [{'secretRef': {'name': 'tee-a-probe-cert'}}],
-                       'env': [{'name': 'TEE_CAPSULE_ENDPOINT', 'value': f'{CONTRACT_HOST}:19685'}],
+                       'env': [{'name': 'TEE_CAPSULE_ENDPOINT', 'value': f'{CONTRACT_HOST}:{CAPSULE_PORT}'}],
                        'configVolumeMounts': [{'mountPath': '/etc/kuscia/task-config.conf', 'subPath': 'task-config.conf'}],
                        'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '1', 'memory': '512Mi'}},
                        'securityContext': {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}}}]}}]}}
@@ -744,7 +745,7 @@ def record_smoke(app, name):
     task = json.loads(kube('center', 'get', 'kusciatask', name + '-task', '-n', 'cross-domain', '-o', 'json'))
     if job.get('status', {}).get('phase') != 'Succeeded' or task.get('status', {}).get('phase') != 'Succeeded' or task['metadata']['labels'].get('kuscia.secretflow/job-uid') != job['metadata']['uid']:
         raise RuntimeError('Job 与实际 Task 的成功状态不一致')
-    ctr = 'data-sandbox-dev-center-kuscia'
+    ctr = CONTAINER_PREFIX + 'center-kuscia'
     def cri(*args): return run('docker', 'exec', ctr, '/home/kuscia/bin/crictl', *args, capture=True)
     containers = [c for c in json.loads(cri('ps', '-a', '-o', 'json'))['containers']
         if c.get('metadata', {}).get('name') == 'main' and c.get('labels', {}).get('io.kubernetes.pod.name') == name + '-task-0'
@@ -798,7 +799,7 @@ def pair():
     """仅配对新实例，身份信息在内存传递，不保存登录 token 或节点私钥。"""
     domains = {name: domain_id(name) for name in INSTANCES}
     def api(name, path, payload, token=None):
-        port = INSTANCES[name] * 100 + 88
+        port = INSTANCES[name] * 100 + 87
         headers = {'Content-Type': 'application/json'}
         if token: headers['User-Token'] = token
         request = urllib.request.Request(f'http://127.0.0.1:{port}/api/' + path,
@@ -809,7 +810,7 @@ def pair():
         return result['data']
     sessions = {}
     for name in INSTANCES:
-        managed(f'data-sandbox-dev-{name}-secretpad')
+        managed(f'{CONTAINER_PREFIX}{name}-secretpad')
         env = dict(line.split('=', 1) for line in (RUNTIME / name / 'secretpad.env').read_text().splitlines() if '=' in line)
         # 中心端双端可用，按契约登录必须显式选择端；单端实例可省略。
         credentials = {'name': env['SECRETPAD_USER_NAME'],

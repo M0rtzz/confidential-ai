@@ -22,6 +22,19 @@ class CanvasOperatorOutputColumnsTest {
     private static final List<String> INPUT = List.of("age", "income", "is_default");
 
     @Test
+    void deepLearningKeepsLegacyCodeAndTaskDependentOutput() {
+        for (String code : List.of("ml.dnn", "ml.cnn", "ml.rnn", "ml.lstm")) {
+            assertEquals("深度学习", CanvasOperatorRegistry.requireOperator(code).get("category"));
+            assertEquals(true, CanvasOperatorRegistry.isTrain(code));
+            assertEquals(true, CanvasOperatorRegistry.outputsPrediction(code));
+            assertEquals(List.of("age", "income", "is_default", "pred", "pred_prob"),
+                    CanvasOperatorRegistry.outputColumns(code, Map.of("task", "classification"), INPUT));
+            assertEquals(List.of("age", "income", "is_default", "pred"),
+                    CanvasOperatorRegistry.outputColumns(code, Map.of("task", "regression"), INPUT));
+        }
+    }
+
+    @Test
     void inPlaceOperatorsKeepColumns() {
         for (String code : List.of("preprocessing.fillna", "preprocessing.standardize",
                 "preprocessing.outlier", "preprocessing.woe", "preprocessing.binning",

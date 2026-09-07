@@ -62,6 +62,7 @@ public final class CanvasOperatorRegistry {
     private static final String CATEGORY_FEATURE = "特征工程";
     private static final String CATEGORY_STATS = "统计分析";
     private static final String CATEGORY_ML = "机器学习";
+    private static final String CATEGORY_DL = "深度学习";
     private static final String CATEGORY_EVAL = "模型评估";
 
     private static final List<Map<String, Object>> OPERATORS = buildOperators();
@@ -96,7 +97,7 @@ public final class CanvasOperatorRegistry {
 
     /** 输出 schema 是否含预测列（供前端展示）。 */
     public static boolean outputsPrediction(String code) {
-        return List.of("ml.linear_regression", "ml.logistic_regression", "ml.knn", "ml.dnn",
+        return List.of("ml.linear_regression", "ml.logistic_regression", "ml.knn", "ml.dnn", "ml.cnn", "ml.rnn", "ml.lstm",
                 "ml.decision_tree", "ml.xgboost", "ml.lightgbm").contains(code);
     }
 
@@ -350,7 +351,7 @@ public final class CanvasOperatorRegistry {
                 List.of(col("cluster", "聚类标签")),
                 true, false));
 
-        ops.add(op("ml.dnn", "DNN", CATEGORY_ML, "深度神经网络（MLP）训练，输出 pred 与 pred_prob 列",
+        ops.add(op("ml.dnn", "DNN", CATEGORY_DL, "深度神经网络（MLP）训练，输出 pred 与 pred_prob 列",
                 List.of(param("features", "特征列", "columns", true, "", "模型特征列"),
                         param("label", "标签列", "column", true, "", "标签列"),
                         param("task", "任务类型", "select", false, "classification", "classification 分类 / regression 回归", List.of(
@@ -363,6 +364,22 @@ public final class CanvasOperatorRegistry {
                 List.of(col("features", "特征列"), col("label", "标签列")),
                 predOutputSchema(false),
                 true, false));
+
+        // 轻量深度学习共用表格输入、训练参数和模型产物契约。
+        for (String kind : List.of("cnn", "rnn", "lstm")) {
+            ops.add(op("ml." + kind, kind.toUpperCase(Locale.ROOT), CATEGORY_DL,
+                    "轻量网络：单行内按特征选择顺序训练；支持二分类和数值回归，自动标准化，不代表时间序列预测",
+                    List.of(param("features", "特征列", "columns", true, "", "按固定顺序选择数值特征，不包含标签及已有预测列"),
+                            param("label", "标签列", "column", true, "", "二分类要求 0/1；回归要求连续数值"),
+                            param("task", "任务类型", "select", false, "classification", "选择二分类或数值回归", List.of(
+                                    opt("classification", "二分类"), opt("regression", "回归"))),
+                            param("epochs", "训练轮数", "integer", false, 50, "1 至 500，默认 50"),
+                            param("learning_rate", "学习率", "number", false, 0.001, "大于 0 且不超过 0.1")),
+                    trainDefaults("features", "label", Map.of("task", "classification", "epochs", 50,
+                            "learning_rate", 0.001)),
+                    List.of(col("features", "有序数值特征"), col("label", "标签列")),
+                    predOutputSchema(false), true, false));
+        }
 
         ops.add(op("ml.decision_tree", "决策树", CATEGORY_ML, "决策树分类/回归训练，输出 pred 与 pred_prob 列",
                 List.of(param("features", "特征列", "columns", true, "", "模型特征列"),

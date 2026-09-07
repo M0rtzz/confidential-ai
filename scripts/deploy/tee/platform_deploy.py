@@ -43,9 +43,15 @@ CACHE = ROOT / '.cache/tee-p3'
 RUNTIME = Path(os.environ.get(
     'DATA_SANDBOX_TEE_RUNTIME_ROOT', str(WORKSPACE / '.dev-runtime'))).resolve()
 LABEL = 'io.hustnlp.data-sandbox.'
-INSTANCES = {'client-a': 194, 'client-b': 195, 'center': 196}
+# 专用测试配置显式开启；默认部署行为保持不变。
+TEST_PROFILE = os.environ.get('DATA_SANDBOX_TEE_PROFILE', '')
+if TEST_PROFILE not in ('', 'deep-learning'):
+    raise RuntimeError('未知 TEE 测试配置')
+CONTAINER_PREFIX = 'data-sandbox-dev-dl-' if TEST_PROFILE else 'data-sandbox-dev-'
+INSTANCES = {'center': 216} if TEST_PROFILE else {'client-a': 194, 'client-b': 195, 'center': 196}
+CAPSULE_PORT = 21685 if TEST_PROFILE else 19685
 # 中心端平台间契约入口的对外地址；客户端实例按此申请密钥与登记规则。
-CONTRACT_PORT = 19686
+CONTRACT_PORT = 21686 if TEST_PROFILE else 19686
 CONTRACT_HOST = os.environ.get('DATA_SANDBOX_TEE_ADVERTISE_HOST', '222.20.99.38')
 CONTRACT_CENTER_URL = f'https://{CONTRACT_HOST}:{CONTRACT_PORT}'
 SOURCES = {
@@ -84,6 +90,9 @@ def utc():
 
 
 def guard():
+    if TEST_PROFILE and (WORKSPACE.name != 'gpu-deep-learning-20260907'
+            or ROOT.parent != WORKSPACE or FRONTEND.parent != WORKSPACE or TOOLKIT.parent != WORKSPACE):
+        raise RuntimeError('深度学习测试仅允许使用专属目录内的三个工作树')
     if ROOT.is_symlink() or not (ROOT / '.git').exists():
         raise RuntimeError('后端根目录必须是非符号链接 Git 工作树')
     if run('id', '-un', capture=True).strip() != 'collab' or os.geteuid() == 0:
@@ -270,7 +279,7 @@ def save_manifest(data):
 def domain_id(name):
     """新实例使用可读名称；迁移实例自动沿用既有 Kuscia 域。"""
     config = RUNTIME / name / 'kuscia/config/kuscia.yaml'
-    value = f'dev-{name}'
+    value = f'dev-dl-{name}' if TEST_PROFILE else f'dev-{name}'
     if config.exists():
         matches = re.findall(r'(?m)^domainID:\s*([^\s#]+)\s*(?:#.*)?$', config.read_text())
         if len(matches) != 1:
@@ -286,7 +295,7 @@ def refresh_runtime_credentials(name, domain):
     file = RUNTIME / name / 'secretpad.env'
     if not file.exists():
         return
-    prefix = f'data-sandbox-dev-{name}'
+    prefix = f'{CONTAINER_PREFIX}{name}'
     updates = {
         'NODE_ID': domain,
         'INST_NAME': f'DataSandbox-{name}',
@@ -325,9 +334,9 @@ def port_check(name):
     # 88 为控制台（HTTPS），87 为仅供部署脚本健康检查使用的容器内 HTTP 连接器。
     ports = {base + n for n in [80, 81, 82, 83, 84, 87, 88]}
     if name == 'center':
-        ports.add(19685)
+        ports.add(CAPSULE_PORT)
         ports.add(CONTRACT_PORT)
-    own = {f'data-sandbox-dev-{name}-{suffix}' for suffix in ['kuscia', 'secretpad']}
+    own = {f'{CONTAINER_PREFIX}{name}-{suffix}' for suffix in ['kuscia', 'secretpad']}
     ids = run('docker', 'ps', '-aq', capture=True).split()
     mapped = set()
     if ids:
@@ -421,6 +430,19 @@ def prepare():
             shutil.copytree(source, target / relative, dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     script = toolkit_file('develop.sh').read_text()
+    if TEST_PROFILE:
+        script = replace_once(script, 'DEV_PREFIX="data-sandbox-dev-${DEV_NAME}"',
+                              'DEV_PREFIX="' + CONTAINER_PREFIX + '${DEV_NAME}"')
+        # 专属中心只验收已登记的 TEE 画布运行器，无须初始化交互式沙箱和旧执行器。
+        script = script.replace('    ensure_jupyter_runtime\n', '')
+        for kind, variable, app in [('python-runner', 'PYTHON', 'python'), ('jar-runner', 'JAR', 'jar')]:
+            call = (f'    ensure_model_runner_runtime "{kind}" "${variable}_RUNNER_IMAGE" '
+                    f'"${variable}_RUNNER_DOCKER_DIR" \\\n'
+                    f'      "${{BACKEND_DIR}}/scripts/deploy/data-sandbox/register-data-sandbox-{app}-runner-appimages.sh" \\\n'
+                    f'      DATA_SANDBOX_{variable}_RUNNER_IMAGE data-sandbox-{app}-runner data-sandbox-{app}-runner-nonet\n')
+            if script.count(call) != 2:
+                raise RuntimeError('旧运行器启动段变化，停止生成测试入口')
+            script = script.replace(call, '')
     script = replace_once(script, 'WORKSPACE_DIR="$(cd "${PACKAGE_DIR}/.." && pwd)"', f'WORKSPACE_DIR="{ROOT}"')
     script = replace_once(script, 'BACKEND_DIR="$(realpath -m "${WORKSPACE_DIR}/confidential-ai")"', 'BACKEND_DIR="$WORKSPACE_DIR"')
     script = replace_once(script, 'FRONTEND_DIR="$(realpath -m "${WORKSPACE_DIR}/confidential-ai-frontend")"', f'FRONTEND_DIR="{FRONTEND}"')
@@ -433,7 +455,7 @@ def prepare():
     script = replace_once(script, 'DOMAIN_ID="dev-${DEV_NAME}"',
                           'DOMAIN_ID="${DATA_SANDBOX_DOMAIN_ID:-dev-${DEV_NAME}}"')
     # 校验在真实输入仓库执行，不能要求只读前端切换到 A 分支。
-    script = replace_once(script, '  local branch\n', '  local branch\n  local expected="$EXPECTED_BRANCH"\n  [ "$repository" != "$FRONTEND_DIR" ] || expected=master\n')
+    script = replace_once(script, '  local branch\n', '  local branch\n  local expected="$EXPECTED_BRANCH"\n  [ "$repository" != "$FRONTEND_DIR" ] || expected="${DATA_SANDBOX_FRONTEND_BRANCH:-master}"\n')
     script = replace_once(script, '[ "$branch" = "$EXPECTED_BRANCH" ]', '[ "$branch" = "$expected" ]')
     # 所有隐式重建和替换由 P3 的显式动作代替。
     start = script.index('build_developer_image() {')
@@ -544,13 +566,13 @@ def build_platform():
     atomic(stage_toolkit / 'build.sh', build, 0o700)
     atomic(stage_toolkit / 'artifacts/p3-build-manifest.json', {key: value for key, value in data.items() if key != 'images'})
     dockerfile.write_text(dockerfile.read_text() + '\nCOPY artifacts/p3-build-manifest.json /app/p3-build-manifest.json\n')
-    image = 'tee-a-secretpad:p3-' + stamp
+    image = ('tee-dl-secretpad:p3-' if TEST_PROFILE else 'tee-a-secretpad:p3-') + stamp
     env = dict(os.environ, CI='true', HUSKY='0', DATA_SANDBOX_DEV_IMAGE='true', DATA_SANDBOX_DEV_IMAGE_OWNER='collab',
                DATA_SANDBOX_DEV_IMAGE_WORKSPACE=str(ROOT), SECRETPAD_IMAGE=image)
     # Maven 缓存仅复制，不通过共享写挂载复用。
     cache = stage / '.cache/m2'
     cache.parent.mkdir(parents=True)
-    run('cp', '-a', '--reflink=auto', ORIGINAL / '.cache/m2', cache)
+    run('cp', '-a', '--reflink=auto', Path(os.environ.get('DATA_SANDBOX_MAVEN_CACHE', str(ORIGINAL / '.cache/m2'))), cache)
     run('pnpm', 'install', '--frozen-lockfile', '--store-dir', CACHE / 'pnpm-store', cwd=stage / 'frontend', env=env)
     run('bash', stage_toolkit / 'build.sh', env=env)
     if platform_digest() != data['backend_runtime_content'] or source_digest(FRONTEND) != data['frontend_content'] or toolkit_digest() != data['toolkit_content']:
@@ -560,7 +582,7 @@ def build_platform():
         'frontend_content': data['frontend_content'], 'toolkit_content': data['toolkit_content']}
     # 复用原算子镜像内容，只增加 A 专属不可变标签，不覆盖共享 latest。
     sampler = image_info('data-sandbox-sampler:latest')
-    alias = 'tee-a-sampler:' + sampler['Id'].split(':')[1][:16]
+    alias = ('tee-dl-sampler:' if TEST_PROFILE else 'tee-a-sampler:') + sampler['Id'].split(':')[1][:16]
     run('docker', 'tag', sampler['Id'], alias)
     data['images']['sampler'] = {'ref': alias, 'id': sampler['Id']}
     data['built_at'] = utc()
@@ -576,7 +598,7 @@ def checked_image(key):
 
 
 def kube(name, *args, value=None):
-    ctr = f'data-sandbox-dev-{name}-kuscia'
+    ctr = f'{CONTAINER_PREFIX}{name}-kuscia'
     managed(ctr) or (_ for _ in ()).throw(RuntimeError('Kuscia 尚未启动'))
     return run('docker', 'exec', *(['-i'] if value is not None else []), ctr, 'kubectl', *args,
                capture=True, input=json.dumps(value) if value is not None else None)
@@ -587,7 +609,7 @@ def register_sampler(name):
     for app in ['data-sandbox-sampler', 'data-sandbox-sampler-nonet']:
         template = (ROOT / f'scripts/templates/{app}.yaml').read_text()
         template = template.replace('{{.IMAGE_NAME}}', image.rsplit(':', 1)[0]).replace('{{.IMAGE_TAG}}', image.rsplit(':', 1)[1])
-        ctr = f'data-sandbox-dev-{name}-kuscia'
+        ctr = f'{CONTAINER_PREFIX}{name}-kuscia'
         managed(ctr)
         run('docker', 'exec', '-i', ctr, 'kubectl', 'apply', '-f', '-', input=template)
 
@@ -605,7 +627,7 @@ def normalize_sandbox_images(name):
 
     幂等，可在拉入新沙箱镜像后重跑。
     """
-    ctr = f'data-sandbox-dev-{name}-kuscia'
+    ctr = f'{CONTAINER_PREFIX}{name}-kuscia'
     if not managed(ctr):
         raise RuntimeError('Kuscia 尚未启动')
     # 只改真正缺位的条目：镜像层动辄百万级文件，无条件 chmod -R 每次要跑十几分钟，
@@ -631,6 +653,8 @@ DEMO_DATABASES = {
 
 def ensure_demo_databases():
     """启动未运行的演示数据库容器；缺失或启动失败只告警，不阻断实例启动。"""
+    if TEST_PROFILE:
+        return
     for ctr, port in DEMO_DATABASES.items():
         query = subprocess.run(['docker', 'inspect', '-f', '{{.State.Running}}', ctr],
                                text=True, capture_output=True)
@@ -646,6 +670,28 @@ def ensure_demo_databases():
             print(f'已启动演示数据库容器 {ctr}（宿主机端口 {port}）')
 
 
+def bootstrap_test():
+    """只引导专属测试中心的 Kuscia，供底座和运行器登记；不启动主平台。"""
+    if not TEST_PROFILE:
+        raise RuntimeError('引导命令仅允许在专属测试配置下执行')
+    port_check('center')
+    prepare()
+    # 先由当前用户创建挂载源，避免 Docker 将空目录创建为 root 所有。
+    (RUNTIME / 'center/tee').mkdir(parents=True, exist_ok=True, mode=0o700)
+    env = dict(os.environ, DATA_SANDBOX_DEV_ROOT=str(RUNTIME / 'center'),
+               DATA_SANDBOX_DOMAIN_ID=domain_id('center'),
+               DATA_SANDBOX_DEV_KUSCIA_IMAGE=checked_image('kuscia'),
+               DATA_SANDBOX_DEV_MINIO_IMAGE=checked_image('minio'),
+               TEE_PLATFORM_IMAGE=checked_image('platform-base'),
+               TEE_GATEWAY_PORT_ARGS=f'-p {CAPSULE_PORT}:31888')
+    command = ('source "$1" status --name center --branch "$2" --port 21688 '
+               '--gateway-port 21680 --internal-port 21681 --api-http-port 21682 '
+               '--api-grpc-port 21683 --metrics-port 21684 --advertise-host "$3"; '
+               'check_host_inotify_limits; ensure_runtime_directories; ensure_network; start_kuscia')
+    run('bash', '-c', command, 'bootstrap-test', CACHE / 'toolkit/develop.sh',
+        git(ROOT, 'branch', '--show-current'), CONTRACT_HOST, env=env)
+
+
 def up(name):
     data = manifest()
     if not platform_image_matches(data):
@@ -657,7 +703,7 @@ def up(name):
     port_check(name)
     detect(name)
     ensure_demo_databases()
-    ctr = f'data-sandbox-dev-{name}-secretpad'
+    ctr = f'{CONTAINER_PREFIX}{name}-secretpad'
     current = managed(ctr)
     if current:
         if current['Image'] == data['images']['platform']['id'] and current['State']['Running']:
@@ -682,9 +728,9 @@ def up(name):
     env = dict(os.environ, DATA_SANDBOX_DEV_ROOT=str(RUNTIME / name), DATA_SANDBOX_DOMAIN_ID=domain,
                TEE_PLATFORM_IMAGE=platform, DATA_SANDBOX_DEV_SAMPLER_IMAGE=sampler, DATA_SANDBOX_DEV_KUSCIA_IMAGE=checked_image('kuscia'),
                DATA_SANDBOX_DEV_MINIO_IMAGE=checked_image('minio'),
-               TEE_GATEWAY_PORT_ARGS='-p 19685:31888' if name == 'center' else '',
+               TEE_GATEWAY_PORT_ARGS=f'-p {CAPSULE_PORT}:31888' if name == 'center' else '',
                # 只有中心端直连密钥适配服务；客户端通过中心端的契约接口访问。
-               TEE_KEY_ADAPTER_URL='https://data-sandbox-dev-center-key-adapter:8090' if name == 'center' else '',
+               TEE_KEY_ADAPTER_URL=f'https://{CONTAINER_PREFIX}center-key-adapter:8090' if name == 'center' else '',
                # 中心端发布平台间契约入口；客户端实例只持有调用地址，不开放任何入口。
                TEE_CONTRACT_PORT='8443' if name == 'center' else '0',
                TEE_CONTRACT_PORT_ARGS=f'-p {CONTRACT_PORT}:8443' if name == 'center' else '',
@@ -718,7 +764,7 @@ def up(name):
 
 def down(name):
     """仅停止本次所属容器；保留容器、网络、数据库及身份，恢复需单独授权。"""
-    containers = [f'data-sandbox-dev-{name}-{suffix}' for suffix in ['tee-probe', 'secretpad', 'minio', 'kuscia']]
+    containers = [f'{CONTAINER_PREFIX}{name}-{suffix}' for suffix in ['tee-probe', 'secretpad', 'minio', 'kuscia']]
     current = [(ctr, managed(ctr)) for ctr in containers]
     for ctr, info in current:
         if info and info['State']['Running']:
@@ -768,7 +814,7 @@ def status():
     for name in INSTANCES:
         state = {}
         for suffix in ['secretpad', 'kuscia', 'minio', 'tee-probe']:
-            item = managed(f'data-sandbox-dev-{name}-{suffix}')
+            item = managed(f'{CONTAINER_PREFIX}{name}-{suffix}')
             state[suffix] = item['State']['Status'] if item else 'NOT_CREATED'
         print(name, json.dumps(state))
 
@@ -779,7 +825,7 @@ def main():
     parser.add_argument('command', choices=['prepare', 'status', 'build-platform', 'up', 'down', 'fetch-sources',
         'register-sampler', 'certificates', 'render', 'base-up', 'probe-up', 'register', 'smoke', 'pair',
         'register-p5-runtime',
-        'verify-tls', 'verify-native', 'verify-persistence', 'verify-environment', 'verify-isolation', 'verify-repeat', 'verify-release', 'lock-image', 'build-components',
+        'bootstrap-test', 'verify-tls', 'verify-native', 'verify-persistence', 'verify-environment', 'verify-isolation', 'verify-repeat', 'verify-release', 'lock-image', 'build-components',
         'refresh-detection', 'detect-schedule', 'adapter-up', 'publish-identities', 'verify-p4',
         'sync-toolkit', 'normalize-sandbox-images'])
     parser.add_argument('--tee', action='store_true', required=True)
@@ -806,6 +852,7 @@ def main():
         if args.command == 'prepare': prepare()
         elif args.command == 'status': status()
         elif args.command == 'build-platform': build_platform()
+        elif args.command == 'bootstrap-test': bootstrap_test()
         elif args.command == 'up': up(args.name)
         elif args.command == 'down': down(args.name)
         elif args.command == 'normalize-sandbox-images': normalize_sandbox_images(args.name)
