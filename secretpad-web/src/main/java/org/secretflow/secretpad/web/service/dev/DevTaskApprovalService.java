@@ -139,6 +139,9 @@ public class DevTaskApprovalService {
         if (code.isBlank()) throw new IllegalArgumentException("执行快照没有可审核代码");
         if (code.length() > MAX_CODE_CHARS) throw new IllegalArgumentException("代码超过 AI 扫描长度上限");
         boolean credentialRedacted = CREDENTIAL.matcher(code).find();
+        if (credentialRedacted) {
+            throw new IllegalArgumentException("代码疑似包含硬编码凭据；请移除并改用密钥注入后重新提交");
+        }
         String safeCode = CREDENTIAL.matcher(code).replaceAll("$1=$2[REDACTED]$2");
         String metadata = json(Map.of(
                 "taskId", taskId,
