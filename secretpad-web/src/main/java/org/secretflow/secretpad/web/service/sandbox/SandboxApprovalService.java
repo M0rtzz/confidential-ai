@@ -144,8 +144,7 @@ public class SandboxApprovalService {
                 + "from ds_sandbox_approval a "
                 + "left join project p on p.project_id=a.project_id and p.is_deleted=0 "
                 + "left join ds_sandbox_approval_vote v on v.approval_id=a.id "
-                + "where a.deleted=0 and a.approval_type in " + EXECUTABLE_TYPES_SQL
-                + " and (a.submitter=? or a.applicant_node_id=? or v.voter_node_id=?");
+                + "where a.deleted=0 and (a.submitter=? or a.applicant_node_id=? or v.voter_node_id=?");
         List<Object> args = new ArrayList<>(List.of(current, currentNode, currentNode));
         if (admin) {
             sql.append(" or 1=1");
