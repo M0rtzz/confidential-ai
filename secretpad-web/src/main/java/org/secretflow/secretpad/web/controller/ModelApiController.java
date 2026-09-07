@@ -134,6 +134,13 @@ public class ModelApiController {
         return SecretPadResponse.success(approvalService.listPending(keyword));
     }
 
+    @Operation(summary = "当前供数节点已审核的模型 API 申请单")
+    @GetMapping("/approvals/reviewed")
+    public SecretPadResponse<List<Map<String, Object>>> approvalsReviewed(
+            @RequestParam(defaultValue = "") String keyword) {
+        return SecretPadResponse.success(approvalService.listReviewed(keyword));
+    }
+
     @Operation(summary = "模型 API 审批申请单详情（模型/数据/拓扑/凭证，审批方可在线调试）")
     @GetMapping("/approvals/detail")
     public SecretPadResponse<Map<String, Object>> approvalDetail(@RequestParam String id) {

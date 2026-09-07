@@ -223,6 +223,27 @@ public class ModelApiApprovalService {
         return listWithPayload(jdbc.queryForList(sql.toString(), args.toArray()));
     }
 
+    /** 当前供数节点已投票的申请单，保留审核记录，不受其他节点是否完成审核影响。 */
+    public List<Map<String, Object>> listReviewed(String keyword) {
+        sandboxApprovalService.applySyncedApprovals();
+        StringBuilder sql = new StringBuilder(
+                "select a.*,v.status my_vote_status,v.voted_at my_voted_at from ds_sandbox_approval a "
+                        + "join ds_sandbox_approval_vote v on v.approval_id=a.id "
+                        + "where a.deleted=0 and a.approval_type=? and v.voter_node_id=? "
+                        + "and v.status in ('APPROVED','REJECTED')");
+        List<Object> args = new ArrayList<>(List.of(APPROVAL_TYPE, effectiveOwner()));
+        if (notBlank(keyword)) {
+            sql.append(" and (lower(a.id) like ? or lower(a.payload_json) like ?)");
+            String q = "%" + keyword.toLowerCase(Locale.ROOT) + "%";
+            args.add(q);
+            args.add(q);
+        }
+        sql.append(" order by v.voted_at desc,a.created_at desc limit 500");
+        List<Map<String, Object>> rows = listWithPayload(jdbc.queryForList(sql.toString(), args.toArray()));
+        rows.forEach(row -> row.remove("payload_json"));
+        return rows;
+    }
+
     /** 列表富化：解析 payload（剥离 secret） + 状态标签友好字段。 */
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> listWithPayload(List<Map<String, Object>> rows) {
