@@ -2488,7 +2488,7 @@ public class SandboxCanvasService {
                         && registerTeeModel(canvas, node, sandboxId, runId,
                                 modelObjectId(result.getOrDefault("encryptedOutputs", List.of())));
                 // 数据类产物登记成派生密文资产并补一张同名空表，下游节点因此可以单独重跑
-                registerIntermediate(node, graph, runId, sandboxId, inputTable,
+                registerIntermediate(node, graph, runId, sandboxId, inputTable, taskId,
                         dataObjectId(result.getOrDefault("encryptedOutputs", List.of())));
                 audit("CANVAS_NODE_TEE_SUCCEEDED", "COMPUTE_NODE_RUN", nodeRunId,
                         "node=" + node.id + " op=" + node.componentCode + " encrypted=true"
@@ -2591,7 +2591,7 @@ public class SandboxCanvasService {
      * 登记失败不影响本次运行，只是下游会因为找不到输入而无法单独执行。</p>
      */
     private void registerIntermediate(Node node, GraphModel graph, String runId, String sandboxId,
-            String inputTable, String objectId) {
+            String inputTable, String taskId, String objectId) {
         if (!notBlank(objectId)) {
             return;
         }
@@ -2599,13 +2599,42 @@ public class SandboxCanvasService {
                 "select asset_id from ds_sandbox_data_dir where sandbox_id=? and table_name=? and deleted=0 limit 1",
                 rs -> rs.next() ? rs.getString(1) : "", sandboxId, inputTable);
         List<String> columns = CanvasOperatorRegistry.outputColumns(node.componentCode, node.params,
-                tableColumns(sandboxId, inputTable));
+                executedInputColumns(taskId));
         String derivedAssetId = intermediateAssets.register(sandboxId, sourceAssetId, objectId, columns);
         if (!notBlank(derivedAssetId)) {
             return;
         }
         sandboxDb.registerCiphertextOperatorTable(sandboxId, runId, node.id,
                 operatorOutputName(node, graph), columns, derivedAssetId);
+    }
+
+    /** 从已验签的成功任务恢复实际输入列，避免用挂载表的完整字段扩大中间结果范围。 */
+    private List<String> executedInputColumns(String taskId) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "select task_jws from tee_runtime_task where task_id=? and status='SUCCEEDED' "
+                        + "and receipt_verified=1 and is_deleted=0", taskId);
+        if (rows.size() != 1) {
+            throw new IllegalStateException("中间结果缺少已验签的成功任务: " + taskId);
+        }
+        try {
+            String[] parts = string(rows.get(0).get("task_jws")).split("\\.");
+            if (parts.length != 3) throw new IllegalArgumentException("任务签名格式无效");
+            com.fasterxml.jackson.databind.JsonNode root = mapper.readTree(Base64.getUrlDecoder().decode(parts[1]));
+            com.fasterxml.jackson.databind.JsonNode values = root.path("columns");
+            List<String> columns = new ArrayList<>();
+            if (values.isArray()) {
+                for (com.fasterxml.jackson.databind.JsonNode column : values) {
+                    if (!column.isTextual() || column.asText().isBlank() || "*".equals(column.asText())) {
+                        throw new IllegalArgumentException("任务列范围无效");
+                    }
+                    columns.add(column.asText());
+                }
+            }
+            if (columns.isEmpty()) throw new IllegalArgumentException("任务列范围为空");
+            return List.copyOf(new LinkedHashSet<>(columns));
+        } catch (Exception failure) {
+            throw new IllegalStateException("无法恢复可信任务的实际输入列: " + taskId, failure);
+        }
     }
 
     private List<String> columnsOf(String json) {

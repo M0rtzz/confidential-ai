@@ -172,6 +172,9 @@ public class TeeDevTaskDispatcher {
         }
         List<String> columns = selectedColumns(inputB64, asset.getSchemaJson(), policyService.columns(policy));
         policyService.requireAllows(policy, columns, operatorId);
+        if (builtin) {
+            requireAuthorizedParameters(programParameters, columns);
+        }
         List<String> reportKinds = REPORT_KINDS.containsKey(operatorId)
                 ? List.of(REPORT_KINDS.get(operatorId)) : List.of();
         if (!policyService.reportKinds(policy).containsAll(reportKinds)) {
@@ -461,6 +464,27 @@ public class TeeDevTaskDispatcher {
             throw policyDenied("任务列范围超出密文资产登记结构");
         }
         return List.copyOf(new LinkedHashSet<>(selected));
+    }
+
+    /** 算子显式指定的输入列必须全部获准，禁止运行器静默忽略缺失特征。 */
+    static void requireAuthorizedParameters(Map<String, Object> parameters, List<String> columns) {
+        Set<String> requested = new LinkedHashSet<>();
+        for (String key : List.of("columns", "features", "label", "target")) {
+            Object value = parameters.get(key);
+            if (value instanceof Iterable<?> values) {
+                for (Object item : values) {
+                    if (item != null && !item.toString().isBlank()) requested.add(item.toString().trim());
+                }
+            } else if (value instanceof String text && !text.isBlank()) {
+                for (String item : text.split(",")) {
+                    if (!item.isBlank()) requested.add(item.trim());
+                }
+            }
+        }
+        requested.removeAll(columns);
+        if (!requested.isEmpty()) {
+            throw policyDenied("算子请求的字段未获授权或不在输入表中: " + String.join("、", requested));
+        }
     }
 
     private void requireCenterConfiguration() {

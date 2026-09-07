@@ -829,7 +829,25 @@ public class SandboxApprovalService {
     private List<String> approvedColumns(String projectId, Object selected) {
         List<String> columns = new ArrayList<>();
         for (String assetId : stringList(selected)) {
-            for (String column : stringList(projectAsset(projectId, assetId).get("schema_columns"))) {
+            Map<String, Object> asset = projectAsset(projectId, assetId);
+            List<Map<String, Object>> datasets = jdbc.queryForList(
+                    "select table_columns_json from ds_node_dataset where asset_id=? and deleted=0 "
+                            + "order by updated_at desc limit 1", assetId);
+            List<String> assetColumns;
+            if (!datasets.isEmpty()) {
+                try {
+                    assetColumns = objectMapper.readerForListOf(String.class)
+                            .readValue(string(datasets.get(0).get("table_columns_json")));
+                } catch (Exception failure) {
+                    throw new IllegalArgumentException("数据表结构无效，请重新确认数据: " + assetId, failure);
+                }
+            } else {
+                assetColumns = stringList(asset.get("schema_columns"));
+            }
+            if (assetColumns.isEmpty() || assetColumns.stream().anyMatch(column -> column == null || column.isBlank() || "*".equals(column))) {
+                throw new IllegalArgumentException("数据缺少有效表结构，无法生成字段授权: " + assetId);
+            }
+            for (String column : assetColumns) {
                 if (!columns.contains(column)) {
                     columns.add(column);
                 }
