@@ -173,6 +173,7 @@ public class SandboxApprovalService {
     public Map<String, Object> approval(String id) {
         applySyncedApprovals();
         Map<String, Object> data = requireApproval(id);
+        assertHandledType(data);
         assertApprovalVisible(data);
         data.put("history", approvalHistory(id));
         data.put("votes", jdbc.queryForList("select * from ds_sandbox_approval_vote where approval_id=? order by voter_node_id", id));
@@ -375,6 +376,7 @@ public class SandboxApprovalService {
         }
         String comment = value(request, "comment", "");
         Map<String, Object> approval = requireApproval(id);
+        assertHandledType(approval);
         String from = string(approval.get("status"));
         assertApprovalVisible(approval);
         switch (action) {
@@ -1343,6 +1345,13 @@ public class SandboxApprovalService {
                     id));
         } catch (EmptyResultDataAccessException e) {
             throw new IllegalArgumentException("申请单不存在: " + id);
+        }
+    }
+
+    private void assertHandledType(Map<String, Object> approval) {
+        String type = string(approval.get("approval_type"));
+        if (!APPROVAL_TYPES.contains(type)) {
+            throw new IllegalArgumentException("申请类型 " + type + " 必须使用对应的独立审批接口");
         }
     }
 

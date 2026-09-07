@@ -27,6 +27,7 @@ import java.util.UUID;
 /** Persistent control plane for approval-gated CipherGPU training. */
 @Service
 public class ConfidentialTrainingService {
+    private static final int TERMINAL_LOG_LIMIT = 64 * 1024;
     private static final Set<String> TERMINAL = Set.of("COMPLETED", "FAILED", "REJECTED", "CANCELLED");
     private static final Set<String> ADAPTERS = Set.of(
             "hf-sequence-classification-v1", "hf-causal-lm-sft-lora-v1");
@@ -263,6 +264,8 @@ public class ConfidentialTrainingService {
                 "RESULT_MODEL", outputs.path("result-model").path("manifest"));
         Map<String, Object> resultData = persistOutput(ownerId, row, taskId, "result-data",
                 "RESULT_DATA", outputs.path("result-data").path("manifest"));
+        // ACK 会允许运行时清理任务；日志快照必须先持久化，失败时保留运行时现场供重试。
+        saveTerminalLog(taskId, true);
         cipherGpu.acknowledgeTrainingOutputs(taskId);
         String now = Instant.now().toString();
         jdbc.update("update ds_confidential_training_task set status='COMPLETED',progress=100,current_epoch=epochs,"
@@ -275,17 +278,34 @@ public class ConfidentialTrainingService {
 
     public Map<String, Object> logs(String ownerId, String taskId) {
         Map<String, Object> row = taskRow(ownerId, taskId);
-        if (text(row.get("ciphergpu_job_id")).isBlank()) return Map.of("taskId", taskId, "logs", "");
+        if ("SAVED".equals(text(row.get("terminal_log_status")))) return storedLog(row);
+        if (TERMINAL.contains(text(row.get("status"))) && !text(row.get("ciphergpu_job_id")).isBlank()) {
+            // 历史终态任务首次读取时尝试补存；运行时已丢失则返回明确原因。
+            saveTerminalLog(taskId, false);
+            row = taskRow(ownerId, taskId);
+            if ("SAVED".equals(text(row.get("terminal_log_status")))) return storedLog(row);
+        }
+        if (text(row.get("ciphergpu_job_id")).isBlank()) return Map.of(
+                "taskId", taskId, "logs", "", "snapshot", false,
+                "unavailableReason", "任务尚未启动，暂无运行日志");
+        if (TERMINAL.contains(text(row.get("status")))) return Map.of(
+                "taskId", taskId, "logs", "", "snapshot", false,
+                "unavailableReason", text(row.get("terminal_log_error")).isBlank()
+                        ? "历史终态日志未保存且运行时已不可用" : text(row.get("terminal_log_error")));
         JsonNode value = cipherGpu.trainingLogs(taskId);
         return Map.of("taskId", taskId, "status", value.path("status").asText(),
-                "logs", value.path("logs").asText());
+                "logs", value.path("logs").asText(), "snapshot", false,
+                "truncated", value.path("truncated").asBoolean(false));
     }
 
     @Transactional
     public Map<String, Object> cancel(String ownerId, String taskId) {
         Map<String, Object> row = taskRow(ownerId, taskId);
         if (TERMINAL.contains(text(row.get("status")))) return view(row);
-        if (!text(row.get("ciphergpu_job_id")).isBlank()) cipherGpu.cancelTrainingJob(taskId);
+        if (!text(row.get("ciphergpu_job_id")).isBlank()) {
+            saveTerminalLog(taskId, false);
+            cipherGpu.cancelTrainingJob(taskId);
+        }
         String now = Instant.now().toString();
         jdbc.update("update ds_confidential_training_task set status='CANCELLED',cancelled_at=?,completed_at=?,"
                         + "updated_at=?,cleanup_status='COMPLETED' where task_id=?", now, now, now, taskId);
@@ -309,6 +329,7 @@ public class ConfidentialTrainingService {
     private Map<String, Object> markFailed(String ownerId, String taskId, String reason) {
         Map<String, Object> row = taskRow(ownerId, taskId);
         if (TERMINAL.contains(text(row.get("status")))) return view(row);
+        if (!text(row.get("ciphergpu_job_id")).isBlank()) saveTerminalLog(taskId, false);
         String now = Instant.now().toString();
         jdbc.update("update ds_confidential_training_task set status='FAILED',failure_reason=?,completed_at=?,"
                         + "updated_at=?,cleanup_status='COMPLETED' where task_id=?",
@@ -423,6 +444,7 @@ public class ConfidentialTrainingService {
                 case "CANCELLED" -> "CANCELLED";
                 default -> "RUNNING";
             };
+            if (Set.of("FAILED", "CANCELLED").contains(mapped)) saveTerminalLog(text(row.get("task_id")), false);
             jdbc.update("update ds_confidential_training_task set status=?,progress=?,current_epoch=?,metrics_json=?,"
                             + "failure_reason=?,updated_at=?,cleanup_status=? where task_id=?", mapped,
                     actual.path("progress").asInt(), actual.path("currentEpoch").asDouble(),
@@ -436,6 +458,40 @@ public class ConfidentialTrainingService {
                     Instant.now().toString(), row.get("task_id"));
             return taskRow(ownerId, text(row.get("task_id")));
         }
+    }
+
+    private void saveTerminalLog(String taskId, boolean requiredForCleanup) {
+        try {
+            JsonNode value = cipherGpu.trainingLogs(taskId);
+            String logs = value.path("logs").asText("");
+            boolean truncated = value.path("truncated").asBoolean(false) || logs.length() > TERMINAL_LOG_LIMIT;
+            if (logs.length() > TERMINAL_LOG_LIMIT) logs = logs.substring(logs.length() - TERMINAL_LOG_LIMIT);
+            String now = Instant.now().toString();
+            jdbc.update("update ds_confidential_training_task set terminal_log_snapshot=?,terminal_log_saved_at=?,"
+                            + "terminal_log_truncated=?,terminal_log_status='SAVED',terminal_log_error='',updated_at=? "
+                            + "where task_id=? and terminal_log_status<>'SAVED'",
+                    logs, now, truncated ? 1 : 0, now, taskId);
+        } catch (RuntimeException failure) {
+            String reason = failure.getMessage() == null ? "运行时日志不可用" : failure.getMessage();
+            if (reason.length() > 500) reason = reason.substring(0, 500);
+            jdbc.update("update ds_confidential_training_task set terminal_log_status='FAILED',terminal_log_error=?,"
+                    + "updated_at=? where task_id=? and terminal_log_status<>'SAVED'", reason, Instant.now().toString(), taskId);
+            if (requiredForCleanup) {
+                throw TeeException.of(TeeContract.Error.KEY_SERVICE_UNAVAILABLE,
+                        "训练末尾日志保存失败，已保留运行时现场，请重试收集结果");
+            }
+        }
+    }
+
+    private Map<String, Object> storedLog(Map<String, Object> row) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("taskId", row.get("task_id"));
+        result.put("status", row.get("status"));
+        result.put("logs", text(row.get("terminal_log_snapshot")));
+        result.put("snapshot", true);
+        result.put("savedAt", row.get("terminal_log_saved_at"));
+        result.put("truncated", number(row.get("terminal_log_truncated")) == 1);
+        return result;
     }
 
     private Map<String, Object> refresh(String ownerId, Map<String, Object> row) {
@@ -460,6 +516,7 @@ public class ConfidentialTrainingService {
     private Map<String, Object> view(Map<String, Object> row) {
         Map<String, Object> value = new LinkedHashMap<>();
         row.forEach((key, item) -> value.put(camel(key), item));
+        value.remove("terminalLogSnapshot");
         value.put("metrics", parse(text(row.get("metrics_json"))));
         value.put("trainingConfig", parse(text(row.get("training_config_json"))));
         value.remove("metricsJson"); value.remove("trainingConfigJson");
