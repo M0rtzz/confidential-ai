@@ -618,6 +618,34 @@ def normalize_sandbox_images(name):
     print(f'{name} 沙箱镜像层权限已规范化')
 
 
+# 数据管理的数据库导入依赖这组宿主机演示库；容器未设重启策略，
+# Docker 守护进程重启后需要在实例启动时补齐。
+DEMO_DATABASES = {
+    'ds-test-mysql55': 13306,
+    'ds-test-mysql80': 13307,
+    'ds-test-greatsql': 13308,
+    'ds-test-postgres': 15432,
+    'ds-test-opengauss': 15433,
+}
+
+
+def ensure_demo_databases():
+    """启动未运行的演示数据库容器；缺失或启动失败只告警，不阻断实例启动。"""
+    for ctr, port in DEMO_DATABASES.items():
+        query = subprocess.run(['docker', 'inspect', '-f', '{{.State.Running}}', ctr],
+                               text=True, capture_output=True)
+        if query.returncode:
+            print(f'警告：演示数据库容器 {ctr} 不存在，数据库导入的 {port} 端口不可用')
+            continue
+        if query.stdout.strip() == 'true':
+            continue
+        start = subprocess.run(['docker', 'start', ctr], text=True, capture_output=True)
+        if start.returncode:
+            print(f'警告：演示数据库容器 {ctr} 启动失败：{start.stderr.strip()}')
+        else:
+            print(f'已启动演示数据库容器 {ctr}（宿主机端口 {port}）')
+
+
 def up(name):
     data = manifest()
     if not platform_image_matches(data):
@@ -628,6 +656,7 @@ def up(name):
     sampler = checked_image('sampler')
     port_check(name)
     detect(name)
+    ensure_demo_databases()
     ctr = f'data-sandbox-dev-{name}-secretpad'
     current = managed(ctr)
     if current:
