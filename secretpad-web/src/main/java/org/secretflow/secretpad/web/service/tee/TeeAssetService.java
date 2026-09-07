@@ -251,11 +251,19 @@ public class TeeAssetService {
     /** 请求方接收密文：校验摘要与 AAD 绑定后登记为密文对象，不物化任何明文行。 */
     @Transactional
     public String ingestSynced(String ownerId, TeeCrypto.EncryptedObject object) {
+        return ingestSynced(ownerId, object, ownerId);
+    }
+
+    @Transactional
+    public String ingestSynced(String ownerId, TeeCrypto.EncryptedObject object, String contributorId) {
         TeeCrypto.EncryptedObject verified = requireObject(object);
         verifyIntegrity(verified);
-        String objectId = objects.findAll().stream()
-                .filter(item -> verified.ciphertextSha256().equals(item.getCiphertextSha256()))
-                .findFirst().map(item -> item.getUpk().getObjectId()).orElseGet(TeeAssetService::newObjectId);
+        Optional<TeeObjectDO> existing = objects.findAll().stream()
+                .filter(item -> ownerId.equals(item.getOwnerId())
+                        && verified.ciphertextSha256().equals(item.getCiphertextSha256()))
+                .findFirst();
+        if (existing.isPresent()) return existing.get().getUpk().getObjectId();
+        String objectId = newObjectId();
         store.write(objectId, verified);
         objects.save(TeeObjectDO.builder()
                 .upk(new TeeObjectDO.UPK(objectId)).kind("ASSET").ownerId(ownerId)
@@ -263,7 +271,7 @@ public class TeeAssetService {
                 .keyId(verified.keyId()).keyVersion(verified.keyVersion())
                 .ciphertextSha256(verified.ciphertextSha256())
                 .sizeBytes((long) TeeCrypto.decode(verified.ciphertextB64()).length)
-                .contributorsJson(write(List.of(ownerId)))
+                .contributorsJson(write(List.of(contributorId)))
                 .exportState(TeeContract.EXPORT_PENDING).build());
         return objectId;
     }

@@ -82,6 +82,9 @@ public class AssetSyncService {
     }
 
     /** 一次下载（provider 侧返回；bytes 为 CSV 原文，sha256 供请求方端到端校验）。 */
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.secretflow.secretpad.web.service.tee.TeeDataEvents dataEvents;
+
     public record AssetDownload(byte[] bytes, String sha256) {
     }
 
@@ -95,9 +98,6 @@ public class AssetSyncService {
         Map<String, Object> asset = localAsset(assetId);
         if (asset == null) {
             throw new NoSuchElementException("数据不存在: " + assetId);
-        }
-        if (!"PROCESSED".equals(string(asset.get("data_stage")))) {
-            throw new SecurityException("仅抽样脱敏后的数据可以跨节点同步");
         }
         if (!"TABULAR".equals(string(asset.get("modality")))) {
             throw new SecurityException("仅表格数据可以跨节点同步");
@@ -113,6 +113,9 @@ public class AssetSyncService {
         byte[] sealed = storedCiphertext(asset);
         if (sealed != null) {
             return new AssetDownload(sealed, sha256(sealed));
+        }
+        if (!"PROCESSED".equals(string(asset.get("data_stage")))) {
+            throw new SecurityException("未加密原始数据不得跨节点同步");
         }
         nodeDatasetStore.ensureMaterialized(assetId);
         byte[] bytes = nodeDatasetStore.exportTableCsv(assetId);
@@ -184,7 +187,7 @@ public class AssetSyncService {
             }
             return Map.of("syncMode", "LOCAL");
         }
-        if ("PROCESSED".equals(stage)) {
+        if ("PROCESSED".equals(stage) || Boolean.TRUE.equals(parseMap(meta.get("metadata_json")).get("encrypted"))) {
             Map<String, Object> result = pullOnAuthorization(projectId, assetId);
             if (result == null) {
                 return Map.of("syncMode", "SCHEMA");
@@ -197,17 +200,33 @@ public class AssetSyncService {
         return recordSchemaOnly(projectId, assetId);
     }
 
+    /** 补录历史挂载的密文接收，成功后不重复下载。 */
+    @org.springframework.scheduling.annotation.Scheduled(initialDelay = 20000, fixedDelay = 60000)
+    public void reconcileCiphertextReceipts() {
+        for (Map<String, Object> row : jdbc.queryForList(
+                "select project_id,asset_id from ds_project_asset pa where deleted=0 and coalesce(is_deleted,0)=0 "
+                        + "and provider_node_id<>? and asset_json like '%ciphertextSha256%' "
+                        + "and not exists(select 1 from ds_unified_log l where l.log_type='TEE_DATA' "
+                        + "and l.action='CIPHERTEXT_RECEIVED' and l.resource_id=pa.project_id||'/'||pa.asset_id) limit 20", localNodeId)) {
+            try { ensureSynced(string(row.get("project_id")), string(row.get("asset_id"))); }
+            catch (Exception failure) { log.warn("密文接收补录失败 asset={}: {}", row.get("asset_id"), failure.getMessage()); }
+        }
+    }
+
     /** 跨节点 PROCESSED 物理拉取（幂等：已 SYNCED 直接返回本地副本；FAILED 重拉）。 */
     public Map<String, Object> pullOnAuthorization(String projectId, String assetId) {
+        Map<String, Object> meta = projectAssetMeta(projectId, assetId);
+        boolean expectedCiphertext = Boolean.TRUE.equals(parseMap(meta.get("metadata_json")).get("encrypted"));
+        Long receivedEvents = expectedCiphertext ? jdbc.queryForObject("select count(*) from ds_unified_log where log_type='TEE_DATA' "
+                + "and action='CIPHERTEXT_RECEIVED' and resource_id=?", Long.class, projectId + "/" + assetId) : 0L;
         Map<String, Object> record = findSyncRecord(projectId, assetId);
-        if (record != null && "SYNCED".equals(string(record.get("status")))) {
+        if (record != null && "SYNCED".equals(string(record.get("status"))) && (!expectedCiphertext || receivedEvents != null && receivedEvents > 0)) {
             String localId = string(record.get("local_asset_id"));
             if ("PHYSICAL".equals(string(record.get("sync_mode"))) && notBlank(localId)) {
                 return localAsset(localId);
             }
             return Map.of("syncMode", "SCHEMA", "assetId", assetId);
         }
-        Map<String, Object> meta = projectAssetMeta(projectId, assetId);
         String provider = string(meta.get("provider_node_id"));
         if (Objects.equals(provider, localNodeId)) {
             Map<String, Object> local = localAsset(assetId);
@@ -218,7 +237,7 @@ public class AssetSyncService {
             return Map.of("syncMode", "LOCAL");
         }
         String stage = string(meta.get("data_stage"));
-        if (!"PROCESSED".equals(stage)) {
+        if (!"PROCESSED".equals(stage) && !expectedCiphertext) {
             writeSyncRecord(projectId, assetId, "", provider, "SCHEMA", "SYNCED", "");
             return Map.of("syncMode", "SCHEMA", "assetId", assetId);
         }
@@ -233,11 +252,14 @@ public class AssetSyncService {
             // 密文资产不解析、不物化：本节点只登记密文对象与表结构，明文只在可信运行时内部出现。
             TeeCrypto.EncryptedObject received = ciphertextPayload(dl.bytes());
             if (received != null) {
-                String objectId = teeAssetService.ingestSynced(localNodeId, received);
+                String receiver = dataEvents.institution(localNodeId);
+                String objectId = teeAssetService.ingestSynced(receiver, received, dataEvents.institution(provider));
+                dataEvents.record("CIPHERTEXT_RECEIVED", receiver, projectId, objectId, received);
                 writeSyncRecord(projectId, assetId, "", provider, "SCHEMA", "SYNCED", "");
                 return Map.of("syncMode", "SCHEMA", "assetId", assetId,
                         "encrypted", Boolean.TRUE, "objectId", objectId);
             }
+            if (expectedCiphertext) throw new IllegalStateException("提供方返回内容不是已声明的密文，拒绝明文同步");
             List<List<String>> parsed = CsvUtil.parse(new String(dl.bytes(), StandardCharsets.UTF_8));
             if (parsed.isEmpty()) {
                 throw new IllegalStateException("同步数据表头为空");

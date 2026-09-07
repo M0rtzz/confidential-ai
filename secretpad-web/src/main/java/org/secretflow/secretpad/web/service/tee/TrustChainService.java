@@ -103,7 +103,7 @@ public class TrustChainService {
                              long sizeBytes, List<String> contributors, String exportState, String gmtCreate) {
     }
 
-    public record ObjectsView(List<ObjectItem> items) {
+    public record ObjectsView(List<ObjectItem> items, List<LogItem> recent) {
     }
 
     public record PreviewView(String objectId, long sizeBytes, int previewBytes, String hex) {
@@ -260,7 +260,11 @@ public class TrustChainService {
     }
 
     public ObjectsView objects(String ownerId) {
-        return new ObjectsView(objectItems(ownerId, isCenterInstance()));
+        return new ObjectsView(objectItems(ownerId, isCenterInstance()),
+                mvp.listLogs("TEE_DATA", null, isCenterInstance() ? null : ownerId, null, null, null, 200).stream()
+                        .map(row -> new LogItem(String.valueOf(row.get("created_at")), String.valueOf(row.get("actor")),
+                                String.valueOf(row.get("action")), truthy(row.get("success")), String.valueOf(row.get("detail"))))
+                        .toList());
     }
 
     /**

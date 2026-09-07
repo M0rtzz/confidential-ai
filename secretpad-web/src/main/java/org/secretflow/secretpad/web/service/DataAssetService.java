@@ -38,6 +38,8 @@ import java.util.*;
 @Service
 public class DataAssetService {
     private static final Logger log = LoggerFactory.getLogger(DataAssetService.class);
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.secretflow.secretpad.web.service.tee.TeeProjectEncryption projectEncryption;
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
     private final MinioAssetStorage storage;
@@ -454,6 +456,7 @@ public class DataAssetService {
             String assetId = String.valueOf(item);
             Map<String, Object> asset = require(assetId);
             requireProvider(asset);
+            asset = projectEncryption.ensure(projectId, asset);
             decorateUsageControl(asset, assetId);
             Map<String, Object> snapshot = new LinkedHashMap<>(asset);
             snapshot.put("schema_columns", schemaColumns(asset));
@@ -493,6 +496,7 @@ public class DataAssetService {
         if (projectAssetRepository.existsById(upk)) {
             throw new IllegalStateException("结果已挂载到该项目");
         }
+        asset = projectEncryption.ensure(projectId, asset);
         decorateUsageControl(asset, assetId);
         Map<String, Object> snapshot = new LinkedHashMap<>(asset);
         snapshot.put("schema_columns", schemaColumns(asset));
