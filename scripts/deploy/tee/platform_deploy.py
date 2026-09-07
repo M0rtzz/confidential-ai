@@ -289,7 +289,9 @@ def refresh_runtime_credentials(name, domain):
     prefix = f'data-sandbox-dev-{name}'
     updates = {
         'NODE_ID': domain,
-        'INST_NAME': f'DataSandbox-{name}',
+        # 机构名直接用实例名（center／client-a／client-b）。系统已不叫数据沙箱，
+        # 旧的 DataSandbox- 前缀会出现在项目邀约等界面文案里。
+        'INST_NAME': name,
         'KUSCIA_API_ADDRESS': f'{prefix}-kuscia:8083',
         'KUSCIA_GW_ADDRESS': f'{prefix}-kuscia:80',
         'SECRETPAD_DATA_ASSETS_MINIO_ENDPOINT': f'http://{prefix}-minio:9000',
