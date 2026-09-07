@@ -147,6 +147,24 @@ public class DataSandboxMvpService {
         return jdbc.queryForList(sql.toString(), args.toArray());
     }
 
+    /** TEE 环境加密配置的合法取值；申请时只记录选择，实际可用能力以硬件探测为准。 */
+    private static final Set<String> CPU_ENCRYPTIONS = Set.of("NONE", "SGX", "TDX", "CSV");
+    private static final Set<String> GPU_ENCRYPTIONS = Set.of("NONE", "a100-sim", "gpu-cc");
+    private static final Set<String> ATTESTATION_REQUIREMENTS = Set.of("ALLOW_SIMULATION", "REQUIRE_HARDWARE");
+    private static final Set<String> CONTENT_ALGORITHMS = Set.of("AES-256-GCM", "AES-256-GCM-SIV",
+            "CHACHA20-POLY1305", "XCHACHA20-POLY1305", "AES-256-SIV");
+
+    private static String encryptionChoice(Map<String, Object> request, String field, Set<String> allowed) {
+        String value = string(request.get(field));
+        if (value == null || value.isBlank()) {
+            return allowed.contains("NONE") ? "NONE" : "ALLOW_SIMULATION";
+        }
+        if (!allowed.contains(value)) {
+            throw new IllegalArgumentException("不支持的取值：" + field + "=" + value);
+        }
+        return value;
+    }
+
     @Transactional
     public Map<String, Object> createSandbox(Map<String, Object> request) {
         String id = "sbx-" + shortId();
@@ -184,12 +202,24 @@ public class DataSandboxMvpService {
             int days = Math.max(1, Math.min(nonNegativeInt(request, "validDays", 7), 365));
             expiresAt = LocalDateTime.now().plusDays(days).truncatedTo(ChronoUnit.SECONDS).toString();
         }
+        String cpuEncryption = encryptionChoice(request, "cpuEncryption", CPU_ENCRYPTIONS);
+        String gpuEncryption = encryptionChoice(request, "gpuEncryption", GPU_ENCRYPTIONS);
+        String attestation = encryptionChoice(request, "attestationRequirement", ATTESTATION_REQUIREMENTS);
+        String contentAlgorithm = value(request, "contentAlgorithm", "");
+        if (!"NONE".equals(gpuEncryption) && !contentAlgorithm.isBlank()
+                && !CONTENT_ALGORITHMS.contains(contentAlgorithm)) {
+            throw new IllegalArgumentException("不支持的内容加密算法: " + contentAlgorithm);
+        }
+        if ("NONE".equals(gpuEncryption)) {
+            contentAlgorithm = "";
+        }
         ensureQuota(ownerId);
         assertCapacity(ownerId, cpu, memory, gpu, storage);
         String now = now();
-        jdbc.update("insert into ds_sandbox(id,name,description,owner_id,project_id,image_id,status,expires_at,network_policy,cpu_cores,memory_gb,gpu_count,storage_gb,created_by,created_at,updated_at) values(?,?,?,?,?,?,'STOPPED',?,?,?,?,?,?,?, ?,?)",
+        jdbc.update("insert into ds_sandbox(id,name,description,owner_id,project_id,image_id,status,expires_at,network_policy,cpu_cores,memory_gb,gpu_count,storage_gb,cpu_encryption,gpu_encryption,content_algorithm,attestation_requirement,created_by,created_at,updated_at) values(?,?,?,?,?,?,'STOPPED',?,?,?,?,?,?,?,?,?,?,?, ?,?)",
                 id, name, value(request, "description", ""), ownerId, projectId, imageId,
                 expiresAt, networkPolicy, cpu, memory, gpu, storage,
+                cpuEncryption, gpuEncryption, contentAlgorithm, attestation,
                 value(request, "createdBy", actor()), now, now);
         audit("OPERATION", "SANDBOX_CREATE", "SANDBOX", id, json(request), true);
         // Z-02：创建即按规格预占资源（RESERVED），占住容量直到绑定或释放
