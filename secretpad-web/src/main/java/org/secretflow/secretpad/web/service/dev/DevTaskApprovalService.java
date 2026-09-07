@@ -22,6 +22,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -264,6 +265,7 @@ public class DevTaskApprovalService {
         return result;
     }
 
+    @Transactional
     public Map<String, Object> action(String approvalId, String action, String comment) {
         sandboxApprovals.applySyncedApprovals();
         String act = text(action).trim().toUpperCase(Locale.ROOT);
@@ -293,12 +295,10 @@ public class DevTaskApprovalService {
         }
         history(approvalId, act, "DATA_PROVIDER_REVIEW", to, text(comment));
         publishSnapshot(approvalId);
-        if (text(approval.get("applicant_node_id")).equals(effectiveNode())) {
-            reconcileOne(requireApproval(approvalId));
-        }
         return detail(approvalId);
     }
 
+    @Transactional
     public Map<String, Object> cancel(String approvalId) {
         Map<String, Object> approval = requireApproval(approvalId);
         if (!canCancel(approval)) throw new IllegalArgumentException("仅申请人可撤回待审核任务");
@@ -318,7 +318,8 @@ public class DevTaskApprovalService {
         try { sandboxApprovals.applySyncedApprovals(); }
         catch (Exception failure) { log.warn("apply synced DEV_TASK approvals failed: {}", failure.getMessage()); }
         for (Map<String, Object> approval : jdbc.queryForList("select * from ds_sandbox_approval where approval_type=? "
-                + "and applicant_node_id=? and status in ('APPROVED','REJECTED') and deleted=0 order by updated_at limit 50", TYPE, nodeId)) {
+                + "and applicant_node_id=? and status in ('DATA_PROVIDER_REVIEW','APPROVED','REJECTED') "
+                + "and deleted=0 order by updated_at limit 50", TYPE, nodeId)) {
             try { reconcileOne(approval); }
             catch (Exception failure) { log.warn("reconcile DEV_TASK approval {} failed: {}", approval.get("id"), failure.getMessage()); }
         }
@@ -344,6 +345,7 @@ public class DevTaskApprovalService {
     }
 
     private void reconcileOne(Map<String, Object> approval) {
+        approval = repairStatusFromVotes(approval);
         String taskId = text(payload(approval).get("taskId"));
         if ("REJECTED".equals(text(approval.get("status")))) {
             jdbc.update("update ds_dev_task set status='REVIEW_REJECTED',finished_at=?,updated_at=? "
@@ -355,6 +357,20 @@ public class DevTaskApprovalService {
         if (tasks.isEmpty() || !REVIEW_PENDING.equals(text(tasks.get(0).get("status")))) return;
         assertSnapshotCurrent(taskId);
         dataDevService.getObject().executeApprovedTask(taskId);
+    }
+
+    private Map<String, Object> repairStatusFromVotes(Map<String, Object> approval) {
+        if (!"DATA_PROVIDER_REVIEW".equals(text(approval.get("status")))) return approval;
+        String approvalId = text(approval.get("id"));
+        long rejected = count("select count(1) from ds_sandbox_approval_vote where approval_id=? and status='REJECTED'", approvalId);
+        long total = count("select count(1) from ds_sandbox_approval_vote where approval_id=?", approvalId);
+        long pending = count("select count(1) from ds_sandbox_approval_vote where approval_id=? and status='PENDING'", approvalId);
+        String resolved = rejected > 0 ? "REJECTED" : total > 0 && pending == 0 ? "APPROVED" : "";
+        if (resolved.isBlank()) return approval;
+        jdbc.update("update ds_sandbox_approval set status=?,current_stage=?,approved_at=?,updated_at=? "
+                        + "where id=? and status='DATA_PROVIDER_REVIEW'",
+                resolved, resolved, "APPROVED".equals(resolved) ? now() : "", now(), approvalId);
+        return requireApproval(approvalId);
     }
 
     /** Mandatory server-side gate used by initial execution and every TEE retry. */
