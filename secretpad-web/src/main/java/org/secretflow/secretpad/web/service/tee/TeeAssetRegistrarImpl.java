@@ -139,8 +139,8 @@ public class TeeAssetRegistrarImpl implements TeeAssetRegistrar {
         List<String> granted = approved.isEmpty() ? schema
                 : approved.stream().filter(schema::contains).toList();
         if (granted.isEmpty()) {
-            log.info("资产 {} 的表结构与审批批准的列没有交集，跳过密文资产登记", assetId);
-            return;
+            throw TeeException.of(TeeContract.Error.POLICY_DENIED,
+                    "审批批准字段与该数据表结构无交集，请修正字段授权后重试: " + assetId);
         }
         String owner = ownerOf(text(asset.get("provider_node_id")));
         if (owner.isBlank()) {

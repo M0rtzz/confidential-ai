@@ -311,6 +311,14 @@ public class SandboxApprovalService {
             if (stringList(request.get("teeColumns")).isEmpty()) {
                 payload.put("teeColumns", approvedColumns(projectId, request.get("datasetAssetIds")));
             }
+            if (!stringList(payload.get("teeOperators")).isEmpty()) {
+                List<String> granted = stringList(payload.get("teeColumns"));
+                for (String assetId : stringList(request.get("datasetAssetIds"))) {
+                    if (java.util.Collections.disjoint(granted, approvedColumns(projectId, List.of(assetId)))) {
+                        throw new IllegalArgumentException("授权字段未覆盖所选数据，请重新选择字段: " + assetId);
+                    }
+                }
+            }
         }
         if ("RECYCLE".equals(type)) {
             payload.put("sandboxName", string(requireSandbox(sandboxId).get("name")));
