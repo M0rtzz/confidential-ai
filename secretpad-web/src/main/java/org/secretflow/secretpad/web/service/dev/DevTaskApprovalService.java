@@ -91,7 +91,7 @@ public class DevTaskApprovalService {
             Frozen frozen = freeze(task);
             jdbc.update("insert into ds_dev_task_review(task_id,approval_id,snapshot_version,snapshot_sha256,"
                             + "code_sha256,snapshot_json,provider_nodes_json,ai_owner_id,prompt_version,ai_status,created_at,updated_at) "
-                            + "values(?,'',1,?,?,?,?,?,?,'SCANNING',?,?)",
+                            + "values(?,NULL,1,?,?,?,?,?,?,'SCANNING',?,?)",
                     taskId, frozen.snapshotSha(), frozen.codeSha(), frozen.snapshotJson(),
                     json(frozen.providers()), institutionId(), PROMPT_VERSION, now(), now());
             scan(taskId, task, frozen);
@@ -528,7 +528,7 @@ public class DevTaskApprovalService {
         String message = truncate(failure.getMessage(), 1900);
         jdbc.update("insert or ignore into ds_dev_task_review(task_id,approval_id,snapshot_version,snapshot_sha256,"
                         + "code_sha256,snapshot_json,provider_nodes_json,ai_owner_id,prompt_version,ai_status,created_at,updated_at) "
-                        + "values(?,'',1,'','','{}','[]',?,?,'FAILED',?,?)",
+                        + "values(?,NULL,1,'','','{}','[]',?,?,'FAILED',?,?)",
                 taskId, institutionId(), PROMPT_VERSION, now(), now());
         jdbc.update("update ds_dev_task_review set ai_status='FAILED',scan_error=?,updated_at=? where task_id=?", message, now(), taskId);
         jdbc.update("update ds_dev_task set status='SCAN_FAILED',error_message=?,updated_at=? "
