@@ -418,10 +418,7 @@ public class DevTaskApprovalService {
         }
         Map<String, Object> asset = Map.of();
         if (!assetId.isBlank()) {
-            List<Map<String, Object>> rows = jdbc.queryForList("select id,provider_node_id,version,status,valid_from,valid_until "
-                    + "from ds_data_asset where id=? and deleted=0", assetId);
-            if (rows.isEmpty()) throw new IllegalArgumentException("无法追踪源资产供数方: " + assetId);
-            asset = rows.get(0);
+            asset = sourceAsset(text(task.get("project_id")), assetId);
             providers.add(text(asset.get("provider_node_id")));
         } else {
             providers.add(text(task.get("source_node_id")));
@@ -455,6 +452,33 @@ public class DevTaskApprovalService {
         snapshot.put("providers", providers);
         String snapshotJson = json(snapshot);
         return new Frozen(snapshotJson, sha256(snapshotJson), sha256(text(task.get("content_snapshot"))), List.copyOf(providers));
+    }
+
+    /**
+     * 源资产的供数方与授权状态。本节点资产读 {@code ds_data_asset}；跨机构密文资产按
+     * SCHEMA 模式同步，本节点不存在资产行，回退到项目授权时留存的资产快照。
+     */
+    private Map<String, Object> sourceAsset(String projectId, String assetId) {
+        List<Map<String, Object>> local = jdbc.queryForList("select id,provider_node_id,version,status,valid_from,valid_until "
+                + "from ds_data_asset where id=? and deleted=0", assetId);
+        if (!local.isEmpty()) return local.get(0);
+        List<Map<String, Object>> shared = jdbc.queryForList(
+                "select asset_json,provider_node_id from ds_project_asset "
+                        + "where project_id=? and asset_id=? and deleted=0 and coalesce(is_deleted,0)=0 limit 1",
+                projectId, assetId);
+        if (shared.isEmpty()) throw new IllegalArgumentException("无法追踪源资产供数方: " + assetId);
+        Map<String, Object> snapshot = castMap(parseJson(text(shared.get(0).get("asset_json"))));
+        Map<String, Object> asset = new LinkedHashMap<>();
+        asset.put("id", assetId);
+        asset.put("provider_node_id", text(shared.get(0).get("provider_node_id")));
+        asset.put("version", snapshot.get("version"));
+        asset.put("status", snapshot.get("status"));
+        asset.put("valid_from", snapshot.get("valid_from"));
+        asset.put("valid_until", snapshot.get("valid_until"));
+        if (text(asset.get("provider_node_id")).isBlank()) {
+            throw new IllegalArgumentException("无法追踪源资产供数方: " + assetId);
+        }
+        return asset;
     }
 
     private Report parseReport(String raw, boolean credentialRedacted) {
