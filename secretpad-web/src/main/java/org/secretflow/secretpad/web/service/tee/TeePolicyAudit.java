@@ -2,6 +2,7 @@ package org.secretflow.secretpad.web.service.tee;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PreDestroy;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
@@ -20,6 +21,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /** 在业务事务结束后记录授权裁决，拒绝记录不会随业务回滚丢失。 */
 @Aspect
@@ -30,6 +34,11 @@ public class TeePolicyAudit {
     private final DataSandboxMvpService mvp;
     private final ObjectMapper mapper;
     private final TransactionTemplate transaction;
+    private final ExecutorService writer = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "tee-policy-audit-writer");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     public TeePolicyAudit(DataSandboxMvpService mvp, ObjectMapper mapper, PlatformTransactionManager manager) {
         this.mvp = mvp;
@@ -103,7 +112,9 @@ public class TeePolicyAudit {
                 @Override
                 public void afterCompletion(int status) {
                     boolean committed = status == STATUS_COMMITTED;
-                    persist(actor, action, resourceId, committed ? json : json + "；业务事务已回滚", success && committed);
+                    // 此时原事务连接尚未归还，交给独立线程写入，避免单连接池内等待自身释放。
+                    writer.execute(() -> persist(actor, action, resourceId,
+                            committed ? json : json + "；业务事务已回滚", success && committed));
                 }
             });
         } else persist(actor, action, resourceId, json, success);
@@ -115,6 +126,16 @@ public class TeePolicyAudit {
                     actor, action, "TEE_POLICY", resource, detail, success));
         } catch (Exception error) {
             log.warn("授权审计记录写入失败: {}", error.getMessage());
+        }
+    }
+
+    @PreDestroy
+    void close() {
+        writer.shutdown();
+        try {
+            writer.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 }
