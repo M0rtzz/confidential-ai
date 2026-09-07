@@ -25,7 +25,11 @@ public class DataAssetController {
     private final SandboxDataControlService dataControl;
     public DataAssetController(DataAssetService service, DatabaseAssetImportService databaseImport, SandboxDataControlService dataControl){this.service=service;this.databaseImport=databaseImport;this.dataControl=dataControl;}
     @PostMapping(value="/files/upload", consumes="multipart/form-data")
-    public SecretPadResponse<Map<String,Object>> upload(@RequestPart("file") MultipartFile file) throws Exception {
+    public SecretPadResponse<Map<String,Object>> upload(@RequestPart("file") MultipartFile file,
+            @RequestParam(defaultValue="FILE") String ingestionType,
+            @RequestParam(defaultValue="") String generationConfigVersion,
+            @RequestParam(defaultValue="") String generationModelId) throws Exception {
+        if(!Set.of("FILE","AI_GENERATED").contains(ingestionType)) throw new IllegalArgumentException("数据来源类型无效");
         String type=file.getContentType()==null?"":file.getContentType().toLowerCase(Locale.ROOT);
         boolean png="image/png".equals(type); boolean csv="text/csv".equals(type)||file.getOriginalFilename()!=null&&file.getOriginalFilename().toLowerCase(Locale.ROOT).endsWith(".csv");
         long max=png?20L*1024*1024:500L*1024*1024;
@@ -39,7 +43,12 @@ public class DataAssetController {
             String checksum=HexFormat.of().formatHex(digest.digest());
             String key="uploads/"+UUID.randomUUID()+"/"+(file.getOriginalFilename()==null?"asset":file.getOriginalFilename());
             String uri=service.storage().put(key,temp.toFile(),png?"image/png":"text/csv",checksum);
-            return SecretPadResponse.success(service.registerUpload(file.getOriginalFilename(),png?"image/png":"text/csv","RAW",uri,checksum,file.getSize()));
+            Map<String,Object> generationMetadata=new LinkedHashMap<>();
+            if("AI_GENERATED".equals(ingestionType)) {
+                generationMetadata.put("generationConfigVersion",generationConfigVersion);
+                generationMetadata.put("generationModelId",generationModelId);
+            }
+            return SecretPadResponse.success(service.registerStored(file.getOriginalFilename(),png?"image/png":"text/csv","RAW",uri,checksum,file.getSize(),ingestionType,generationMetadata));
         } finally {
             Files.deleteIfExists(temp);
         }

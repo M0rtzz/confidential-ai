@@ -88,10 +88,17 @@ public class DataAssetService {
 
     @Transactional
     public Map<String,Object> registerStored(String name, String contentType, String stage, String uri, String checksum, long size, String ingestionType) {
+        return registerStored(name,contentType,stage,uri,checksum,size,ingestionType,Map.of());
+    }
+
+    @Transactional
+    public Map<String,Object> registerStored(String name, String contentType, String stage, String uri,
+            String checksum, long size, String ingestionType, Map<String,Object> extraMetadata) {
         String id="asset-"+UUID.randomUUID().toString().replace("-","").substring(0,12);
         String modality="image/png".equals(contentType)?"IMAGE":"TABULAR";
         String datatableId="TABULAR".equals(modality)?id:"";
-        Map<String,Object> metadata=Map.of("contentType",contentType,"sizeBytes",size,"sha256",checksum);
+        Map<String,Object> metadata=new LinkedHashMap<>(Map.of("contentType",contentType,"sizeBytes",size,"sha256",checksum));
+        if(extraMetadata!=null) metadata.putAll(extraMetadata);
         jdbc.update("insert into ds_data_asset(id,name,provider_node_id,processor_node_id,ingestion_type,modality,data_stage,source_asset_id,datatable_id,storage_uri,metadata_json,created_by,created_at,updated_at,version,status,deleted) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'ACTIVE',0)",id,name,owner(),owner(),ingestionType,modality,stage,"",datatableId,uri,json(metadata),actor(),now(),now());
         Map<String, Object> asset = require(id);
         ensureMaterialized(asset);
