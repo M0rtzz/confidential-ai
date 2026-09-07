@@ -39,7 +39,7 @@ public class ConfidentialModelService {
     private static final int MAX_CIPHER_CHUNK_BYTES = MODEL_CIPHER_CHUNK_BYTES + 64;
     private static final Set<String> ALGORITHMS = Set.of(
             "AES-256-GCM", "AES-256-GCM-SIV", "CHACHA20-POLY1305",
-            "XCHACHA20-POLY1305", "AES-256-SIV");
+            "XCHACHA20-POLY1305", "AES-256-SIV", "SM4-GCM");
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
@@ -169,6 +169,7 @@ public class ConfidentialModelService {
     public Map<String, Object> capabilities() {
         List<Map<String, Object>> values = new ArrayList<>();
         values.add(capability("AES-256-GCM", 32, 12, true));
+        values.add(capability("SM4-GCM", 16, 12, false));
         values.add(capability("AES-256-GCM-SIV", 32, 12, false));
         values.add(capability("CHACHA20-POLY1305", 32, 12, false));
         values.add(capability("XCHACHA20-POLY1305", 32, 24, false));
