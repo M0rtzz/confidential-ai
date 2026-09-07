@@ -179,8 +179,9 @@ public class DataAssetService {
         try {
             String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(csv));
             if (teeAssetEncryptor.available()) {
-                materializeGovernedPlaintext(resultDatatableId, csv, checksum);
-                var sealed = teeAssetEncryptor.seal(teeOwner(), resultDatatableId, "1", csv);
+                GovernedOwner resultOwner = governedOwner(taskId);
+                materializeGovernedPlaintext(resultDatatableId, resultOwner.providerNodeId(), csv, checksum);
+                var sealed = teeAssetEncryptor.seal(resultOwner.instId(), resultDatatableId, "1", csv);
                 temp=Files.createTempFile("secretpad-governed-",".enc");
                 Files.write(temp, sealed.payload());
                 String payloadChecksum=HexFormat.of().formatHex(
@@ -207,7 +208,8 @@ public class DataAssetService {
             String uri=storage.put("governed/"+taskId+"/"+resultDatatableId+".csv",temp.toFile(),"text/csv",checksum);
             return registerGovernedResult(taskId,resultNodeId,resultDatatableId,uri,
                     Map.of("sizeBytes",csv.length,"sha256",checksum,"contentType","text/csv","encrypted",Boolean.FALSE));
-        }catch(Exception e){throw new IllegalStateException("保存抽样脱敏结果失败",e);}
+        }catch(GovernanceResultIdentityException e){throw e;}
+        catch(Exception e){throw new IllegalStateException("保存抽样脱敏结果失败",e);}
         finally {if(temp!=null)try{Files.deleteIfExists(temp);}catch(IOException ignored){}}
     }
 
@@ -217,7 +219,7 @@ public class DataAssetService {
      * <p>抽样脱敏是本机构的本地明文处理，产出在本地仍需可用；物化后节点库索引已存在，
      * 后续的 {@code ensureMaterialized} 不会再去读那份已经是密文的存储对象。
      */
-    private void materializeGovernedPlaintext(String assetId, byte[] csv, String checksum) {
+    private void materializeGovernedPlaintext(String assetId, String providerNodeId, byte[] csv, String checksum) {
         List<List<String>> parsed = org.secretflow.secretpad.web.service.governance.CsvUtil.parse(
                 new String(csv, StandardCharsets.UTF_8));
         if (parsed.isEmpty()) {
@@ -226,16 +228,35 @@ public class DataAssetService {
         List<String> header = new ArrayList<>(parsed.get(0));
         List<List<String>> rows = parsed.size() > 1
                 ? new ArrayList<>(parsed.subList(1, parsed.size())) : new ArrayList<>();
-        nodeDatasetStore.materializeExternal(assetId, owner(), assetId, header, rows, checksum);
+        nodeDatasetStore.materializeExternal(assetId, providerNodeId, assetId, header, rows, checksum);
     }
 
-    /** 契约层的机构标识；与密钥台账、授权规则使用同一个取值，不用平台节点标识替代。 */
-    private String teeOwner() {
-        UserContextDTO user = UserContext.getUserOrNotExist();
-        if (user == null || user.getOwnerId() == null || user.getOwnerId().isBlank()) {
-            throw new IllegalStateException("缺少机构标识，无法为抽样脱敏产出申领密钥");
+    /** 后台轮询从持久化资产恢复归属，节点标识用于物化，机构标识用于申领密钥。 */
+    private GovernedOwner governedOwner(String taskId) {
+        List<Map<String, Object>> sources = jdbc.queryForList(
+                "select a.provider_node_id from ds_governance_task t join ds_data_asset a "
+                        + "on (a.datatable_id=t.source_datatable_id or a.id=t.source_datatable_id) "
+                        + "where t.id=? and t.deleted=0 and a.deleted=0 order by a.created_at desc limit 1", taskId);
+        String provider = sources.isEmpty() ? "" : Objects.toString(sources.get(0).get("provider_node_id"), "");
+        if (provider.isBlank()) {
+            throw new GovernanceResultIdentityException("源资产缺少所属节点，无法为抽样脱敏产出申领密钥");
         }
-        return user.getOwnerId();
+        List<Map<String, Object>> institutions = jdbc.queryForList(
+                "select distinct inst_id from node where (node_id=? or inst_id=?) and is_deleted=0", provider, provider);
+        String instId = institutions.size() == 1 ? Objects.toString(institutions.get(0).get("inst_id"), "") : "";
+        if (instId.isBlank()) {
+            throw new GovernanceResultIdentityException("源资产所属节点未关联唯一机构，无法为抽样脱敏产出申领密钥");
+        }
+        return new GovernedOwner(provider, instId);
+    }
+
+    private record GovernedOwner(String providerNodeId, String instId) {}
+
+    /** 机构配置缺失需要修复配置，重复轮询无法恢复。 */
+    public static class GovernanceResultIdentityException extends IllegalStateException {
+        public GovernanceResultIdentityException(String message) {
+            super(message);
+        }
     }
 
     private Map<String, Object> registerGovernedResult(String taskId, String resultNodeId, String resultDatatableId,

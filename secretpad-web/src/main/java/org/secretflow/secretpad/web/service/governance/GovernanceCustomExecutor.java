@@ -322,7 +322,14 @@ public class GovernanceCustomExecutor {
             delete(jobId);
             return;
         }
-        Map<String,Object> resultAsset=dataAssetService.registerGovernedResult(taskId,nodeId,resultBody);
+        Map<String,Object> resultAsset;
+        try {
+            resultAsset = dataAssetService.registerGovernedResult(taskId, nodeId, resultBody);
+        } catch (DataAssetService.GovernanceResultIdentityException e) {
+            fail(taskId, e.getMessage(), "gov:" + taskId + ":failed");
+            delete(jobId);
+            return;
+        }
         String domainDataId=string(resultAsset.get("datatable_id"));
         int affected = jdbc.update("update ds_governance_task set status=?,result_node_id=?,result_datatable_id=?,"
                         + "source_rows=?,result_rows=?,finished_at=?,updated_at=? where id=? and status=?",
