@@ -12,6 +12,7 @@ package org.secretflow.secretpad.web.controller;
 
 import org.secretflow.secretpad.service.model.common.SecretPadResponse;
 import org.secretflow.secretpad.web.service.dev.DataDevService;
+import org.secretflow.secretpad.web.service.dev.DevTaskApprovalService;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -42,9 +43,11 @@ import java.util.Map;
 public class DataDevController {
 
     private final DataDevService service;
+    private final DevTaskApprovalService approvals;
 
-    public DataDevController(DataDevService service) {
+    public DataDevController(DataDevService service, DevTaskApprovalService approvals) {
         this.service = service;
+        this.approvals = approvals;
     }
 
     /* ------------------------------- 制品 ------------------------------- */
@@ -212,6 +215,46 @@ public class DataDevController {
     @PostMapping("/tasks/retry")
     public SecretPadResponse<Map<String, Object>> retryTask(@RequestBody Map<String, Object> request) {
         return SecretPadResponse.success(service.retryTask(String.valueOf(request.get("id"))));
+    }
+
+    @Operation(summary = "我的 TEE 计算任务审核申请")
+    @GetMapping("/task-approvals/mine")
+    public SecretPadResponse<List<Map<String, Object>>> approvalMine(
+            @RequestParam(defaultValue = "") String status,
+            @RequestParam(defaultValue = "") String keyword) {
+        return SecretPadResponse.success(approvals.listMine(status, keyword));
+    }
+
+    @Operation(summary = "待本机构审核的 TEE 计算任务")
+    @GetMapping("/task-approvals/pending")
+    public SecretPadResponse<List<Map<String, Object>>> approvalPending(
+            @RequestParam(defaultValue = "") String keyword) {
+        return SecretPadResponse.success(approvals.listPending(keyword));
+    }
+
+    @Operation(summary = "TEE 计算任务审核详情（含不可变代码摘要、AI 报告、投票与历史）")
+    @GetMapping("/task-approvals/detail")
+    public SecretPadResponse<Map<String, Object>> approvalDetail(@RequestParam String id) {
+        return SecretPadResponse.success(approvals.detail(id));
+    }
+
+    @Operation(summary = "供数方同意或拒绝 TEE 计算任务")
+    @PostMapping("/task-approvals/action")
+    public SecretPadResponse<Map<String, Object>> approvalAction(@RequestBody Map<String, Object> request) {
+        return SecretPadResponse.success(approvals.action(String.valueOf(request.get("id")),
+                String.valueOf(request.get("action")), String.valueOf(request.getOrDefault("comment", ""))));
+    }
+
+    @Operation(summary = "申请人撤回待审核 TEE 计算任务")
+    @PostMapping("/task-approvals/cancel")
+    public SecretPadResponse<Map<String, Object>> approvalCancel(@RequestBody Map<String, Object> request) {
+        return SecretPadResponse.success(approvals.cancel(String.valueOf(request.get("id"))));
+    }
+
+    @Operation(summary = "有界重试失败的 AI 代码扫描")
+    @PostMapping("/tasks/retry-scan")
+    public SecretPadResponse<Map<String, Object>> retryScan(@RequestBody Map<String, Object> request) {
+        return SecretPadResponse.success(approvals.retryScan(String.valueOf(request.get("id"))));
     }
 
     @Operation(summary = "源数据预览（强制权限校验，仅前 limit 行）")

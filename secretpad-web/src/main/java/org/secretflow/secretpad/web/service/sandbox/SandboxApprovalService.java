@@ -144,7 +144,8 @@ public class SandboxApprovalService {
                 + "from ds_sandbox_approval a "
                 + "left join project p on p.project_id=a.project_id and p.is_deleted=0 "
                 + "left join ds_sandbox_approval_vote v on v.approval_id=a.id "
-                + "where a.deleted=0 and (a.submitter=? or a.applicant_node_id=? or v.voter_node_id=?");
+                + "where a.deleted=0 and a.approval_type in " + EXECUTABLE_TYPES_SQL
+                + " and (a.submitter=? or a.applicant_node_id=? or v.voter_node_id=?");
         List<Object> args = new ArrayList<>(List.of(current, currentNode, currentNode));
         if (admin) {
             sql.append(" or 1=1");
@@ -173,6 +174,7 @@ public class SandboxApprovalService {
     public Map<String, Object> approval(String id) {
         applySyncedApprovals();
         Map<String, Object> data = requireApproval(id);
+        assertHandledType(data);
         assertApprovalVisible(data);
         data.put("history", approvalHistory(id));
         data.put("votes", jdbc.queryForList("select * from ds_sandbox_approval_vote where approval_id=? order by voter_node_id", id));
@@ -375,6 +377,7 @@ public class SandboxApprovalService {
         }
         String comment = value(request, "comment", "");
         Map<String, Object> approval = requireApproval(id);
+        assertHandledType(approval);
         String from = string(approval.get("status"));
         assertApprovalVisible(approval);
         switch (action) {
@@ -1343,6 +1346,13 @@ public class SandboxApprovalService {
                     id));
         } catch (EmptyResultDataAccessException e) {
             throw new IllegalArgumentException("申请单不存在: " + id);
+        }
+    }
+
+    private void assertHandledType(Map<String, Object> approval) {
+        String type = string(approval.get("approval_type"));
+        if (!APPROVAL_TYPES.contains(type)) {
+            throw new IllegalArgumentException("申请类型 " + type + " 必须使用对应的独立审批接口");
         }
     }
 

@@ -93,6 +93,7 @@ public class DataDevService {
     private final DevJobExecutor devJobExecutor;
     private final SandboxDbService sandboxDb;
     private final SandboxDataControlService dataControl;
+    private final DevTaskApprovalService devTaskApprovals;
 
     @Value("${secretpad.data.dir-path:/app/data/}")
     private String storeDir;
@@ -127,7 +128,8 @@ public class DataDevService {
             DataSandboxMvpService mvp,
             DevJobExecutor devJobExecutor,
             SandboxDbService sandboxDb,
-            SandboxDataControlService dataControl) {
+            SandboxDataControlService dataControl,
+            DevTaskApprovalService devTaskApprovals) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.kuscia = kuscia;
@@ -137,6 +139,7 @@ public class DataDevService {
         this.devJobExecutor = devJobExecutor;
         this.sandboxDb = sandboxDb;
         this.dataControl = dataControl;
+        this.devTaskApprovals = devTaskApprovals;
     }
 
     /* ============================== 权限 ============================== */
@@ -598,6 +601,10 @@ public class DataDevService {
         audit("DEV_TASK_SUBMIT", "DEV_TASK", taskId,
                 "type=SQL mode=" + runMode + " sandbox=" + sandboxId + " table=" + sourceTable, true);
         dispatch("dev.task.submitted", Map.of("id", taskId, "type", "SQL", "mode", runMode));
+        if (devJobExecutor.teeEnabled()) {
+            devTaskApprovals.submit(taskId);
+            return taskDetail(taskId);
+        }
         try {
             claimTask(taskId);
             if (devJobExecutor.teeEnabled()) {
@@ -669,6 +676,10 @@ public class DataDevService {
         audit("DEV_TASK_SUBMIT", "DEV_TASK", taskId,
                 "type=JAR mode=" + runMode + " sandbox=" + sandboxId + " table=" + sourceTable, true);
         dispatch("dev.task.submitted", Map.of("id", taskId, "type", "JAR", "mode", runMode));
+        if (devJobExecutor.teeEnabled()) {
+            devTaskApprovals.submit(taskId);
+            return taskDetail(taskId);
+        }
         try {
             claimTask(taskId);
             devJobExecutor.submitSandbox(taskId, nodeId, inputB64, "JAR", jarB64, params, List.of(),
@@ -697,6 +708,10 @@ public class DataDevService {
         audit("DEV_TASK_SUBMIT", "DEV_TASK", taskId,
                 "type=PYTHON mode=" + runMode + " sandbox=" + sandboxId + " table=" + sourceTable, true);
         dispatch("dev.task.submitted", Map.of("id", taskId, "type", "PYTHON", "mode", runMode));
+        if (devJobExecutor.teeEnabled()) {
+            devTaskApprovals.submit(taskId);
+            return taskDetail(taskId);
+        }
         try {
             claimTask(taskId);
             devJobExecutor.submitSandbox(taskId, nodeId, inputB64, "PYTHON", script, params, dependencyNames,
@@ -740,6 +755,10 @@ public class DataDevService {
                 "type=FUNCTION mode=" + runMode + " sandbox=" + sandboxId + " table=" + sourceTable
                         + " fn=" + spec.name(), true);
         dispatch("dev.task.submitted", Map.of("id", taskId, "type", "FUNCTION", "mode", runMode));
+        if (devJobExecutor.teeEnabled()) {
+            devTaskApprovals.submit(taskId);
+            return taskDetail(taskId);
+        }
         try {
             claimTask(taskId);
             devJobExecutor.submitSandbox(taskId, nodeId, inputB64, "FUNCTION", wrapper, params,
@@ -847,6 +866,10 @@ public class DataDevService {
                 params, sql, List.of());
         audit("DEV_TASK_SUBMIT", "DEV_TASK", taskId, "type=SQL mode=" + runMode + " source=" + nodeId + "/" + datatableId, true);
         dispatch("dev.task.submitted", Map.of("id", taskId, "type", "SQL", "mode", runMode));
+        if (devJobExecutor.teeEnabled()) {
+            devTaskApprovals.submit(taskId);
+            return taskDetail(taskId);
+        }
         try {
             claimTask(taskId);
             if (devJobExecutor.teeEnabled()) {
@@ -916,6 +939,10 @@ public class DataDevService {
                 artifactLabel, List.of());
         audit("DEV_TASK_SUBMIT", "DEV_TASK", taskId, "type=JAR mode=" + runMode + " source=" + nodeId + "/" + datatableId, true);
         dispatch("dev.task.submitted", Map.of("id", taskId, "type", "JAR", "mode", runMode));
+        if (devJobExecutor.teeEnabled()) {
+            devTaskApprovals.submit(taskId);
+            return taskDetail(taskId);
+        }
         try {
             claimTask(taskId);
             devJobExecutor.submit(taskId, nodeId, inputB64, "JAR", jarB64, params, List.of());
@@ -941,6 +968,10 @@ public class DataDevService {
                 script, dependencyNames);
         audit("DEV_TASK_SUBMIT", "DEV_TASK", taskId, "type=PYTHON mode=" + runMode + " source=" + nodeId + "/" + datatableId, true);
         dispatch("dev.task.submitted", Map.of("id", taskId, "type", "PYTHON", "mode", runMode));
+        if (devJobExecutor.teeEnabled()) {
+            devTaskApprovals.submit(taskId);
+            return taskDetail(taskId);
+        }
         try {
             claimTask(taskId);
             devJobExecutor.submit(taskId, nodeId, inputB64, "PYTHON", script, params, dependencyNames);
@@ -1056,6 +1087,9 @@ public class DataDevService {
         if (!STATUS_FAILED.equals(string(task.get("status")))) {
             throw new IllegalStateException(DevErrors.DEV_STATE_CONFLICT + ": 仅 FAILED 任务可重试");
         }
+        if (devJobExecutor.teeEnabled()) {
+            devTaskApprovals.assertApprovedForExecution(id);
+        }
         int retries = intValue(task.get("retry_count"), 0);
         // 运行时尚未接纳的提交失败不消耗计算重试额度，配置修复后可继续提交原任务。
         boolean runtimeAccepted = !devJobExecutor.teeEnabled() || Integer.valueOf(1).equals(jdbc.queryForObject(
@@ -1142,6 +1176,121 @@ public class DataDevService {
             failTask(id, e);
         }
         return taskDetail(id);
+    }
+
+    /**
+     * 唯一的 TEE 审批后首轮执行入口。只从持久化任务快照恢复参数，条件更新保证同一任务只被认领一次；
+     * 调用方不能传入代码、数据或审批人身份。
+     */
+    public void executeApprovedTask(String id) {
+        if (!devJobExecutor.teeEnabled()) {
+            throw new IllegalStateException(DevErrors.DEV_STATE_CONFLICT + ": 审批后执行仅适用于 TEE 任务");
+        }
+        devTaskApprovals.assertApprovedForExecution(id);
+        Map<String, Object> task = requireTask(id);
+        try {
+            revalidateApprovedSource(task);
+        } catch (RuntimeException expired) {
+            jdbc.update("update ds_dev_task set status='REVIEW_EXPIRED',error_message=?,finished_at=?,updated_at=? "
+                            + "where id=? and status='REVIEW_PENDING'",
+                    truncate(expired.getMessage(), 1900), now(), now(), id);
+            throw expired;
+        }
+        int claimed = jdbc.update("update ds_dev_task set status=?,started_at=?,error_message='',updated_at=? "
+                        + "where id=? and status='REVIEW_PENDING'",
+                STATUS_RUNNING, now(), now(), id);
+        if (claimed != 1) {
+            // 定时恢复及重复审批消息是正常竞争；已被认领或已结束时不得再创建 Job。
+            return;
+        }
+        String execType = string(task.get("exec_type"));
+        String nodeId = string(task.get("source_node_id"));
+        String sandboxId = string(task.get("sandbox_id"));
+        String sourceTable = string(task.get("source_table_name"));
+        Map<String, Object> params = parseJsonMap(string(task.get("params")));
+        try {
+            if (notBlank(sandboxId)) {
+                switch (execType) {
+                    case "SQL" -> {
+                        String sql = string(task.get("content_snapshot"));
+                        devJobExecutor.submitSql(id, nodeId, "",
+                                DevSqlEngine.renderBounded(sql, params, sqlLimit), params, sourceTable, "dev");
+                    }
+                    case "JAR" -> devJobExecutor.submitSandbox(id, nodeId, "", "JAR",
+                            approvedJarBase64(task), params, List.of(), sandboxId, sourceTable,
+                            string(task.get("output_table_name")));
+                    case "PYTHON" -> devJobExecutor.submitSandbox(id, nodeId, "", "PYTHON",
+                            string(task.get("content_snapshot")), params,
+                            parseStringList(string(task.get("dependency_names"))), sandboxId, sourceTable,
+                            string(task.get("output_table_name")));
+                    case "FUNCTION" -> {
+                        String renderedSql = DevSqlEngine.renderBounded(string(task.get("sql_template")), params, sqlLimit);
+                        String wrapper = DevFunctionWrapper.generate(string(task.get("function_name")),
+                                intValue(task.get("function_nargs"), -1), string(task.get("function_source")), renderedSql);
+                        devJobExecutor.submitSandbox(id, nodeId, "", "FUNCTION", wrapper, params,
+                                parseStringList(string(task.get("dependency_names"))), sandboxId, sourceTable,
+                                string(task.get("output_table_name")));
+                    }
+                    default -> throw new IllegalArgumentException(DevErrors.DEV_PARAM_INVALID + ": 未知 execType " + execType);
+                }
+            } else {
+                switch (execType) {
+                    case "SQL" -> {
+                        String sql = string(task.get("content_snapshot"));
+                        devJobExecutor.submitSql(id, nodeId, "",
+                                DevSqlEngine.renderBounded(sql, params, sqlLimit), params,
+                                DevSqlEngine.detectTableName(sql), "dev");
+                    }
+                    case "JAR" -> devJobExecutor.submit(id, nodeId, "", "JAR",
+                            approvedJarBase64(task), params, List.of());
+                    case "PYTHON" -> devJobExecutor.submit(id, nodeId, "", "PYTHON",
+                            string(task.get("content_snapshot")), params,
+                            parseStringList(string(task.get("dependency_names"))));
+                    default -> throw new IllegalArgumentException(DevErrors.DEV_PARAM_INVALID + ": 未知 execType " + execType);
+                }
+            }
+            audit("DEV_TASK_APPROVED_EXECUTE", "DEV_TASK", id, "snapshot-only execution", true);
+            dispatch("dev.task.approvedExecute", Map.of("id", id));
+        } catch (Exception failure) {
+            log.warn("Approved TEE task {} failed to start: {}", id, failure.getMessage(), failure);
+            failTask(id, failure);
+        }
+    }
+
+    private String approvedJarBase64(Map<String, Object> task) throws IOException {
+        String artifactId = string(task.get("artifact_id"));
+        int version = intValue(task.get("version"), 0);
+        if (!notBlank(artifactId) || version <= 0) {
+            throw new IllegalStateException("已审核 JAR 任务缺少不可变制品版本");
+        }
+        Map<String, Object> versionRow = requireVersion(artifactId, version);
+        byte[] jar = Files.readAllBytes(resolveStorePath(string(versionRow.get("file_path"))));
+        if (jar.length > maxJarBytes) throw new IllegalArgumentException(DevErrors.DEV_INPUT_TOO_LARGE + ": JAR 超过上限 " + maxJarBytes);
+        String expected = string(versionRow.get("sha256"));
+        String actual = sha256Hex(jar);
+        if (notBlank(expected) && !expected.equalsIgnoreCase(actual)) {
+            throw new IllegalStateException("JAR 文件摘要与冻结版本不一致");
+        }
+        return Base64.getEncoder().encodeToString(jar);
+    }
+
+    private void revalidateApprovedSource(Map<String, Object> task) {
+        String sandboxId = string(task.get("sandbox_id"));
+        String assetId = string(task.get("source_asset_id"));
+        if (notBlank(sandboxId)) {
+            String sourceTable = string(task.get("source_table_name"));
+            dataControl.requireMountTableUsable(sandboxId, sourceTable);
+            if (notBlank(assetId)) dataControl.requireMountAssetUsable(sandboxId, assetId);
+            if (!sandboxDb.hasTable(sandboxId, sourceTable)) throw new IllegalStateException("审核期间源表已失效");
+            return;
+        }
+        String projectId = string(task.get("project_id"));
+        if (notBlank(projectId)) {
+            Long count = jdbc.queryForObject("select count(1) from project_datatable where project_id=? "
+                            + "and node_id=? and datatable_id=? and is_deleted=0",
+                    Long.class, projectId, task.get("source_node_id"), task.get("source_datatable_id"));
+            if (count == null || count == 0) throw new IllegalStateException("审核期间数据授权已失效");
+        }
     }
 
     /**
