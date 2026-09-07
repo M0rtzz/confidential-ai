@@ -28,6 +28,7 @@ import org.secretflow.secretpad.web.service.MinioAssetStorage;
 import org.secretflow.secretpad.web.service.storage.NodeDatasetStore;
 import org.secretflow.secretpad.web.service.storage.SandboxDbService;
 import org.secretflow.secretpad.web.service.sync.AssetSyncService;
+import org.secretflow.secretpad.web.service.dev.DevTaskApprovalService;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -94,6 +95,7 @@ public class SandboxApprovalService {
     private final SandboxDbService sandboxDbService;
     private final NodeDatasetStore nodeDatasetStore;
     private final ObjectProvider<TeeAssetRegistrar> teeAssetRegistrar;
+    private final ObjectProvider<DevTaskApprovalService> devTaskApprovalService;
     private final Map<String, Integer> appliedSnapshotHashes = new ConcurrentHashMap<>();
 
     @Value("${secretpad.node-id:kuscia-system}")
@@ -118,7 +120,8 @@ public class SandboxApprovalService {
             AssetSyncService assetSyncService,
             SandboxDbService sandboxDbService,
             NodeDatasetStore nodeDatasetStore,
-            ObjectProvider<TeeAssetRegistrar> teeAssetRegistrar) {
+            ObjectProvider<TeeAssetRegistrar> teeAssetRegistrar,
+            ObjectProvider<DevTaskApprovalService> devTaskApprovalService) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.service = service;
@@ -131,6 +134,7 @@ public class SandboxApprovalService {
         this.sandboxDbService = sandboxDbService;
         this.nodeDatasetStore = nodeDatasetStore;
         this.teeAssetRegistrar = teeAssetRegistrar;
+        this.devTaskApprovalService = devTaskApprovalService;
     }
 
     /* ------------------------------- 申请单查询 ------------------------------- */
@@ -173,6 +177,12 @@ public class SandboxApprovalService {
     public Map<String, Object> approval(String id) {
         applySyncedApprovals();
         Map<String, Object> data = requireApproval(id);
+        if ("DEV_TASK".equals(String.valueOf(data.get("approval_type")))) {
+            DevTaskApprovalService taskService = devTaskApprovalService.getIfAvailable();
+            if (taskService != null) {
+                return taskService.detail(id);
+            }
+        }
         assertHandledType(data);
         assertApprovalVisible(data);
         data.put("history", approvalHistory(id));
@@ -376,6 +386,19 @@ public class SandboxApprovalService {
         }
         String comment = value(request, "comment", "");
         Map<String, Object> approval = requireApproval(id);
+        if ("DEV_TASK".equals(String.valueOf(approval.get("approval_type")))) {
+            DevTaskApprovalService taskService = devTaskApprovalService.getIfAvailable();
+            if (taskService == null) {
+                throw new IllegalStateException("DEV_TASK 审批服务不可用");
+            }
+            if ("CANCEL".equals(action)) {
+                return taskService.cancel(id);
+            }
+            if ("APPROVE".equals(action) || "REJECT".equals(action)) {
+                return taskService.action(id, action, comment);
+            }
+            throw new IllegalArgumentException("DEV_TASK 任务审批不支持动作: " + action);
+        }
         assertHandledType(approval);
         String from = string(approval.get("status"));
         assertApprovalVisible(approval);
