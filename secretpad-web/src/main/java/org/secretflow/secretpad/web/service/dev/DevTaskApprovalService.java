@@ -370,7 +370,9 @@ public class DevTaskApprovalService {
         jdbc.update("update ds_sandbox_approval set status=?,current_stage=?,approved_at=?,updated_at=? "
                         + "where id=? and status='DATA_PROVIDER_REVIEW'",
                 resolved, resolved, "APPROVED".equals(resolved) ? now() : "", now(), approvalId);
-        return requireApproval(approvalId);
+        Map<String, Object> repaired = requireApproval(approvalId);
+        publishSnapshot(approvalId);
+        return repaired;
     }
 
     /** Mandatory server-side gate used by initial execution and every TEE retry. */
